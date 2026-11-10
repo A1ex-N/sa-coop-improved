@@ -107,6 +107,15 @@ void __cdecl HookGameProcess() {
 }
 
 void __fastcall HookMenuProcess(void* self, void* edx) {
+    // The start menu (FrontendIdle) never reaches CGame::Process, so HookUpdatePads (the in-game feed) does not run:
+    // the co-op window got no controller state there and the pad did nothing in it. CPad::UpdatePads has run just
+    // before this call, so the pad is current: give it to the UI, then hide it from the game's own menu while a
+    // window of ours is open (else the cursor moves and Cross selects an item behind the window).
+    if (game::GameState() != game::GAME_STATE_IDLE) {
+        game::CPad* pad = game::GetPad(0);
+        ui::In().FeedControllerState(pad->NewState);
+        if (ui::In().KeyboardCaptured() || ui::In().MouseCaptured()) pad->NewState = game::CControllerState{};
+    }
     g_origMenuProcess(self, edx);
     g_lastFrameMs = NowMs();  // a pause in the menu is no lag
     // FrontendIdle: CGame::Process is not running
