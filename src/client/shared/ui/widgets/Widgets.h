@@ -1,5 +1,5 @@
 #pragma once
-// Tiny immediate-mode widgets for the co-op menus (mouse + keyboard), drawn in the style of the game's own menus:
+// Tiny immediate-mode widgets for the co-op menus (mouse, keyboard, and controller cursor), drawn in the style of the game's own menus:
 // black panels, light blue for the selected item, slate blue for the rest.
 #include <cstdint>
 #include <string>

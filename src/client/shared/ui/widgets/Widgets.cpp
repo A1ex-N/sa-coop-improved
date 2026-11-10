@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,9 @@ std::vector<std::string> g_textBoxes;
 bool g_tabPressed = false, g_shiftTab = false;
 size_t g_caret = std::string::npos;
 uint64_t g_caretTime = 0;
+std::wstring* g_focusedValue = nullptr;
+size_t g_focusedMaxLen = 0;
+bool g_focusedDigitsOnly = false;
 
 constexpr uint32_t kPanelBg = 0xFF000000;
 constexpr uint32_t kFieldBg = 0xFF090C10;
@@ -27,6 +31,17 @@ constexpr uint32_t kFieldBg = 0xFF090C10;
 bool Hover(float x, float y, float w, float h) {
     auto& st = In().State();
     return st.mouseX >= x && st.mouseX < x + w && st.mouseY >= y && st.mouseY < y + h;
+}
+
+bool OnScreenKeyboardHit(float x, float y) {
+    if (!In().ControllerCursorActive()) return false;
+    auto& g = Gfx();
+    float s = g.Scale();
+    float w = std::min(650.0f * s, g.Width() - 24.0f * s);
+    float h = 166.0f * s;
+    float left = (g.Width() - w) * 0.5f;
+    float top = g.Height() - h - 12.0f * s;
+    return x >= left && x < left + w && y >= top && y < top + h;
 }
 }  // namespace
 
@@ -39,8 +54,10 @@ void BeginFrame() {
             g_tabPressed = true;
             g_shiftTab = st.shift;
         }
-    // clicking anywhere outside text boxes removes focus (re-acquired by the box under the cursor)
-    if (st.lmbPressed) g_focus.clear();
+    g_focusedValue = nullptr;
+    // Clicking outside text boxes removes focus, except when the click is on the
+    // controller on-screen keyboard rendered at the end of the previous frame.
+    if (st.lmbPressed && !OnScreenKeyboardHit(st.mouseX, st.mouseY)) g_focus.clear();
 }
 
 void EndFrame() {
@@ -52,6 +69,74 @@ void EndFrame() {
         else idx = g_shiftTab ? (idx + g_textBoxes.size() - 1) % g_textBoxes.size() : (idx + 1) % g_textBoxes.size();
         g_focus = g_textBoxes[idx];
         g_caret = std::string::npos;
+    }
+
+    if (!g_focus.empty() && g_focusedValue && In().ControllerCursorActive()) {
+        auto& st = In().State();
+        auto& g = Gfx();
+        auto& value = *g_focusedValue;
+        float s = g.Scale();
+        float w = std::min(650.0f * s, g.Width() - 24.0f * s), h = 166.0f * s;
+        float x = (g.Width() - w) * 0.5f, y = g.Height() - h - 12.0f * s;
+        g.Rect(x, y, w, h, 0xF5000000);
+        g.RectOutline(x, y, w, h, kSaBlue, std::max(1.0f, s));
+        g.Text(FONT_SMALL, x + 10 * s, y + 5 * s, "Controller keyboard  -  Cross: select", kSaMuted, TEXT_SHADOW);
+
+        auto key = [&](float kx, float ky, float kw, const std::wstring& label, wchar_t ch, bool special = false) {
+            bool hover = Hover(kx, ky, kw, 27 * s);
+            g.Rect(kx, ky, kw, 27 * s, hover ? 0xFF1A2B3B : 0xFF0C1117);
+            g.RectOutline(kx, ky, kw, 27 * s, hover ? kSaBlue : kSaLine, std::max(1.0f, s));
+            float tw = g.TextWidthW(FONT_SMALL, label);
+            g.TextW(FONT_SMALL, kx + (kw - tw) * 0.5f, ky + 6 * s, label, hover ? kSaBlue : 0xFFE0E0E0, TEXT_SHADOW);
+            if (!hover || !st.lmbPressed) return;
+            if (special && ch == L'\b') {
+                if (g_caret == std::string::npos || g_caret > value.size()) g_caret = value.size();
+                if (g_caret > 0) value.erase(--g_caret, 1);
+            } else if (special && ch == L'\n') {
+                g_focus.clear();
+                g_focusedValue = nullptr;
+            } else if (special && ch == L' ') {
+                if (!g_focusedDigitsOnly && value.size() < g_focusedMaxLen) {
+                    if (g_caret == std::string::npos || g_caret > value.size()) g_caret = value.size();
+                    value.insert(value.begin() + (ptrdiff_t)g_caret++, L' ');
+                }
+            } else if (value.size() < g_focusedMaxLen && ch) {
+                if (g_caret == std::string::npos || g_caret > value.size()) g_caret = value.size();
+                value.insert(value.begin() + (ptrdiff_t)g_caret++, ch);
+            }
+        };
+
+        const float gap = 4 * s, kh = 27 * s;
+        float rowY = y + 27 * s;
+        if (g_focusedDigitsOnly) {
+            const wchar_t* digits = L"1234567890";
+            float kw = (w - 11 * gap) / 10.0f;
+            for (int i = 0; i < 10; ++i) key(x + gap + i * (kw + gap), rowY, kw, std::wstring(1, digits[i]), digits[i]);
+            rowY += kh + gap;
+            const wchar_t* extra = L"-.";
+            float ew = 70 * s;
+            for (int i = 0; i < 2; ++i) key(x + (w - (2 * ew + gap)) * 0.5f + i * (ew + gap), rowY, ew,
+                                               std::wstring(1, extra[i]), extra[i]);
+            rowY += kh + gap;
+        } else {
+            const wchar_t* rows[] = {L"qwertyuiop", L"asdfghjkl", L"zxcvbnm_- ."};
+            for (int r = 0; r < 3; ++r) {
+                int n = (int)std::wcslen(rows[r]);
+                float kw = (w - (n + 1) * gap) / n;
+                float left = x + (w - (n * kw + (n - 1) * gap)) * 0.5f;
+                for (int i = 0; i < n; ++i) {
+                    wchar_t c = rows[r][i];
+                    if (c == L' ') continue;
+                    key(left + i * (kw + gap), rowY, kw, std::wstring(1, c), c);
+                }
+                rowY += kh + gap;
+            }
+        }
+        float bottomY = y + h - kh - 5 * s;
+        float backW = 90 * s, spaceW = 150 * s, doneW = 90 * s;
+        key(x + 8 * s, bottomY, backW, L"Backspace", L'\b', true);
+        if (!g_focusedDigitsOnly) key(x + (w - spaceW) * 0.5f, bottomY, spaceW, L"Space", L' ', true);
+        key(x + w - doneW - 8 * s, bottomY, doneW, L"Done", L'\n', true);
     }
 }
 
@@ -122,6 +207,11 @@ bool TextBox(const char* id, float x, float y, float w, float h, std::wstring& v
         g_caret = std::string::npos;
     }
     bool focused = g_focus == id;
+    if (focused) {
+        g_focusedValue = &value;
+        g_focusedMaxLen = maxLen;
+        g_focusedDigitsOnly = digitsOnly;
+    }
     bool enter = false;
     // the caret belongs to the focused box only (an empty box after it used to reset it every frame)
     if (focused && (g_caret == std::string::npos || g_caret > value.size())) g_caret = value.size();

@@ -2,10 +2,12 @@
 #include <cstdint>
 #include <vector>
 
+#include "shared/game/Game.h"
+
 namespace coop::ui {
 
-// Window-procedure level input. The game reads the keyboard only through window messages
-// (WM_KEYDOWN/UP) and the mouse through DirectInput, so:
+// Shared input for the co-op UI (keyboard, mouse, and GInput controller state).
+// The game reads the keyboard only through window messages (WM_KEYDOWN/UP) and the mouse through DirectInput, so:
 //  * keyboard capture = swallowing the messages;
 //  * mouse capture    = skipping CPad::UpdateMouse (hooked in Patches) and not re-centring the cursor.
 struct InputState {
@@ -31,10 +33,15 @@ public:
     void SetMouseCapture(bool on);
     bool KeyboardCaptured() const { return m_kbCapture; }
     bool MouseCaptured() const { return m_mouseCapture; }
+    bool ControllerCursorActive() const { return m_mouseCapture && m_padCursorActive; }
     // Captured while the game holds the mouse exclusively (its fullscreen play): our cursor moves by the game's own
     // reading of the mouse, fed here from CPad::UpdateMouse (Patches)
     bool CursorFromGameMouse() const;
     void FeedGameMouse(float dx, float dy, bool lmb, int wheel);
+    // Save the controller state before the game input hook clears it while a UI window is open.
+    void FeedControllerState(const game::CControllerState& state) { m_controllerState = state; }
+    // Controller-only shortcuts, called once per game pad update before gameplay input is suppressed.
+    void ProcessControllerHotkeys(const game::CControllerState& state);
 
     InputState& State() { return m_state; }
     void EndFrame();  // clears per-frame events
@@ -54,6 +61,18 @@ private:
     bool m_fromGame = false;          // the cursor below is ours (CursorFromGameMouse)
     float m_gameX = 0, m_gameY = 0;  // in client pixels
     bool m_gameLmb = false;
+    // GInput feeds the same CPad state used by the game. While a co-op window owns
+    // the mouse, the left stick / D-pad drive a virtual cursor and Cross clicks it.
+    game::CControllerState m_controllerState{};
+    game::CControllerState m_previousPad{};
+    game::CControllerState m_previousHotkeyPad{};
+    bool m_padPrimed = false;
+    bool m_padCursorActive = false;
+    bool m_padCrossBlocked = false;
+    bool m_padBackBlocked = false;
+    float m_virtualX = 0, m_virtualY = 0;
+    int32_t m_lastPhysicalX = 0, m_lastPhysicalY = 0;
+    uint64_t m_padFrameMs = 0;
     InputState m_state;
 };
 

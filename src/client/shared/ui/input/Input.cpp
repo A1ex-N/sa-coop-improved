@@ -3,10 +3,14 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <cmath>
 #include <cstring>
 
 #include "common/lib/log/Log.h"
+#include "common/lib/util/Util.h"
 #include "shared/game/Game.h"
+#include "shared/config/Config.h"
 #include "shared/lib/core/Core.h"
 #include "shared/lib/memory/Memory.h"
 
@@ -54,6 +58,31 @@ void Input::ClearGameKeys() {
     memset(&pad->OldState, 0, sizeof(pad->OldState));
 }
 
+void Input::ProcessControllerHotkeys(const game::CControllerState& state) {
+    // All GUI shortcuts use Select as a modifier. Start is deliberately NOT
+    // used: it belongs to GTA's pause menu. While Select is held, HookUpdatePads
+    // consumes the complete pad state, so neither the modifier nor the chord's
+    // second button can trigger a normal gameplay action.
+    // Select + D-pad Up = main SA:COOP window; Cross = skins;
+    // Square = animations; Triangle = players.
+    bool selectDpadUp = state.Select && state.DPadUp &&
+                        !(m_previousHotkeyPad.Select && m_previousHotkeyPad.DPadUp);
+    bool selectCross = state.Select && state.ButtonCross &&
+                       !(m_previousHotkeyPad.Select && m_previousHotkeyPad.ButtonCross);
+    bool selectSquare = state.Select && state.ButtonSquare &&
+                        !(m_previousHotkeyPad.Select && m_previousHotkeyPad.ButtonSquare);
+    bool selectTriangle = state.Select && state.ButtonTriangle &&
+                          !(m_previousHotkeyPad.Select && m_previousHotkeyPad.ButtonTriangle);
+
+    if (!m_kbCapture && !m_mouseCapture) {
+        if (selectDpadUp) core::OnKeyDown(VK_F9, false);
+        else if (selectCross) core::OnKeyDown(VK_F6, false);
+        else if (selectSquare) core::OnKeyDown('U', false);
+        else if (selectTriangle) core::OnKeyDown(Cfg().playerListKey, false);
+    }
+    m_previousHotkeyPad = state;
+}
+
 void Input::SetKeyboardCapture(bool on) {
     if (on && !m_kbCapture) ClearGameKeys();
     m_kbCapture = on;
@@ -84,9 +113,22 @@ void Input::SetMouseCapture(bool on) {
         RECT rc;
         if (m_hwnd && GetClientRect((HWND)m_hwnd, &rc)) {
             POINT p{(rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2};
+            m_virtualX = (float)p.x;
+            m_virtualY = (float)p.y;
+            m_lastPhysicalX = p.x;
+            m_lastPhysicalY = p.y;
             ClientToScreen((HWND)m_hwnd, &p);
             SetCursorPos(p.x, p.y);
         }
+        m_padCursorActive = false;
+        m_padFrameMs = NowMs();
+        m_previousPad = m_controllerState;  // don't reuse the button that opened the window
+        m_padCrossBlocked = true;  // wait for a release so the menu-opening press cannot activate a control
+        m_padBackBlocked = true;
+        m_padPrimed = true;
+    } else {
+        m_padCursorActive = false;
+        m_padPrimed = false;
     }
 }
 
@@ -107,18 +149,76 @@ void Input::UpdateMouse(float bbW, float bbH) {
     GetClientRect((HWND)m_hwnd, &rc);
     float cw = (float)(rc.right - rc.left), ch = (float)(rc.bottom - rc.top);
     if (cw <= 0 || ch <= 0) return;
+
     bool fromGame = CursorFromGameMouse();
-    if (fromGame && !m_fromGame) m_gameX = (float)p.x, m_gameY = (float)p.y, m_gameLmb = false;  // ours starts where Windows' stands
+    if (fromGame && !m_fromGame) m_gameX = (float)p.x, m_gameY = (float)p.y, m_gameLmb = false;
     m_fromGame = fromGame;
-    if (fromGame) {
-        m_gameX = std::clamp(m_gameX, 0.0f, cw - 1.0f), m_gameY = std::clamp(m_gameY, 0.0f, ch - 1.0f);
-        p.x = (LONG)m_gameX, p.y = (LONG)m_gameY;
+
+    bool padCross = false;
+    if (m_mouseCapture) {
+        const game::CControllerState& pad = m_controllerState;
+        if (!m_padPrimed) m_previousPad = pad, m_padPrimed = true;
+        uint64_t now = NowMs();
+        float dt = std::clamp((float)(now - m_padFrameMs) / 1000.0f, 0.0f, 0.05f);
+        m_padFrameMs = now;
+        float ax = (float)pad.LeftStickX / 128.0f;
+        float ay = (float)pad.LeftStickY / 128.0f;
+        if (std::abs(ax) < 0.22f) ax = 0.0f;
+        if (std::abs(ay) < 0.22f) ay = 0.0f;
+        if (pad.DPadLeft) ax = -1.0f;
+        if (pad.DPadRight) ax = 1.0f;
+        if (pad.DPadUp) ay = -1.0f;
+        if (pad.DPadDown) ay = 1.0f;
+        float magnitude = std::sqrt(ax * ax + ay * ay);
+        if (magnitude > 1.0f) ax /= magnitude, ay /= magnitude;
+
+        if (!pad.ButtonCross) m_padCrossBlocked = false;
+        if (!pad.ButtonCircle) m_padBackBlocked = false;
+        bool padActivity = ax != 0.0f || ay != 0.0f || (pad.ButtonCross && !m_padCrossBlocked) || pad.ButtonCircle ||
+                           (pad.LeftShoulder2 && !m_previousPad.LeftShoulder2) ||
+                           (pad.RightShoulder2 && !m_previousPad.RightShoulder2);
+        if (padActivity && !m_padCursorActive) {
+            m_virtualX = (float)p.x;
+            m_virtualY = (float)p.y;
+            m_padCursorActive = true;
+        }
+
+        // Real mouse movement switches back to the physical cursor. Controller input
+        // switches to the virtual cursor again, so either device can be used at any time.
+        if (m_padCursorActive && (std::abs(p.x - m_lastPhysicalX) > 3 || std::abs(p.y - m_lastPhysicalY) > 3))
+            m_padCursorActive = false;
+        m_lastPhysicalX = p.x;
+        m_lastPhysicalY = p.y;
+
+        if (m_padCursorActive) {
+            m_virtualX += ax * 900.0f * dt;
+            m_virtualY += ay * 900.0f * dt;
+            m_virtualX = std::clamp(m_virtualX, 0.0f, cw - 1.0f);
+            m_virtualY = std::clamp(m_virtualY, 0.0f, ch - 1.0f);
+            p.x = (LONG)m_virtualX;
+            p.y = (LONG)m_virtualY;
+        }
+
+        padCross = pad.ButtonCross != 0 && !m_padCrossBlocked;
+        if (pad.ButtonCircle && !m_previousPad.ButtonCircle && !m_padBackBlocked)
+            core::OnKeyDown(VK_ESCAPE, false);  // the same Back action as Escape in every co-op window
+        if (pad.LeftShoulder2 && !m_previousPad.LeftShoulder2) m_state.wheel += 1;
+        if (pad.RightShoulder2 && !m_previousPad.RightShoulder2) m_state.wheel -= 1;
+        m_previousPad = pad;
+    }
+
+    if (fromGame && !m_padCursorActive) {
+        m_gameX = std::clamp(m_gameX, 0.0f, cw - 1.0f);
+        m_gameY = std::clamp(m_gameY, 0.0f, ch - 1.0f);
+        p.x = (LONG)m_gameX;
+        p.y = (LONG)m_gameY;
     }
     m_state.mouseX = (float)p.x * bbW / cw;
     m_state.mouseY = (float)p.y * bbH / ch;
     m_state.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     m_state.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-    bool down = fromGame ? m_gameLmb : (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 && game::IsForeground();
+    bool physicalDown = fromGame ? m_gameLmb : (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 && game::IsForeground();
+    bool down = physicalDown || padCross;
     if (down && !m_state.lmb) m_state.lmbPressed = true;
     if (!down && m_state.lmb) m_state.lmbReleased = true;
     m_state.lmb = down;

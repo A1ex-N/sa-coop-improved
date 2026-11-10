@@ -37,8 +37,6 @@ float g_dragX = -1.0f;
 uint64_t g_noteUntil = 0;
 int g_clickModel = -1;
 uint64_t g_clickMs = 0;
-
-
 const char* SkinName(int model) {
     // GTA San Andreas' stock ped IDs and the names used by its character roster.
     // IDs absent from this table are supplied by another game/mod and keep a clear fallback.
@@ -228,7 +226,7 @@ void RenderSkinsMenu() {
     g.Text(FONT_MENU, cx, cy, TR("Скины", "Skins"), kSaBlue, TEXT_SHADOW);
     cy += mh + 18 * s;
 
-    bool moved = false, apply = false;
+    bool moved = false, apply = false, close = false;
     int pages = 0;
     if (!first) {
         for (int vk : st.keyDowns) {
@@ -239,8 +237,10 @@ void RenderSkinsMenu() {
             if (vk == VK_HOME) g_selected = 0, moved = true;
             if (vk == VK_END) g_selected = count - 1, moved = true;
             if (vk == VK_RETURN) apply = true;
+            if (vk == VK_ESCAPE) close = true;
         }
     }
+
     if (pages) moved = true;
 
     float rowH = lh + 12 * s;
@@ -294,6 +294,9 @@ void RenderSkinsMenu() {
         float loadingW = g.TextWidth(FONT_SMALL, loading);
         g.Text(FONT_SMALL, px + (previewW - loadingW) * 0.5f, py + previewW * 0.5f, loading, kSaMuted, TEXT_SHADOW);
     }
+    const game::CControllerState& controllerState = game::GetPad(0)->NewState;
+    if (std::abs(controllerState.RightStickX) > 40)
+        anims::PreviewTurn((float)controllerState.RightStickX / 128.0f * 0.055f);
     if (st.lmb && (g_dragX >= 0.0f || (st.lmbPressed && Hovered(px, py, previewW, previewW)))) {
         if (g_dragX >= 0.0f) anims::PreviewTurn((st.mouseX - g_dragX) * 0.01f);
         g_dragX = st.mouseX;
@@ -303,7 +306,10 @@ void RenderSkinsMenu() {
     std::string current = Format(TR("Текущий скин: %d", "Current skin: %d"), skin::Current());
     g.Text(FONT_SMALL, px, py + previewW + 14 * s, Fit(FONT_SMALL, current, previewW), kSaMuted, TEXT_SHADOW);
     g.Text(FONT_SMALL, px, py + previewW + 14 * s + sh + 5 * s,
-           TR("Enter / двойной щелчок: выбрать", "Enter / double-click: apply"), kSaMuted, TEXT_SHADOW);
+           Fit(FONT_SMALL, TR("D-pad / левый стик: курсор", "D-pad / left stick: move cursor"), previewW), kSaMuted, TEXT_SHADOW);
+    g.Text(FONT_SMALL, px, py + previewW + 14 * s + sh * 2 + 10 * s,
+           Fit(FONT_SMALL, TR("Cross: выбрать  Circle: назад  L2/R2: прокрутка",
+                              "Cross: select  Circle: back  L2/R2: scroll"), previewW), kSaMuted, TEXT_SHADOW);
 
     float noteY = footY - sh - 12 * s;
     if (NowMs() < g_noteUntil) g.Text(FONT_SMALL, cx, noteY, Fit(FONT_SMALL, g_note, cw), g_noteError ? kSaRed : kSaBlue, TEXT_SHADOW);
@@ -316,11 +322,11 @@ void RenderSkinsMenu() {
     float applyX = closeX - room - 40 * s - g.TextWidth(FONT_MENU, applyText);
     bool applyClick = w::Button("skin-apply", applyX - room, footY, g.TextWidth(FONT_MENU, applyText) + 2 * room, rowH,
                                 applyText, count > 0);
-    bool close = w::Button("skin-close", closeX - room, footY, g.TextWidth(FONT_MENU, closeText) + 2 * room, rowH, closeText);
+    bool closeClick = w::Button("skin-close", closeX - room, footY, g.TextWidth(FONT_MENU, closeText) + 2 * room, rowH, closeText);
     w::EndFrame();
     w::DrawCursor();
     if (apply || applyClick) ApplySelected(selectedModel);
-    else if (close) SetSkinsMenuVisible(false);
+    else if (close || closeClick) SetSkinsMenuVisible(false);
 }
 
 }  // namespace coop::ui

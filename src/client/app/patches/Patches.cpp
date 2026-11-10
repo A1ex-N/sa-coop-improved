@@ -101,8 +101,18 @@ VoidFn g_origStartUserPause = nullptr;
 VoidFn g_origUpdatePads = nullptr;
 void __cdecl HookUpdatePads() {
     g_origUpdatePads();
-    if (ui::In().KeyboardCaptured()) {
-        game::GetPad(0)->NewState = game::CControllerState{};
+    // Snapshot before any UI shortcut can open a window (opening one clears the game's pad state).
+    game::CPad* localPad = game::GetPad(0);
+    game::CControllerState controllerState = localPad->NewState;
+    ui::In().FeedControllerState(controllerState);
+    ui::In().ProcessControllerHotkeys(controllerState);
+
+    // Select is the modifier for every controller-only GUI shortcut. Consume the full
+    // pad state while it is held so neither Select nor the chord button reaches gameplay.
+    if (ui::In().KeyboardCaptured() || controllerState.Select) {
+        // The UI needs the real GInput state, but the game must not receive it while a window is open.
+        // Preserve it for the UI first, then clear the game's copy to prevent movement/actions behind the menu.
+        localPad->NewState = game::CControllerState{};
         return;
     }
     if (!Cfg().multiInstance || GetForegroundWindow() == (HWND)game::GameWindow()) return;
