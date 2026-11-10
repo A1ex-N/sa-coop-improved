@@ -19,6 +19,7 @@
 #include "features/anims/Emotes.h"
 #include "shared/game/Anim.h"
 #include "shared/game/Game.h"
+#include "shared/game/Script.h"
 #include "shared/lib/core/Core.h"
 #include "shared/lib/memory/Memory.h"
 
@@ -90,6 +91,10 @@ void* g_cam = nullptr;
 int g_size = 0;  // the picture's side
 bool g_camFailed = false;
 uint16_t g_want = 0;  // the emote asked for (0: standing)
+bool g_skinPreview = false;
+int g_skinModel = -1;
+int g_skinHeldModel = -1;  // keep the selected model streamed while its copied clump is shown
+int g_skinRequestedModel = -1;  // an asynchronous model request still in flight
 float g_pixels = 0.0f;  // how big the window shows the picture
 uint64_t g_wantMs = 0, g_lastMs = 0;
 bool g_drawn = false;
@@ -235,9 +240,60 @@ bool MakeCamera() {
     return true;
 }
 
+void ReleaseSkinModel() {
+    CPlayerPed* me = core::IsPlayerReady() ? FindPlayerPed(0) : nullptr;
+    // The real player may now be wearing this model; do not ask streaming to release it.
+    if (g_skinHeldModel > 0 && (!me || me->ModelIndex() != g_skinHeldModel)) MarkModelNotNeeded(g_skinHeldModel);
+    if (g_skinRequestedModel > 0 && (!me || me->ModelIndex() != g_skinRequestedModel)) MarkModelNotNeeded(g_skinRequestedModel);
+    g_skinHeldModel = g_skinRequestedModel = -1;
+}
+
+// Make a short-lived game ped solely to obtain the selected model's real RenderWare clump. We
+// clone that clump into the same isolated preview used by the animation menu, then delete the
+// temporary ped immediately; the player's model, tasks and network state are never touched.
+bool MakeSkinBody(int model) {
+    if (g_skinHeldModel == model && g_body[0].clump) return true;
+    // Keep waiting for this same request without dropping its streaming flag every frame.
+    if (g_skinRequestedModel == model && !IsModelLoaded(model)) return false;
+    if (g_skinRequestedModel != model) {
+        FreeBody(g_body[0]);
+        ReleaseSkinModel();
+        FreeBody(g_body[1]);
+        g_drawn = false;
+        g_seenSet = g_camSet = false;
+        g_face = g_faceTo = 0.0f;
+        g_faceAtMs = 0;
+    } else {
+        // The requested model arrived; its streaming reference now belongs to the preview body.
+        g_skinRequestedModel = -1;
+    }
+    if (!IsModelLoaded(model)) {
+        RequestModel(model, 2 | 0x10);  // game-required, priority: the portrait can wait for streaming
+        g_skinRequestedModel = model;
+        return false;
+    }
+    CPlayerPed* me = core::IsPlayerReady() ? FindPlayerPed(0) : nullptr;
+    if (!me) return false;
+    CVector at = me->GetPosition();
+    int handle = -1;
+    // A few dozen metres away and high enough not to meet the player or population. It is
+    // created and deleted in this same render hook, before another game frame can simulate it.
+    game::script::Cmd(0x009A).I(4).I(model).F(at.x + 30.0f).F(at.y + 30.0f).F(at.z + 20.0f).Out(&handle).Run();
+    CPed* temporary = handle >= 0 ? GetPed(handle) : nullptr;
+    bool made = temporary && MakeBody(g_body[0], temporary);
+    if (handle >= 0) game::script::Cmd(0x009B).I(handle).Run();  // DELETE_CHAR
+    if (!made) {
+        FreeBody(g_body[0]);
+        return false;
+    }
+    g_skinHeldModel = model;
+    return true;
+}
+
 void FreeAll() {
     FreeBody(g_body[0]);
     FreeBody(g_body[1]);
+    ReleaseSkinModel();
     FreeCamera();
     g_seenSet = g_camSet = false;
 }
@@ -300,9 +356,19 @@ struct States {
 
 void Draw() {
     CPlayerPed* me = core::IsPlayerReady() ? FindPlayerPed(0) : nullptr;
-    if (!me || !MakeCamera() || !MakeBody(g_body[0], me)) return;
-    const Emote* e = g_want ? Find(g_want) : nullptr;
-    bool pair = e && e->kind == PAIR;
+    if (!me || !MakeCamera()) return;
+    const bool skin = g_skinPreview;
+    if (skin) {
+        if (!MakeSkinBody(g_skinModel)) return;
+    } else {
+        if (g_skinHeldModel >= 0) {
+            FreeBody(g_body[0]);
+            ReleaseSkinModel();
+        }
+        if (!MakeBody(g_body[0], me)) return;
+    }
+    const Emote* e = skin ? nullptr : (g_want ? Find(g_want) : nullptr);
+    bool pair = !skin && e && e->kind == PAIR;
     if (pair) {
         // the other player's body: its copy here, the nearest one; ours again while there is none
         CPed* other = me;
@@ -316,8 +382,10 @@ void Draw() {
     }
     int bodies = pair ? 2 : 1;
     bool hold = e && (e->flags & HOLD);
-    PlayOn(g_body[0], e ? e->block : nullptr, e ? e->main : nullptr, hold);
-    if (pair) PlayOn(g_body[1], e->block, e->other ? e->other : e->main, hold);
+    if (!skin) {
+        PlayOn(g_body[0], e ? e->block : nullptr, e ? e->main : nullptr, hold);
+        if (pair) PlayOn(g_body[1], e->block, e->other ? e->other : e->main, hold);
+    }
 
     float dt = std::clamp((float)(NowMs() - g_lastMs) / 1000.0f, 0.0f, 0.1f);
     g_lastMs = NowMs();
@@ -348,7 +416,11 @@ void Draw() {
     // where it faces: forward of the line from its right thigh to its left one, taken once 0.4 s into the emote (a dance
     // that spins does not turn the camera with it)
     if (g_seenFor != g_want || !g_seenSet) g_faceAtMs = NowMs() + 400;
-    if (g_faceAtMs && NowMs() >= g_faceAtMs) {
+    if (skin) {
+        g_faceAtMs = 0;
+        g_faceTo = 0.0f;
+    }
+    if (!skin && g_faceAtMs && NowMs() >= g_faceAtMs) {
         g_faceAtMs = 0;
         auto* m = Field<RwMat*>(g_body[0].hier, 0x08);
         int l = Call<0x7C51A0, int>(g_body[0].hier, 41), r = Call<0x7C51A0, int>(g_body[0].hier, 51);  // RpHAnimIDGetIndex
@@ -472,13 +544,26 @@ struct Reg {
 
 void PreviewShow(const Emote* e, float pixels) {
     if (!g_wantMs) g_lastMs = NowMs();
+    g_skinPreview = false;
+    g_skinModel = -1;
     g_want = e ? e->id : 0;
+    g_pixels = pixels;
+    g_wantMs = NowMs();
+}
+
+void SkinPreviewShow(int model, float pixels) {
+    if (!g_wantMs) g_lastMs = NowMs();
+    g_skinPreview = true;
+    g_skinModel = model;
+    g_want = 0;
     g_pixels = pixels;
     g_wantMs = NowMs();
 }
 
 void PreviewHide() {
     FreeAll();
+    g_skinPreview = false;
+    g_skinModel = -1;
     g_wantMs = 0;
 }
 

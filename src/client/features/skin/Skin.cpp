@@ -30,6 +30,7 @@
 #include "shared/game/Script.h"
 #include "shared/lib/core/Core.h"
 #include "shared/ui/chat/Chat.h"
+#include "pages/skins-menu/SkinsMenu.h"
 
 namespace coop::skin {
 
@@ -53,6 +54,16 @@ std::set<int> g_ours;  // models our choices asked the streaming for: let go of 
 bool IsSpecial(int model) { return model >= 290 && model <= 299; }
 
 bool Selectable(int model) { return model == 0 || (model > 0 && model < kModelLimit && !IsSpecial(model) && IsPedModel(model)); }
+
+const std::vector<int>& AvailableModels() {
+    static const std::vector<int> models = [] {
+        std::vector<int> out{0};
+        for (int model = 1; model < kModelLimit; ++model)
+            if (Selectable(model)) out.push_back(model);
+        return out;
+    }();
+    return models;
+}
 
 void RebuildPlayer(CPlayerPed* ped, bool keepDescFatMuscle) { Call<0x5A82C0>(ped, keepDescFatMuscle); }  // CClothes::RebuildPlayer
 
@@ -101,8 +112,8 @@ void Remember(int model) {
 }
 
 void Usage(int current) {
-    ui::TheChat().AddSystem(Format(TR("Ваш скин: %d. /skin <номер> выбирает скин, /skin next и /skin prev листают их, /skin 0 возвращает CJ.",
-                                      "Your skin: %d. /skin <number> picks one, /skin next and /skin prev go through them, /skin 0 is CJ again."),
+    ui::TheChat().AddSystem(Format(TR("Ваш скин: %d. /skin <номер> выбирает скин, /skin next и /skin prev листают их, /skin 0 возвращает CJ; /skin menu открывает выбор.",
+                                      "Your skin: %d. /skin <number> picks one, /skin next and /skin prev go through them, /skin 0 is CJ again; /skin menu opens the picker."),
                                    current));
 }
 
@@ -195,12 +206,30 @@ bool Apply(int model, std::string& why) {
     return true;
 }
 
+const std::vector<int>& Models() { return AvailableModels(); }
+
+int Current() {
+    if (core::IsPlayerReady())
+        if (CPlayerPed* me = FindPlayerPed(0)) return me->ModelIndex();
+    return g_wanted;
+}
+
+bool Choose(int model, std::string& why) {
+    if (!Apply(model, why)) return false;
+    Remember(model);
+    return true;
+}
+
 bool Command(const std::string& cmd, const std::vector<std::string>& args) {
     if (cmd != "skin") return false;
     int current = g_wanted;
     if (core::IsPlayerReady())
         if (CPlayerPed* me = FindPlayerPed(0)) current = me->ModelIndex();
     std::string a = args.empty() ? "" : ToLower(args[0]);
+    if (a == "menu" || a == "gui") {
+        ui::SetSkinsMenuVisible(true);
+        return true;
+    }
     int target = -1;
     if (a == "next" || a == "n" || a == "+") target = Step(current, +1);
     else if (a == "prev" || a == "previous" || a == "p" || a == "-") target = Step(current, -1);

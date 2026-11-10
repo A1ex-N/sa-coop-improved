@@ -139,8 +139,15 @@ def compile_one(src, obj, flags, is_c):
     obj.parent.mkdir(parents=True, exist_ok=True)
     dep = obj.with_suffix(".d")
     cmd = [str(CC if is_c else CXX)] + flags + ["-MMD", "-MF", str(dep), "-c", str(ROOT / src), "-o", str(obj)]
-    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
-    return src, r.returncode, (r.stdout + r.stderr).strip(), cmd
+    r = subprocess.run(
+        cmd,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        errors="replace"
+    )
+    return src, r.returncode, ((r.stdout or "") + (r.stderr or "")).strip(), cmd
+
 
 
 def build_flags(t, debug):
@@ -205,9 +212,9 @@ def link_target(t, debug, objs, dep_objs):
         res = BUILD / ("debug" if debug else "release") / "obj" / t["name"] / (Path(rc).stem + ".res.o")
         res.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run([str(WINDRES), "-I", str(ROOT / "src"), "-D", f"COOP_FILEVERSION={file_version()}",
-                            str(ROOT / rc), "-O", "coff", "-o", str(res)], cwd=ROOT, capture_output=True, text=True)
+                            str(ROOT / rc), "-O", "coff", "-o", str(res)], cwd=ROOT, errors="replace", capture_output=True, text=True)
         if r.returncode != 0:
-            print(r.stdout + r.stderr)
+            print((r.stdout or "") + (r.stderr or ""))
             return False
         res_objs.append(res)
     all_objs = objs + dep_objs + res_objs
@@ -225,7 +232,7 @@ def link_target(t, debug, objs, dep_objs):
         cmd.insert(1, "-shared")
     if t.get("gui"):
         cmd.insert(1, "-mwindows")
-    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    r = subprocess.run(cmd, cwd=ROOT, errors="replace", capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stdout + r.stderr)
         print(f"  [{t['name']}] link FAILED")

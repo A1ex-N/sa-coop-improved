@@ -21,6 +21,7 @@
 #include "pages/anims-menu/AnimsMenu.h"
 #include "pages/connect-menu/ConnectMenu.h"
 #include "pages/players-menu/PlayersMenu.h"
+#include "pages/skins-menu/SkinsMenu.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "shared/game/Game.h"
@@ -140,6 +141,7 @@ void RenderOverlay() {
     g.SetHidden(clean);   // the windows a key opens are drawn under F7 too
     ui::RenderPlayersMenu();
     ui::RenderAnimsMenu();
+    ui::RenderSkinsMenu();
     ui::RenderConnectMenu();
     g.End();
     ui::In().EndFrame();
@@ -495,6 +497,10 @@ bool OnKeyDown(int vk, bool repeat) {
         if ((vk == VK_ESCAPE || vk == cfg.playerListKey) && !repeat) ui::SetPlayersMenuVisible(false);
         return true;  // its amount box takes the keys while it is open
     }
+    if (ui::IsSkinsMenuVisible()) {
+        if (vk == VK_ESCAPE && !repeat) ui::SetSkinsMenuVisible(false);
+        return true;
+    }
     if (ui::IsAnimsMenuVisible()) {
         // a cheat code typed on after its U (UZUMYMW, or BAGUVIX's U in the same frame as its G): closed, the letter goes on
         if (!repeat && vk >= 'A' && vk <= 'Z' && NowMs() - ui::AnimsMenuOpenedMs() < 600 &&
@@ -523,6 +529,10 @@ bool OnKeyDown(int vk, bool repeat) {
         return true;
     }
     bool inMenu = game::MenuActive();
+    if (vk == VK_F6 && !inMenu && IsPlayerReady()) {
+        ui::ToggleSkinsMenu();
+        return true;
+    }
     if (vk == 'U' && !inMenu && IsPlayerReady() && !typingCheat) {
         ui::ToggleAnimsMenu();
         return false;  // U reaches the game too: a cheat code beginning with it goes on (the window gives way, above)

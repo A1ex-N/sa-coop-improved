@@ -51,6 +51,8 @@ void PreviewShow(const Emote* e, float pixels);
 void PreviewHide();
 void* PreviewTexture();
 void PreviewTurn(float radians);
+// The same RenderWare portrait, but for a skin model (without changing the real player).
+void SkinPreviewShow(int model, float pixels);
 
 // a block loaded from coop\anims or coop\packs: its index differs between games, the others know it by its name
 bool IsCustomBlock(int block);
