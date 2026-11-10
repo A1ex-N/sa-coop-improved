@@ -264,6 +264,9 @@ The chat supports the `/help`, `/players`, `/tp` (go to your partner unless they
 `/tphere 3`. The F2 window shows the numbers. Your partner answers `/tp` and `/tphere` with Y or N. The host can kick a player
 with `/kick <nickname> [reason]` and, creating the game, turn `/tp` and `/tphere` off for partners.
 The `/anims` command opens the animations window, and `/anims` with a number plays that animation at once.
+The `/skin` command changes your character: `/skin 105` puts on skin number 105 (the game's ped model ID), `/skin next` and
+`/skin prev` go through the skins one by one, and `/skin 0` is CJ again. The other players see your skin. Your choice is kept
+in `coop.ini` (`[player]`, `skin`) and put on again when the game gives CJ back, after a load or a cutscene for example.
 
 <p align="center"><img src="docs/images/players.jpg" alt="The F2 window in Russian: the host and three partners with their numbers, money and buttons" width="600"></p>
 
@@ -306,6 +309,9 @@ section clears everything the mod draws: the chat, the names over the players an
   world does not load for them, and the mod says so in the chat.
 - Mods installed through modloader work. Each player sees their own models, textures and effects. A car that a mod
   adds under a new ID is only visible to the player who has that mod.
+- `/skin` works while you stand free on foot, not in a cutscene or in a scene the game controls. It takes the people of the
+  game (not the special characters, 290-299). A skin is a model of its own: CJ's clothes do not apply to it. A player whose
+  game has no such model (an ID a mod added) sees CJ in its place.
 
 ## Bugs and ideas
 

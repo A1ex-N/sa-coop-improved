@@ -1147,6 +1147,9 @@ public:
         LOGI("Profile saved (%zu bytes)", m_saved.size());
     }
 
+    // no profile is left to be laid over the player: the host's and a game of its own get none, a partner's came (m_applied)
+    bool Settled() const { return !Net().Online() || Net().IsHost() || !flow::InHostWorld() || m_applied; }
+
     static Progress& Instance() {
         static Progress p;
         return p;
@@ -1177,5 +1180,6 @@ struct Reg {
 }  // namespace
 
 void SaveProfileNow() { Progress::Instance().SaveNow(); }
+bool ProfileSettled() { return Progress::Instance().Settled(); }
 
 }  // namespace coop
