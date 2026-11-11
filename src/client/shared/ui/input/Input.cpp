@@ -59,12 +59,12 @@ void Input::ClearGameKeys() {
 }
 
 void Input::ProcessControllerHotkeys(const game::CControllerState& state) {
-    // All GUI shortcuts use Select as a modifier. Start is deliberately NOT
+    // Controller shortcuts use Select as a modifier. Start is deliberately NOT
     // used: it belongs to GTA's pause menu. While Select is held, HookUpdatePads
     // consumes the complete pad state, so neither the modifier nor the chord's
     // second button can trigger a normal gameplay action.
     // Select + D-pad Up = main SA:COOP window; Cross = skins;
-    // Square = animations; Triangle = players.
+    // Square = animations; Triangle = players; Circle = ping.
     bool selectDpadUp = state.Select && state.DPadUp &&
                         !(m_previousHotkeyPad.Select && m_previousHotkeyPad.DPadUp);
     bool selectCross = state.Select && state.ButtonCross &&
@@ -74,11 +74,15 @@ void Input::ProcessControllerHotkeys(const game::CControllerState& state) {
     bool selectTriangle = state.Select && state.ButtonTriangle &&
                           !(m_previousHotkeyPad.Select && m_previousHotkeyPad.ButtonTriangle);
 
+    bool selectCircle = state.Select && state.ButtonCircle &&
+                        !(m_previousHotkeyPad.Select && m_previousHotkeyPad.ButtonCircle);
+
     if (!m_kbCapture && !m_mouseCapture) {
         if (selectDpadUp) core::OnKeyDown(VK_F9, false);
         else if (selectCross) core::OnKeyDown(VK_F6, false);
         else if (selectSquare) core::OnKeyDown('U', false);
         else if (selectTriangle) core::OnKeyDown(Cfg().playerListKey, false);
+        else if (selectCircle) core::OnKeyDown(VK_F5, false);
     }
     m_previousHotkeyPad = state;
 }

@@ -249,6 +249,9 @@ sees "The server does not answer", even on a home network. If an antivirus remov
 | Key | What it does |
 |---|---|
 | F9 | the SA:COOP window |
+| F5 or Select + Circle | place a temporary beacon where the camera is pointing |
+| F6 or Select + Cross | open the skin picker |
+| H or Triangle (hold) | revive a nearby downed teammate |
 | T | chat: Enter sends a message, Esc closes the chat |
 | B | voice chat while the key is held (the mode is set in the F9 window) |
 | G | get into the nearest car as a passenger, by the nearest door |
@@ -268,9 +271,24 @@ The `/skin` command changes your character: `/skin 105` puts on skin number 105 
 `/skin prev` go through the skins one by one, and `/skin 0` is CJ again. The other players see your skin. Your choice is kept
 in `coop.ini` (`[player]`, `skin`) and put on again when the game gives CJ back, after a load or a cutscene for example.
 
+Open the skin picker with F6 or `/skin menu` to browse named skins and preview them before applying one. **Use skin animations**
+switches idle, walk, run and sprint to the selected skin's movement set by default. The setting is saved as
+`skin_animations` under `[player]`.
+
+Hold Select on a controller and press D-pad Up for the co-op window, Cross for skins, Square for animations or Triangle
+for the player list. In the skin picker, use the D-pad or left stick to move, Cross to apply, Circle to go back and
+L2/R2 to scroll.
+
+Point the camera at a surface or object and press F5 or Select + Circle to place a pulsing cyan beacon. Nearby
+teammates in the same area can see it for 6.5 seconds.
+
+With shared lives off, a player who takes fatal damage on foot in the shared world can go down if a teammate is nearby.
+Walk up to a downed teammate and hold H or Triangle for five seconds to revive them. The default revive window is
+60 seconds. The `down_seconds` and `revive_seconds` settings under `[game]` adjust those times.
+
 <p align="center"><img src="docs/images/players.jpg" alt="The F2 window in Russian: the host and three partners with their numbers, money and buttons" width="600"></p>
 
-The chat, passenger, player list and voice keys can be changed in the F9 window, the "Keys" button. The microphone's
+The chat, passenger, player list, voice and revive keys can be changed in the F9 window, the "Keys" button. The microphone's
 mode is picked there too: while the key is held, a press turns it on and off, always on or off. The `[game]` section
 of `coop\coop.ini` can hide the partner's radar mark (`partner_blip = 0`) and the name tag over their head
 (`name_tags = 0`), for a shoot-out where you have to find each other. `gps = 0` there turns off the road route to

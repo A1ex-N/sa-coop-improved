@@ -15,6 +15,7 @@
 #include "entities/player/Players.h"
 #include "entities/session/Flow.h"
 #include "features/anims/Emotes.h"
+#include "features/ping/Ping.h"
 #include "features/story/contest/Contest.h"
 #include "features/story/missions/Missions.h"
 #include "features/teleport/Teleport.h"
@@ -567,6 +568,7 @@ bool OnKeyDown(int vk, bool repeat) {
         Players::Instance().TryEnterAsPassenger();
         return false;  // G still reaches the game (gang recruiting)
     }
+    if (vk == VK_F5 && !inMenu && ping::Place()) return true;
     if (vk == VK_F7 && IsPlayerReady()) {  // last: a key of the F9 window set to F7 is its own
         g_interfaceHidden = !g_interfaceHidden;
         LOGI("F7: the interface %s", g_interfaceHidden ? "hidden" : "shown");
