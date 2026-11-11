@@ -1,3597 +1,4126 @@
-# Как устроен SA:COOP
+# SA:COOP architecture
 
-Мод рассчитан на GTA San Andreas 1.0 US (gta_sa.exe 14 383 616 байт) и двух игроков. Здесь описано, как он
-устроен и почему сделан именно так. Адреса и структуры движка сверены с исходниками gta-reversed и plugin-sdk
-и с самим gta_sa.exe. Сетевые сообщения перечислены в `src/common/api/protocol/Protocol.h`.
+SA:COOP targets GTA San Andreas 1.0 US (`gta_sa.exe`, 14,383,616 bytes). The original design described here
+started with two players. Engine addresses and structures were checked against gta-reversed, plugin-sdk,
+and the game executable. Network messages are defined in `src/common/api/protocol/Protocol.h`.
 
-## Из чего состоит
+## Components
 
-| Часть | Файл | Что делает |
+| Component | File | Purpose |
 |---|---|---|
-| Клиент | `coop.dll` (ставится как `coop.asi`) | Работает внутри `gta_sa.exe`: синхронизирует игроков, машины, NPC, миссии, чат и голос |
-| Сервер | `coop-server.exe` | Консольный ретранслятор: принимает подключения, раздаёт роли, хранит профили прокачки и сохранение мира |
-| Загрузчик ASI | `vorbisFile.dll` (`src/loader`) | Нужен только чистой игре: загружает `*.asi` из папки игры и из `scripts\`, а функции vorbisfile передаёт оригинальной библиотеке `vorbisHooked.dll` |
-| Инструменты | `tools/` | Сборка (`build.py`), проверка слоёв (`fsd_check.py`), загрузка компилятора (`get-toolchain.ps1`), инструменты реверса (`re/`) |
+| Client | `coop.dll` (installed as `coop.asi`) | Runs inside `gta_sa.exe` and synchronizes players, vehicles, NPCs, missions, text chat, and voice chat |
+| Server | `coop-server.exe` | Accepts connections, assigns roles, relays traffic, and stores progression profiles and world saves |
+| ASI loader | `vorbisFile.dll` (`src/loader`) | Loads `*.asi` from the game folder and `scripts\` on clean installations, and forwards vorbisfile functions to `vorbisHooked.dll` |
+| Tools | `tools/` | Build (`build.py`), layer checks (`fsd_check.py`), compiler download (`get-toolchain.ps1`), and reverse-engineering tools (`re/`) |
 
-Клиент загружается ASI-загрузчиком сборки. В чистой игре загрузчика нет, поэтому `install.bat` переименовывает
-оригинальный `vorbisFile.dll` в `vorbisHooked.dll` и кладёт на его место наш: эту библиотеку `gta_sa.exe`
-подгружает при старте. Оригинал `install.bat` узнаёт по имени внутри файла: строчное `vorbisfile.dll` есть только у
-него (`findstr` различает регистр). Ultimate ASI Loader из Widescreen Fix встаёт на место `vorbisFile.dll` без
-`vorbisHooked.dll`. Прежний `install.bat` принимал его за оригинал и переименовывал, а под чужим именем этот загрузчик
-пишет «This library isn't supported» и закрывает игру (28.10). Теперь `install.bat` такой загрузчик не трогает, а уже
-переименованный возвращает на место, если перед ним стоит наш (в нашем есть переадресации `vorbisHooked.*`).
-Остальные моды сборки (modloader, CLEO, SilentPatch и прочие) работают как раньше.
+The ASI loader loads the client. On a clean installation, `install.bat` renames the original
+`vorbisFile.dll` to `vorbisHooked.dll` and installs the bundled loader in its place. The game loads this DLL
+at startup. The installer identifies the original by the lowercase string `vorbisfile.dll`, using a
+case-sensitive `findstr` check. Widescreen Fix's Ultimate ASI Loader can already occupy the
+`vorbisFile.dll` slot without a `vorbisHooked.dll`. The old installer renamed that loader too, which caused
+it to print “This library isn't supported” and close the game (28 October). The installer now leaves that
+loader in place and restores a previously renamed copy if the bundled loader is installed. The bundled
+loader can be identified by its `vorbisHooked.*` forwarders. Modloader, CLEO, SilentPatch, and other mods
+continue to work as before.
 
-Плагины, собранные со старой версией библиотеки injector (MixSets, Peds Extender, CLEO+, Framerate Vigilante
-и другие), сохраняют регистры для своих inline-хуков командой `add byte ptr [esp+0Ch], 4`. Если указатель стека
-кончается на FC, перенос теряется, и хук видит стек на 256 байт ниже. Хук, который меняет свой адрес возврата,
-пишет его не туда и возвращается в середину инструкции: так Peds Extender ронял игру по адресу 6133DB, когда
-у поезда выбирался машинист. Хуки мода делают стек глубже и переносят это туда, где раньше всё обходилось.
-Поэтому мод на первом кадре и при старте игры находит такие обёртки в загруженных плагинах и меняет в них
-сложение и вычитание на 32-битные (`Patches.cpp`, `FixPluginWrappers`). Длина команд при этом не меняется.
+Plugins built with older versions of the injector library, including MixSets, Peds Extender, CLEO+, and
+Framerate Vigilante, use `add byte ptr [esp+0Ch], 4` in wrappers that save registers for inline hooks. If
+the low byte is FC, this addition loses the carry and the hook sees a stack address 256 bytes too low.
+A hook that changes its return address then writes to the wrong location and returns into the middle of
+an instruction. Peds Extender crashed at 6133DB when the game selected a train driver. The mod's own hooks
+deepen the stack, exposing the problem in code paths that previously worked. On the first frame and when
+a game starts, `FixPluginWrappers` in `Patches.cpp` finds these wrappers in loaded plugins and replaces
+their byte-sized additions and subtractions with 32-bit operations of the same instruction length.
 
-## Структура исходников
+## Source layout
 
-Исходники разложены по Feature-Sliced Design. Каждая из трёх программ (`src/client`, `src/server`,
-`src/loader`) устроена как отдельное приложение FSD со слоями сверху вниз: `app`, `pages`, `widgets`,
-`features`, `entities`, `shared`. Код, общий для всех трёх (протокол, работа с сетью, лог, ini, утилиты), лежит
-в `src/common`.
+Sources are arranged according to Feature-Sliced Design. Each of the three programs (`src/client`,
+`src/server`, `src/loader`) is arranged as a separate FSD application with top-down layers: `app`, `pages`,
+`widgets`, `features`, `entities`, `shared`. The code common to all three (protocol, networking, log, ini,
+utilities) is in `src/common`.
 
-| Слой клиента | Что в нём | Примеры |
+| Client layer | What's in it? | Examples |
 |---|---|---|
-| `app` | Точка входа, главный цикл и рассылка событий модулям, патчи игры, обработчик падений | `app/core/Core.cpp`, `app/patches` |
-| `pages` | Окна F9 и F2 | `pages/connect-menu`, `pages/players-menu` |
-| `widgets` | Оверлей: табло соревнования, статус, ожидание у маркера, голосование за пропуск | `widgets/overlay` |
-| `features` | Всё, что синхронизируется: сюжет и катсцены, прокачка, гаражи, голос, огонь, погода и время | `features/story`, `features/progress` |
-| `entities` | Сущности: сессия, игрок, машина, пед, миссия хоста, профиль напарника | `entities/player`, `entities/session` |
-| `shared` | Обёртки движка, сетевой клиент, рисование и ввод, чат как компонент, конфиг, хуки | `shared/game`, `shared/ui/chat` |
+| `app` | Entry point, main loop, module event dispatch, game patches, and crash handler | `app/core/Core.cpp`, `app/patches` |
+| `pages` | F9 and F2 windows | `pages/connect-menu`, `pages/players-menu` |
+| `widgets` | Overlay: contest scoreboard, status, mission marker waiting, and skip voting | `widgets/overlay` |
+| `features` | Everything that synchronizes: story and cutscenes, progression, garages, voice, fire, weather and time | `features/story`, `features/progress` |
+| `entities` | Entities: session, player, vehicle, pedestrian, host mission, and teammate profile | `entities/player`, `entities/session` |
+| `shared` | Engine wrappers, network client, drawing and input, chat as a component, config, hooks | `shared/game`, `shared/ui/chat` |
 
-У каждого слайса своя папка, а сложный слайс делится дальше: `features/story` состоит из `missions`,
-`mission-speech`, `cutscene-partner` и `cutscene-clips`. Слой подключает только нижние слои и собственный слайс. Сущности могут
-подключать друг друга (так в FSD работают перекрёстные импорты через `@x`). Правило проверяет
-`tools/fsd_check.py`, его же запускает сборка на GitHub.
+Each slice has its own folder, and the complex slice is divided further: `features/story` consists of
+`missions`, `mission-speech`, `cutscene-partner` and `cutscene-clips`. The layer connects only the lower
+layers and its own slice. Entities can connect to each other (as FSD cross-imports through `@x` work). The
+rule checks `tools/fsd_check.py`, it runs the build on GitHub.
 
-Нижним слоям иногда нужен ответ верхних, например игроку нужно знать, идёт ли миссия хоста. Тогда объявление
-лежит внизу, а определение в слое, которому оно принадлежит:
-- `shared/lib/core/Core.h` объявляет базовый класс модулей и службы ядра, определяет их `app/core/Core.cpp`;
-- `entities/mission/Mission.h` объявляет вопросы о миссии хоста, отвечает `features/story/missions`;
-- `entities/profile/Profile.h` объявляет сохранение профиля напарника, его выполняет `features/progress`.
+The lower layers sometimes need an answer from the upper layers, for example, the player needs to know if the
+host mission is on. Then the ad is at the bottom, and the definition in the layer to which it belongs:
+- `shared/lib/core/Core.h` declares the core class of modules and kernel services, defines them `app/core/Core.cpp`;
+- `entities/mission/Mission.h` announces questions about the host's mission, responds `features/story/missions`;
+- `entities/profile/Profile.h` announces the preservation of the partner profile, it is performed by `features/progress`.
 
-Тестовый бот, конфиги тестов, раннеры и копии игры для проверок в репозиторий не входят. Сборка подключает бота
-ключом `python tools/build.py --with <папка бота>`.
+Test bot, test configs, runners and copies of the game for checks are not included in the repository. The
+assembly connects the bot with the key `python tools/build.py --with <bot folder>`.
 
-## Сеть
+## Networking
 
-В качестве транспорта используется ENet поверх UDP с четырьмя каналами: 0 для надёжных событий, 1 для
-ненадёжных состояний вроде позиций, 2 для голоса и 3 для передачи файлов.
+As a transport, ENet is used over UDP with four channels: 0 for reliable events, 1 for unreliable states like
+positions, 2 for voice and 3 for file transfer.
 
-Игроки соединены звездой через сервер. Игровые сообщения (id от 64) сервер пересылает остальным игрокам,
-подставляя id отправителя, а служебные (вход, команды чата, профили, сохранение мира) обрабатывает сам. Поэтому
-новые виды синхронизации не требуют правок на сервере.
+Players are connected by a star via a server. Game messages (id from 64) the server sends to other players,
+substituting the sender's id, and service (input, chat commands, profiles, peace preservation) processes
+itself. Therefore, new types of synchronization do not require edits on the server.
 
-Ролей две. Хост (первый вошедший, обычно тот, кто создал сервер) владеет сюжетом: миссии идут у него, а его
-сохранение служит общим миром. Второй игрок называется напарником.
+Roles two. The host (the first person to log in, usually the one who created the server) owns the plot: the
+missions go to him, and his preservation serves as a common world. The second player is called a partner.
 
-ENet работает в отдельном потоке клиента. Игра раз в кадр забирает входящие сообщения и отдаёт исходящие через
-очереди.
+ENet operates in a separate client stream. The game takes incoming messages and gives outgoing ones through
+the queues.
 
-Датаграммы ENet бывают до 1392 байт (1420 с заголовками IP и UDP), а такие проходят не по каждой линии: VPN,
-мобильная сеть или роутер, который выбрасывает фрагменты IP, их теряют. Надёжный пакет, который так и не дошёл,
-через 10–20 секунд рвёт соединение. Поэтому клиент и сервер ставят MTU 1200 (`net::kMtu`). При подключении
-стороны берут меньший из двух, так что хватило бы и одной. Перед разрывом клиент пишет в журнал задержку,
-потери, число байт без подтверждения и сколько молчал сервер.
+ENet datagrams are up to 1,392 bytes (1,420 with IP and UDP headers), and these do not run on every line: a
+VPN, a mobile network or a router that throws out snippets of IP, they are lost. A reliable package that never
+reached the connection breaks after 10-20 seconds. Therefore, the client and server set MTU 1200
+(`net::kMtu`). When connecting, the parties take the lesser of the two, so one would suffice. Before the
+breakup, the client writes to the log the delay, losses, the number of bytes without confirmation and how much
+the server was silent.
 
-Через ретранслятор (TURN) и этого мало. У друга, который подключался через него, сервер замолкал с первой крупной
-передачи (мир, данные катсцены), даже пинги не приходили, и через 10–14 секунд соединение рвалось. ENet не шлёт
-пинг, пока у него есть неподтверждённые надёжные пакеты, а их полноразмерные датаграммы на этой линии терялись все.
-Поэтому клиент, который идёт через ретранслятор, просит при подключении самые маленькие датаграммы ENet
-(`net::kRelayMtu`, 576 байт) и объявляет входящую полосу 128 КБ/с (`net::kRelayBandwidth`): из неё сервер выводит
-окно, и неподтверждённого к такому игроку у него не больше 8 КБ. Сокеты ретранслятора на сервере получили буферы
-по 1 МБ, а сам он раз в 30 секунд пишет в `server.log`, сколько датаграмм прошло в каждую сторону и какой самой
-большой длины.
+Through a repeater (TURN) and that's not enough. A friend who connected through it, the server was silent from
+the first major transfer (world, cutscene data), even pings did not come, and after 10–14 seconds the
+connection broke. ENet does not send ping as long as it has unconfirmed reliable packets, and their full-size
+datagrams on this line are lost. Therefore, the client who goes through the repeater asks for the smallest
+ENet datagrams (`net::kRelayMtu`, 576 bytes) when connecting and declares the incoming band 128 KB / s
+(`net::kRelayBandwidth`): from it the server outputs a window, and he has no more than 8 KB of unconfirmed
+datagrams to such a player. The sockets of the repeater on the server received buffers of 1 MB, and he writes
+once every 30 seconds in `server.log` how many datagrams passed in each direction and what is the largest
+length.
 
-Очередь входящих у клиента не растёт без конца. Игра, которая стоит (долгая загрузка, зависание, альт-таб без
-`run_in_background`), копила все состояния и потом применяла их разом, уже устаревшими. После 4000 пакетов в
-очереди новые состояния и голос отбрасываются, события остаются. При разрыве очередь очищается: причина отказа
-или кусок мира из прошлого подключения попадали в следующее. Сообщения от игрока, которого уже нет в сеансе,
-клиент отбрасывает. Сервер шлёт состояния (канал 1) только тем, кто в игре: тому, кто ещё грузится, они не нужны.
+The client’s queue does not grow endlessly. The game, which is worth (long load, hover, alto tab without
+`run_in_background`), saved up all the fortunes and then applied them at once, already outdated. After 4,000
+packets in the queue, new states and voice are discarded, events remain. When the queue is broken, the cause
+of the failure or a piece of the world from the past connection fell into the next one. Messages from a player
+who is no longer in the session are discarded by the client. The server sends states (channel 1) only to those
+who are in the game: those who are still loading do not need them.
 
-Номер протокола стоит в приветствии первым, и сервер проверяет его до разбора остального: старый клиент с
-коротким приветствием получал «повреждённые данные» вместо сообщения о версии. Ники, которые Windows считает
-устройствами (CON, PRN, AUX, NUL, COM1–9, LPT1–9), сервер не принимает, потому что профиль игрока хранится в
-файле с именем ника. Сколько мест на сервере, хост выбирает в окне F9 перед созданием игры: 2, 3 или 4 (`--max`,
-в `server.ini` строка `max_players`). Больше четырёх сервер не даст, сколько бы там ни стояло (`proto::kMaxPlayers`).
+The protocol number is first in the greeting, and the server checks it until the rest is parsed: an old client
+with a short greeting received “damaged data” instead of a version message. Nicks that Windows considers
+devices (CON, PRN, AUX, NUL, COM1–9, LPT1–9), the server does not accept because the player profile is stored
+in a file with the nickname. How many places on the server, the host selects in the F9 window before creating
+the game: 2, 3 or 4 (`--max`, in `server.ini` line `max_players`). The server will not give more than four, no
+matter how much it is (`proto::kMaxPlayers`).
 
-Игрок, у которого вылетела игра, подключается снова под тем же ником сразу. Старое соединение сервер держит до
-таймаута ENet (10–20 с), поэтому раньше такого игрока не пускали («ник уже на сервере», «нет мест»). Теперь,
-если старое соединение молчит дольше 3 секунд, сервер закрывает его как обрыв связи и пускает новое.
+The player who has lost the game, connects again under the same nickname at once. The old connection server
+holds up to a timeout ENet (10-20 s), so before such a player was not allowed (“nick is already on the
+server”, “no seats”). Now, if the old connection is silent for more than 3 seconds, the server closes it as a
+communication break and launches a new one.
 
-## Игра через интернет
+## Playing over the internet
 
-При старте сервер (`src/server/features/internet/Internet.cpp`) пробрасывает UDP-порт на роутере через UPnP. Аренда берётся на час
-и продлевается, так что упавший сервер не оставит порт открытым навсегда. Затем сервер узнаёт свой внешний адрес
-у публичных STUN-серверов через тот же сокет ENet и собирает из внешнего IP, порта и ключа код приглашения
-`XXXX-XXXX-XXXX`. Хост видит код в чате и в окне F9, где есть кнопка «Скопировать». Кроме того, код
-записывается в файл `server-data\invite.txt`.
+At start-up, the server (`src/server/features/internet/Internet.cpp`) sprinkles the UDP port on the router via
+UPnP. The lease is taken for an hour and extended, so that a fallen server will not leave the port open
+forever. The server then recognizes its external address from the public STUN servers through the same ENet
+socket and collects the invitation code `XXXX-XXXX-XXXX` from the external IP, port, and key. The host sees
+the code in the chat room and in the F9 window, where there is a “copy” button. In addition, the code is
+written to file `server-data\invite.txt`.
 
-Друг вводит код в окне F9. Клиент узнаёт свой внешний адрес через STUN, публикует его в сигнальный канал ntfy.sh
-(тема выводится из кода), отправляет хосту пакеты пробивки и подключается. Сервер видит сообщение в канале и
-шлёт пакеты навстречу, так что NAT открывается с обеих сторон.
+A friend enters the code in the F9 window. The client recognizes its external address through STUN, publishes
+it to the signal channel ntfy.sh (theme is output from the code), sends the host punch packets and connects.
+The server sees the message in the channel and sends packets towards it, so that the NAT opens on both sides.
 
-Если у друга и хоста один внешний IP (одна квартира или общий NAT оператора, который не умеет «петлю»), клиент
-находит сервер широковещательным запросом в локальной сети.
+If the friend and host have one external IP (one apartment or a shared NAT of an operator who does not know
+how to “loop”), the client finds the server by a broadcast request on the local network.
 
-В коде зашит внешний IP хоста, поэтому делиться им стоит только с теми, с кем вы играете.
+The code is stitched with an external IP host, so it is worth sharing it only with those with whom you play.
 
-Когда прямого пути нет ни в одну сторону, выручает ретранслятор (`src/server/shared/api/turn-relay/TurnRelay.cpp`). Хост получает
-адрес на TURN-сервере. Подойдёт бесплатный аккаунт metered.ca (20 ГБ в месяц, настройка
-`turn = metered:<приложение>:<ключ>`) или любой TURN-сервер с логином и паролем. Полученный адрес хост
-публикует в канал как `RELAY ip:port` и выдаёт разрешение каждому другу, который появился в канале. Друг шлёт
-пакеты на адрес ретранслятора. Для его NAT это обычный исходящий трафик на публичный сервер, поэтому он проходит
-всегда. ENet хоста видит друга как пир 127.0.0.1:<порт>, потому что у каждого друга свой локальный сокет
-к игровому порту. Клиент сначала пробует прямой путь и через 4 секунды без ответа переходит на ретранслятор.
-Это проверено с локальным TURN-сервером из тестов (`[debug] force_relay = 1`).
+When there is no direct path in either direction, the repeater rescues
+(`src/server/shared/api/turn-relay/TurnRelay.cpp`). The host receives an address on the TURN server. A free
+account metered.ca (20 GB per month, setting `turn = metered:<application>:<key>`) or any TURN server with a
+login and password is suitable. The host publishes the resulting address as `RELAY ip:port` and gives
+permission to each friend who appears on the channel. A friend sends packages to the relay address. For its
+NAT, it’s normal outbound traffic to a public server, so it’s always going through. The ENet host sees the
+friend as a feast of 127.0.0.1:<port>, because each friend has a local socket to the game port. The client
+first tries the direct path and after 4 seconds without a response goes to the repeater. This is verified with
+the local TURN server from the tests (`[debug] force_relay = 1`).
 
-До всего этого сервер должен пропустить брандмауэр Windows хоста. Своя игра хоста заходит через 127.0.0.1, а
-друзей, даже из той же квартиры, не пускало у многих: окно «Предупреждение системы безопасности Windows» оставалось
-за полноэкранной игрой, а отменённое или не увиденное, оно оставляет правила, которые блокируют `coop-server.exe`.
-Галочка только для частных сетей не пускает его, когда сеть отмечена общественной. Перед запуском сервера игра
-читает правила брандмауэра (`INetFwPolicy2`, прав администратора не нужно, `shared/lib/firewall/Firewall.cpp`).
-Если входящий UDP к серверу на текущем профиле сети блокирует правило или его не разрешает ни одно, хост получает
-запрос Windows (UAC): `netsh` удаляет все правила `coop-server.exe` и добавляет одно разрешающее для всех профилей.
-В тестах запрос выключен строкой `[debug] firewall_prompt = 0`.
+Before all this, the server must skip the Windows host firewall. The host's game comes through 127.0.0.1, and
+friends, even from the same apartment, were not allowed to many: the Windows Security Warning window remained
+behind the full-screen game, and canceled or not seen, it leaves rules that block `coop-server.exe`. The box
+only for private networks does not allow it when the network is marked with public. Before starting the
+server, the game reads the firewall rules (`INetFwPolicy2`, no administrator rights required,
+`shared/lib/firewall/Firewall.cpp`). If the incoming UDP to the server on the current network profile blocks
+the rule or none of it is allowed, the host receives a Windows request (UAC): `netsh` deletes all the rules
+`coop-server.exe` and adds one permission for all the profiles. In tests, the request is turned off by line
+`[debug] firewall_prompt = 0`.
 
-Антивирусы находили в файлах мода угрозу. Подписи у них нет, поэтому сборка убирает признаки, по которым их ловили
-обученные модели: у всех трёх файлов есть ресурс версии (`common/config/version/VersionInfo.rc`, номера из
-`COOP_VERSION_STR`), у сервера ещё значок и манифест. Релизная сборка не оставляет в файлах разделы DWARF с именами
-`/4`, `/67` (`--strip-debug`, отчётам о вылетах хватает PDB) и записывает в заголовок PE контрольную сумму, как
-`/RELEASE` компоновщика Microsoft. Сервер запускается сразу, а не приостановленным до включения в задание:
-создать процесс приостановленным и потом продолжить — приём, которым вредоносные программы подменяют чужой код, и
-поведенческие защиты за ним следят.
+Antiviruses found a threat in the files. They do not have a signature, so the build removes the features that
+trained models caught them: all three files have a version resource (`common/config/version/VersionInfo.rc`,
+numbers from `COOP_VERSION_STR`), the server also has an icon and a manifest. The release build does not leave
+the DWARF sections with the names `/4`, `/67` (`--strip-debug`, flight reports are enough for PDB) in the
+files and writes the checksum in the PE header as `/RELEASE` of the Microsoft linker. The server is launched
+immediately, not suspended until it is included in the task: create a process suspended and then continue - a
+technique that malware replaces someone else's code, and behavioral protections monitor it.
 
-## Игроки
+## Players
 
-Локальный игрок остаётся обычным CJ (`CWorld::Players[0]`).
+The local player remains a regular CJ (`CWorld::Players[0]`).
 
-Удалённый игрок сделан настоящим `CPlayerPed`, иначе не получить одежду, жир, мышцы и анимации игрока. В слот
-`CWorld::Players[1]` он попадает только на время своей обработки, поэтому один слот служит всем копиям по очереди, и
-их может быть три. Если оставить копию там, движок включит
-встроенный режим на двоих (`CGameLogic::IsCoopGameGoingOn`) с общей камерой, запретом миссий
-(`CPlayerPed::CanPlayerStartMission`), выключенными гаражами, интерьерами и войнами банд. На всякий случай
-`IsCoopGameGoingOn` перехвачена и всегда возвращает `false`.
+Remote player made real `CPlayerPed`, otherwise you will not get the clothes, fat, muscles and animations of
+the player. The slot `CWorld::Players[1]` only gets it during its processing, so one slot serves all copies in
+turn, and there can be three of them. If you leave a copy there, the engine will turn on the built-in mode for
+two (`CGameLogic::IsCoopGameGoingOn`) with a shared camera, mission ban (`CPlayerPed::CanPlayerStartMission`),
+turned off garages, interiors and gang wars. Just in case, `IsCoopGameGoingOn` is intercepted and always
+returns `false`.
 
-От того же режима осталась привязь: `CGameLogic::IsPlayerAllowedToGoInThisDirection` не пускает второго игрока
-дальше 20 м от первого. Пока копия обрабатывается в слоте `Players[1]`, проверка срабатывала и на неё. Копия
-напарника, который уходил от нашего игрока дальше 20 м, не шла и не плыла, а стояла, и подтяжка позиции тащила её
-за владельцем. Прыжок в ту же сторону дальше 25 м не начинался вовсе, поэтому подъём на стену выглядел как
-скольжение вверх. Функция всегда возвращает `true`.
+From the same mode, the tether remained: `CGameLogic::IsPlayerAllowedToGoInThisDirection` does not let the
+second player further than 20 m from the first. While the copy is processed in the slot `Players[1]`, the
+check worked on it. A copy of the partner, who left our player further than 20 meters, did not go and did not
+swim, but stood, and the position lift dragged it behind the owner. Jumping in the same direction beyond 25 m
+did not begin at all, so climbing the wall looked like a slide up. The function always returns `true`.
 
-Ещё одна проверка того режима, `CGameLogic::IsPlayerUse2PlayerControls`, сама смотрит на оба слота
-`CWorld::Players`, поэтому выключенная `IsCoopGameGoingOn` её не задевала. Копия, которая обрабатывается в слоте,
-целилась по правилам разделённого экрана. Стик присевшего игрока с оружием пересчитывался через камеру на оси самой
-копии. Если копия была повёрнута на несколько градусов от камеры владельца, перекат вбок превращался в шаг
-вперёд или назад. Кроме того, угол прицела копии каждый кадр задавался от стика, даже неподвижного, и копия,
-присевшая с пистолетом, дрожала. Теперь функция всегда возвращает `false`, и копия управляется по тем же правилам,
-что и её владелец.
+Another check of that mode, `CGameLogic::IsPlayerUse2PlayerControls`, looks at both `CWorld::Players` slots
+herself, so the `IsCoopGameGoingOn` switched off didn't hurt her. The copy, which is processed in the slot,
+was aimed at the rules of the split screen. The stick of the crouched player with the weapon was counted
+through the camera on the axis of the copy itself. If the copy was rotated a few degrees from the owner’s
+camera, rolling sideways turned into a step forward or backward. In addition, the angle of sight of the copy
+each frame was given from the stick, even stationary, and the copy crouched with the gun trembled. Now, the
+function always returns `false`, and the copy is controlled by the same rules as its owner.
 
-Конструктор `CPlayerPed` берёт данные игрока из слота (`CWorld::Players[n].m_PlayerData`), и две копии в одном слоте
-делили бы розыск, одежду и наклон прицела. Поэтому у каждой копии свой блок `CPlayerPedData` по номеру её игрока
-(`g_copyData`): перед `CREATE_PLAYER` блок копируется в слот, после него обратно, и `m_pPlayerData` копии указывает на
-него. То, что конструктор выделил (`m_pWanted`, `m_pPedClothesDesc`), остаётся в блоке до следующей копии этого игрока,
-как и в слоте: сама игра освобождает данные слота только при выходе (`CWorld::ShutDown`). Пока копия обрабатывается, эти
-два указателя стоят и в слоте, потому что `FindPlayerWanted` читает их оттуда. Флаг `CPlayerInfo::m_bCanDoDriveBy` у
-каждой копии свой (`RemotePlayer::canDriveBy`): стрельба из окна снимает его только у той, что высунулась.
+The constructor `CPlayerPed` takes player data from the slot (`CWorld::Players[n].m_PlayerData`), and two
+copies in the same slot would share the search, clothing, and tilt of the sight. Therefore, each copy has its
+own block `CPlayerPedData` by its player number (`g_copyData`): before `CREATE_PLAYER`, the block is copied to
+the slot, after it back, and `m_pPlayerData` copies point to it. What the designer has highlighted
+(`m_pWanted`, `m_pPedClothesDesc`) remains in the block until the next copy of this player, as in the slot:
+the game itself releases the slot data only when exited (`CWorld::ShutDown`). While the copy is being
+processed, these two pointers are also in the slot because `FindPlayerWanted` reads them from there. Flag
+`CPlayerInfo::m_bCanDoDriveBy` each copy has its own (`RemotePlayer::canDriveBy`): shooting from a window
+removes it only from the one that leans out.
 
-`CPlayerPed` занимает одну из восьми групп педов, и при удалении педа игра её не возвращает. Каждая новая копия после
-смерти держала бы ещё одну, пока групп не кончится, а скриптовый `CREATE_GROUP` без свободной группы падает. Все копии
-делят одну группу (`g_copyGroup`), лишнюю новая копия сразу отдаёт (`CPedGroups::RemoveGroup`). Работа с бандой у копий
-всё равно идёт в играх их владельцев.
+`CPlayerPed` occupies one of the eight groups of pedes, and when the pede is removed, the game does not return
+it. Each new copy after death would hold another until the groups run out, and script `CREATE_GROUP` without
+the free group drops. All copies are divided into one group (`g_copyGroup`), and an extra new copy is
+immediately given away (`CPedGroups::RemoveGroup`). Working with a gang of spears is still in the games of
+their owners.
 
-Удалённым игроком мод управляет через подмену контекста, как это делают SA-MP и MTA. Перед его
-`CPlayerPed::ProcessControl` подставляются его кнопки геймпада, параметры камеры и прицела
-и `CWorld::PlayerInFocus = 1`, а после вызова возвращаются локальные. Благодаря этому ходьбу, бег, прыжки,
-приседания, ближний бой, прицеливание и стрельбу воспроизводит штатная логика игры. Прицел локального игрока
-его обработка не трогает: режим оружия камеры (`CCamera::m_PlayerWeaponMode`), точка прицела и метка захвата цели
-(`gCrossHair[0]`, её игра выбирает по типу педа) возвращаются вместе с остальным.
+The remote mod player is controlled through context-shifting, just like SA-MP and MTA do. In front of his
+`CPlayerPed::ProcessControl`, his gamepad buttons, camera and sight parameters and `CWorld::PlayerInFocus = 1`
+are substituted, and after a call, local ones are returned. Thanks to this walking, running, jumping, squats,
+melee, aiming and shooting reproduces the regular logic of the game. The sight of the local player is not
+affected by its processing: the camera weapon mode (`CCamera::m_PlayerWeaponMode`), the sight point and the
+target capture mark (`gCrossHair[0]`, its game chooses by the type of pede) return with the rest.
 
-Выстрел копии другого игрока рисуется трассером на всю длину пули (`CBulletTraces::AddTrace`, как у бортовых
-пулемётов). От выстрела игрока игра рисует только короткий бледный кусок в случайном месте, а в прицеле от первого лица
-стоящему игроку не рисует ничего, и другой игрок следа выстрелов не видел (29.10).
+The shot of a copy of another player is drawn by a tracer for the entire length of the bullet
+(`CBulletTraces::AddTrace`, as in onboard machine guns). From the player's shot, the game draws only a short
+pale piece in a random location, and in a first-person sight, the standing player draws nothing, and the other
+player did not see the trace of shots (29.10).
 
-Выстрел из оружия пешком игра делает не в `ProcessControl`, а после обработки кадра
-(`CTaskSimpleUseGun::SetPedPosition`), и только пока сведения об оружии, которые задача взяла, совпадают со сведениями
-для навыка игрока на этот момент (`CPed::GetWeaponSkill`, у игрока навык берётся из `CStats`). Копия брала их с
-навыками владельца, а стреляла уже с навыками своего игрока. Если навыки двух игроков для этого оружия разные
-(новичок, гангстер, мастер), копия целилась и не стреляла, и игроки не видели выстрелов друг друга (29.10). Теперь
-выстрел копии, который приходится на этот кадр, делается в её контексте: с навыками владельца и туда, куда он целится,
-а не по камере своего игрока.
+The game does not shoot from a weapon on foot in `ProcessControl`, but after processing the frame
+(`CTaskSimpleUseGun::SetPedPosition`), and only so far the information about the weapon that the task has
+taken matches the information for the player's skill at this point (`CPed::GetWeaponSkill`, the player's skill
+is taken from `CStats`). The copy took them with the skills of the owner, and shot already with the skills of
+his player. If the skills of the two players for this weapon are different (newcomer, gangster, master), the
+replica aimed and didn't fire and the players didn't see each other's shots (29.10). Now, the shot of the copy
+that happens in this frame is done in its context: with the skills of the owner and where he is aiming, and
+not at the camera of his player.
 
-Задачи педа (`CPedIntelligence::Process`) идут внутри `CPed::ProcessControl`, поэтому в подменённом контексте
-работает почти вся логика игрока, и всё, что она пишет в общие переменные, тоже возвращается:
-- оба геймпада целиком, вместе с вибрацией, и тряска камеры от его снайперской винтовки (`TheCamera` +0x12C, +0x5C);
-- его навыки, выносливость и жир на время обработки берутся из его статистики, а счётчики прокачки после них
-  (`m_SprintStaminaCounter` и соседние, состояние `UpdateFatAndMuscleStats`) остаются своими. Окошки
-  «Выносливость +» и тексты прокачки на это время выключены (`CStats::bShowUpdateStats`);
-- очки ночного и теплового видения, которые он надевает, переключали эффект экрана этого игрока
-  (`CPed::AddGogglesModel` указывает педа на флаги `CPostEffects`): флаги возвращаются, а у педа указатель
-  обнуляется, чтобы снятые очки не выключили свои;
-- его фотоаппарат (`CWeapon::TakePhotograph`) вспыхивал на этом экране, сохранял снимок в галерею этого игрока
-  и платил этому игроку за снимок в кадре: вызов пропускается, снимки он получает в своей игре;
-- работа с бандой (`CPlayerPed::ProcessGroupBehaviour`): вербовка здешних бойцов Grove его кнопками и ненависть
-  Grove к полиции по его здешнему розыску. Вызов пропускается;
-- здоровье этого игрока: скорая, в которую он садится, лечила «игрока» (`CVehicle::SetDriver` даёт бонус
+The peda (`CPedIntelligence::Process`) is set inside `CPed::ProcessControl`, so almost all of the player’s
+logic works in a substituted context, and everything it writes into the common variables also returns:
+- both the entire gamepad, along with vibration, and the camera shaking from his sniper rifle (`TheCamera` + 0x12C, +0x5C)
+- His skills, endurance and fat during processing are taken from his statistics, and the progression counters after
+  them (`m_SprintStaminaCounter` and neighboring, state `UpdateFatAndMuscleStats`) remain their own. Endurance
+  + windows and progression texts are turned off at this time (`CStats::bShowUpdateStats`);
+- The night and thermal vision goggles he puts on switched the effect of the player’s screen
+  (`CPed::AddGogglesModel` indicates the peda to the flags `CPostEffects`): the flags return, and the pedal
+  pointer is reset so that the removed points do not turn off theirs;
+- his camera (`CWeapon::TakePhotograph`) flashed on this screen, saved the picture to the gallery of this player
+  and paid this player for a shot in the frame: the call is missed, he receives pictures in his game;
+- Gang work (`CPlayerPed::ProcessGroupBehaviour`): Grove's recruitment of local fighters with his buttons and
+  Grove's hatred of the police for his local search. Call missed;
+- This player's health: the ambulance he sits in treated the "player" (`CVehicle::SetDriver` gives a bonus of
   `Players[0]`).
 
-Позиция подтягивается интерполяцией к присланному состоянию. Если расхождение больше 5 м или игрок ушёл в землю,
-которая здесь есть (поиск земли `FindGroundZFor3DCoord` под его точкой), он телепортируется.
-Под удалённым игроком в этой игре может не быть земли: пока один из игроков в помещении, его игра выгружает
-уличную карту, а вдали коллизия не загружена. Физика уронила бы его сквозь карту, а подтяжка уравновесила бы
-падение чуть выше порога телепорта, и он так и висел бы под землёй. Поэтому, когда у игроков разные помещения
-до удалённого игрока больше 150 м или под его точкой здесь не нашлось земли, он стоит точно на месте владельца,
-без скорости. Так бывает, например, когда скрипт после миссии на время показа качалки переносит хоста на 270 м.
-
-На ходу игрока поворачивает само движение, а стоящему поворот ставит присланное состояние. Пока игрок целится,
-его поворачивает камера, а она есть только в его игре: копия у другого игрока оставалась повёрнутой туда, куда
-смотрела в начале прицеливания, и только поднимала и опускала оружие. Теперь с зажатым прицелом копия быстро
-поворачивается так же, как владелец.
-
-Наклон прицела игрока (`CPlayerPedData::m_fLookPitch`, по нему `CPedIK::PointGunInDirection` поднимает и опускает
-оружие) игра пишет только в камере от третьего лица (`CCam::Process_AimWeapon`). В прицеле от первого лица
-(снайперская винтовка, РПГ, самонаводящаяся ракетница, фотоаппарат) он остаётся тем, что был, и копия держала
-снайперку вверх, пока владелец целился вниз (02.11). Для этих режимов камеры копия берёт наклон из направления камеры
-владельца, которое и так приходит в состоянии.
-
-Освещение помещения игра включает, когда игрок входит в дверь (`CEntryExit::TransitionFinished`): дополнительный
-цвет `CTimeCycle` из входа внутри помещения. Сохранение хранит его вместе с миром, поэтому после загрузки мира хоста
-напарник получал свет того места, где стоял хост, а после переноса (`/tp`, «переместить к себе», возврат на своё
-место) помещение оставалось освещено как улица. Мод ставит его сам (`game::LightArea`): берёт ближайший к точке вход
-этого помещения и его цвет неба, как дверь. В доме CJ это совпало с тем, что ставит игра (цвет 3, погода 22).
-
-Удалённый игрок за рулём стреляет из окна (`CVehicle::DoDriveByShootings`). Игра делает это только для машины со
-статусом игрока, а его машина здесь зеркало, поэтому мод вызывает эту функцию в контексте удалённого игрока
-с его кнопками. Сторону стрельбы при обычной камере в машине игра берёт из флагов «смотрю влево/вправо»
-активной камеры, и на время вызова их ставят его кнопки. Разрешение стрелять из машины у слота удалённого
-игрока включается при его создании (`SET_PLAYER_CAN_DO_DRIVE_BY`). SMG для такой стрельбы у владельца всю поездку в руке
-(`CPed::RemoveWeaponWhenEnteringVehicle`), поэтому у копии-водителя модель Micro SMG, MP5 или Tec-9 остаётся: она снималась как
-у пассажира, и копия стреляла из пустой руки (#107, разобрано 04.11). Другое оружие у водителя в руке не показывается, как у владельца.
-
-Звук машины (`CAEVehicleAudioEntity::Service`) считает водителя типа PLAYER1 игроком, поэтому машина удалённого
-игрока включала здесь радио и забирала звук мотора игрока. На время этого вызова удалённый водитель становится
-сетевым игроком (`PED_TYPE_PLAYER_NETWORK`).
-
-Попадания считает игра стрелявшего и отправляет событие владельцу жертвы. У остальных пули удалённого игрока
-никого не ранят и нужны только для вида.
-
-Удалённый игрок имеет тип педа PLAYER1, чтобы враги нападали на обоих. Но каждому педу этого типа игра отдаёт тень
-реального времени из нулевой ячейки (`CRealTimeShadowManager::GetRealTimeShadow`), и игроки забирали её друг
-у друга. У того, кому она доставалась без хозяина, деструктор (`CPhysical::~CPhysical` возвращает тень хозяину)
-ронял игру при загрузке мира и при выходе. Поэтому на время этого вызова удалённый игрок становится PLAYER2
-и получает свободную ячейку, как обычный пед. Кроме того, удалённые игроки убираются раньше, чем игра разбирает
-мир при загрузке из игры.
-
-Сохранение (`CPools::SavePedPool`) пишет всех педов типа PLAYER1, которые не сидят в машине, и удалённый игрок
-попадал в сохранения хоста и в мир, который получал напарник. При загрузке игра делает каждого такого педа CJ
-игрока 0 с общими данными игрока (одежда, розыск, прицел), а игроком назначает последнего. Так появлялся второй
-CJ: он бегал по нажатиям игрока и сбрасывал ему прицел, а после загрузки своего сохранения хост оказывался
-в одежде напарника. Теперь на время сохранения удалённый игрок становится `PED_TYPE_PLAYER_NETWORK`. Если копии
-в сохранении уже есть, загружается только сюжетный CJ: тот, на кого указывает `$PLAYER_ACTOR` (глобальная
-переменная 12 в main.scm, к загрузке педов она уже прочитана). Остальные создаются педами игрока 1 без своей
-группы (перехват конструктора в `CPools::LoadPedPool`) и удаляются сразу после загрузки.
-
-Метку на карте (`FrontEndMenuManager.m_nTargetBlipIndex`) каждая игра проверяет раз в полсекунды и при изменении
-шлёт `G_WAYPOINT` (`Waypoint.cpp`). Чужие метки она рисует тем же значком поверх своих меток радара и карты
-(после `CRadar::DrawBlips`), а не заводит для них метки скрипта: так они не попадают в сохранение. Сохранение же
-хранит свою метку, поэтому напарник после загрузки мира хоста снимает метку хоста, доставшуюся ему как своя.
-
-Второй игрок на радаре и карте нарисован стрелкой по его направлению в цвете его метки (`DrawArrows` в том же
-перехвате `CRadar::DrawBlips`, спрайт центра радара; `[game] partner_arrow = 0` возвращает точку). Её размер —
-`SCREEN_STRETCH_X(5)`: с размером стрелки CJ (8) она казалась крупнее его (27.10).
-
-**Путь до метки на радаре** (`Gps.cpp` в той же части, идея 28.10: «маркер с навигацией, чтобы ехать по
-полоске»). Пока игрок в машине, на квадроцикле, мотоцикле или велосипеде (за рулём или пассажиром), на улице и не в
-катсцене, радар показывает путь по дорогам: красной линией до своей метки на карте, а без неё до метки другого
-игрока, жёлтой — до цели миссии (ближайшая метка по координатам без значка на радаре, не ближняя), если меток нет
-(«для целей желтый а для метки красная», 28.10). До цели должно быть больше 30 м. Путь ищет сама игра по узлам для машин (`CPathFind::DoPathSearch` 0x4515D0, от узла у машины
-`FindNodeClosestToCoors` до узла той же связной сети, ближайшего к метке на плоскости: у метки нет высоты). Поиск
-идёт раз в секунду и сразу, если метка сдвинулась или машина ушла с пути дальше 40 м. Игра держит в памяти узлы
-только в 350 м вокруг игрока, поэтому мод заказывает области между игроком и меткой (до 1,5 км вперёд) тем же
-единственным запросом, что и `LOAD_PATH_NODES_IN_AREA` (`MakeRequestForNodesToBeLoaded`), и только если запрос не
-занят скриптом миссии. Если до метки путь не найден (поиск игры бросает после 4950 узлов), берётся путь к точке на
-половине, четверти и восьмой части пути. Линия рисуется первой в перехвате `CRadar::DrawBlips`, под значками,
-четырёхугольниками `CSprite2d::Draw2DPolygon`, и обрезается по кругу радара. Если ограничитель лимитов передвинул
-`ThePaths`, пути нет и в журнале одно предупреждение. Выключается `[game] gps = 0`. Строка есть в `coop.ini`, который
-создаёт мод (`WriteDefaultConfig`), а в старый файл подключение через F9 дописывает её, если её там нет
-(`SaveConnectSettings`): игрок с модом на радар искал, как убрать путь (07.11). Встречное направление дорог и
-закрытые мосты начала игры поиск не учитывает.
-
-Над головой удалённого игрока справа от полоски здоровья виден значок его оружия. Его рисует спрайтовый код игры
-сразу после её интерфейса (перехват `CHud::Draw`): значки лежат в словарях текстур моделей оружия
-(«<модель>ICON»), кулак — спрайт интерфейса. Слева от полоски его звёзды розыска (уровень идёт в состоянии
-игрока): тот же знак «]» шрифта `FONT_GOTHIC` цвета `HUD_COLOUR_GOLD`, что у звёзд интерфейса
-(`CHud::DrawWanted`), только мельче. Их печатает `CFont::DrawFonts` сразу после интерфейса.
-
-Пока другой игрок ведёт игрушку на радиоуправлении (миссии Зеро), его имя с полосками и стрелка на радаре показываются
-над игрушкой, а не над его CJ (`RemoteToy`, `TagAnchor`, `DrawArrows`). Имя над игрушкой видно до 250 м, над CJ до 70
-м: игрушка маленькая, и без метки было не понять, где летает напарник (31.10).
-
-Скрипт, который ставит своего игрока в точку (примерочная магазина одежды, место в миссии), ставил его внутрь
-копии напарника, если тот стоял там же. Педы застревали друг в друге (`CEntity::m_bIsStuck`), и следующая
-скриптовая задача игрока не начиналась: магазин ждал анимацию выхода из примерочной с отнятым управлением. Пока
-игроки внутри друг друга, они не сталкиваются (`CPhysical::m_pEntityIgnoredCollision` у обоих, игра сама
-сбрасывает его, когда они разошлись).
-
-Реактивный ранец летает по кнопкам игрока, а их удалённый игрок здесь получает. Поэтому достаточно флага «с ранцем»
-в состоянии пешком (`CPedIntelligence::GetTaskJetPack`): игра выдаёт ранец своему педу удалённого игрока
-(`TASK_JETPACK`) или снимает его, если ранец остался только здесь.
-
-Что игрок делает на месте (кресло парикмахера, тату, еда, автомат с напитками, спортзал, танец, бильярд, ящик
-в руках, парашют), ему проигрывает скрипт или аттрактор, а не кнопки. Игра владельца сообщает, какую анимацию из
-IFP-блоков этих занятий её игрок играет сейчас (по именам блока и анимации, как у зеркал NPC, `G_PLAYER_ANIM`), а
-другая проигрывает её на копии, как только та пешком и блок загружен (`Anims.cpp`). Когда занятие кончилось,
-копии возвращается стойка: задача игрока снова запускает ходьбу, только когда меняется состояние движения, а пед
-совсем без анимаций роняет игру (см. «Машины и NPC: кто чем владеет»).
-
-Падение тоже передаётся как занятие. Игрока сбила машина, отбросил взрыв или удар, он слетел с мотоцикла: в его
-игре идут задачи падения и подъёма (`CTaskComplexFallAndGetUp`, `CTaskSimpleFall`, `CTaskSimpleGetUp`), а другой
-игрок видел только, что тот снова стоит. Пока идёт такая задача, занятием считается любая анимация вне набора
-походки, кроме мимики, движений рук (`ANIMATION_SECONDARY_TASK_ANIM`) и зацикленных частичных стоек вроде
-IDLE_ARMED. Сами падения KO_* и KD_* в игре помечены частичными (0x10): этот флаг значит «поверх остальных», а не
-«только верх тела». Так же передаётся анимация, которую игроку включил скрипт (`TASK_PLAY_ANIM`, задача 401), из
-любого блока. Прыжок с парашютом проигрывает так свободное падение из блока PED, и раньше копия у другого игрока
-просто падала. С анимацией идёт флаг «держит»: у владельца ею управляет задача, а не кнопки. Пока флаг поднят,
-копия получает пустой геймпад, игра не меняет ей позу ходьбы, не начинает её собственное падение в воздухе
-(`CEventInAir::AffectsPed`) и снимает уже начатое. Иначе `CTaskSimpleInAir` накладывал FALL_fall поверх парашюта.
-
-Анимация идёт между играми по именам, а не по номерам: ключ имени блока (`anim::BlockKey`, FNV-1a от имени в нижнем
-регистре) и ключ имени анимации, который игра сама хранит в `CAnimBlendHierarchy::m_hashKey` (`CKeyGen::GetUppercaseKey`).
-Номера блоков и анимаций у каждой игры свои: сборка вроде Essentials Pack добавляет IFP-файлы в `gta3.img` или меняет
-`ped.ifp`, и номера сдвигаются. До 03.11 мод слал номера, и у игрока со сборкой с модами копия в спортзале и в
-примерочной стояла или играла другие анимации. Получатель находит блок по ключу (`anim::BlockByKey`, таблица
-строится заново, когда меняется число блоков), а анимацию в нём по ключу (`anim::Find`). Если блока с таким именем нет
-(свой файл игрока, которого у другого нет), копия стоит как стояла и чужую анимацию не играет. Так же по именам идут
-анимации зеркал NPC (`PedSyncState`), предметов (`Props`) и бильярда (`G_POOL`). Протокол 39.
-
-Копия, у которой не осталось ни одной анимации тела, стоит в позе привязки, буквой Т. Так её видели, пока
-владелец играл в баскетбол или занимался в спортзале. Раз в секунду такой копии возвращается стойка её набора,
-а в журнал один раз пишется, какие анимации на ней были.
-
-Анимации, которые игрок включает сам (окно U, `features/anims/Emotes.cpp`, окно `pages/anims-menu`). Окно делит их на
-эмоции, позы, действия, танцы, анимации вдвоём и свои, у каждой номер для команды `/anims <номер>` (без номера она
-открывает окно). CJ играет выбранную той же командой, какой миссия включает анимацию игроку: `TASK_PLAY_ANIM`
-(0x0605), а жесты одной верхней частью тела `TASK_PLAY_ANIM_SECONDARY` (0x0A1A), на ходу. Это задача 401, поэтому
-другой игрок видит её на копии через то же «занятие», что и любую скриптовую анимацию (`G_PLAYER_ANIM`), с флагом
-«держит». Команду без прерывания (0x0812) мод не берёт: CJ стоял бы под пулями и машинами. Удар, выстрел, наезд,
-падение, смерть, арест кончают анимацию событиями игры, как миссионную. Позы, стойки, танцы и сидения (зацикленные
-и с удержанием последнего кадра, на всё тело) держатся, пока игрок не нажмёт пробел или F (бег или вход в машину),
-как анимации SA-MP: так выбрал пользователь 03.11 («чтобы длились долго»), раньше их сбивало любое нажатие WASD. Сама
-игра такую анимацию от клавиш не прерывает (`CTaskSimpleRunNamedAnim::ProcessPed`, 0x61BF20, клавиатуру не читает),
-останавливает её только проверка мода. В начале первой такой анимации за игру чат один раз пишет, чем её
-остановить. Короткие анимации по-прежнему останавливают ходьба, прыжок, бег, вход в машину, выстрел, прицел и
-присед. У анимаций с выходом (сесть на землю, лечь, тай-чи, курить) сначала играет выход, у остальных анимация сходит
-на нет (`CLEAR_CHAR_TASKS`). Позы на земле из пака `restpose` выхода своего не имеют и поднимали CJ рывком за четверть
-секунды. Теперь у них выход из анимаций игры, корень которых начинается так же низко (0,8-0,95 м): с земли на спине
-как с пляжа (`SUNBATHE/Lay_Bac_out`), на боку и свернувшись как после падения (`PED/getup`), сидя как с травы
-парка (`SUNBATHE/ParkSit_M_out`). Блок выхода просится вместе с анимацией и играет, только если он в памяти. Клавиша,
-зажатая ещё до начала, ничего не останавливает. На время анимации CJ убирает оружие (`SET_CURRENT_CHAR_WEAPON` 0) и берёт его обратно, если
-оно ещё у него и в руках ничего другого. Анимация не включается в машине, в воде, в воздухе, присев, в катсцене,
-в сцене с камерой игры (широкий экран), пока у игрока отобрано управление (`CPad::DisablePlayerControls`: магазины,
-телефон, сцены миссий), в мини-игре и соревновании, пока CJ занят своей задачей (падает, встаёт, лезет, садится в
-машину, летит на ранце, несёт ящик) и пока он сидит в игрушке или у турели. Если что-то из этого случилось во
-время анимации, мод её бросает и оружие не трогает: CJ теперь у скрипта или у игры.
-
-В окне только то, что используют на RP-серверах SA-MP: сесть, лечь, курить, есть, телефон, жесты, регулировщик (выбор пользователя
-04.11, все 1678 анимаций игры оказались лишними: среди них много того, что на CJ выглядит плохо). Образец: разделы `/anim` сервера
-Samp-Rp и 88 строк окна Advance RP. Сервер не называет анимации игры, поэтому его строки сопоставлены по порядку официального скрипта
-`gl_actions` и по движению в файлах игры. Того, что CJ сам делает в игре, в списке нет: ударов, боевых стоек, стоек с оружием,
-перезарядки, бросков, разминки. Это около 170 строк в `BuildList`, каждая со своим началом и концом, если они есть в игре. Лёжа и после падений CJ встаёт анимациями игры
-(`getup`, `getup_front`). Все имена проверены по `anim/ped.ifp` и `anim/anim.img`. Список листают PageUp и PageDown, Home и End,
-набранная буква переводит к паку на эту букву. Колесо двигает список на три строки, и строки плавно доезжают до места:
-`g_view` догоняет `g_scroll`, а `Renderer::Clip` обрезает их по краю списка.
-Анимация проверяется в загруженной библиотеке (`anim::Find` по ключу `CKeyGen::GetUppercaseKey`): IFP мода вместо игрового может её не иметь.
-Библиотеки, которые мод сам попросил у стриминга (`NeedBlock`, флаг GAME_REQUIRED), отпускаются
-(`CStreaming::SetModelIsDeletable`, 0x409C10, снимает только этот флаг, флаг скрипта MISSION_REQUIRED остаётся), когда из
-них ничего не играет (`CAnimBlock::RefCnt`), их не использует ни анимация CJ, ни превью (копия в превью играет без
-ссылки на блок) и с последней нужды прошло 3 секунды. Иначе после пролистывания в превью в памяти остались бы все 11 МБ
-`anim.img`.
-
-Клавиша U открывает окно и всё равно доходит до игры, а клавиатуру окно забирает только со своего первого кадра.
-Так код, который начинается с U (UZUMYMW, UBHYZHQ, URKQSRK), набирается дальше: его вторая буква в первые 0,6 с
-закрывает окно и тоже уходит в игру. Если U стоит внутри набираемого кода (BAGUVIX, BUFFMEUP), окно не
-открывается: проверка та же, что у чата с T, по списку из 50 кодов с U (буквенные коды и фразы, сверены с хешами
-`CCheat::m_aCheatHashKeys`). Рядом с соревнованием U по-прежнему вызывает на соревнование.
-
-Анимация вдвоём начинается с приглашения (`G_EMOTE`: 1 давай, 2 нет, 3 начали, 4 стоп). Второй игрок отвечает Y
-или N, как на /tp. Ответивший «да» ставится напротив пригласившего, лицом к нему, на расстоянии, на котором их
-ставят скрипты игры: рукопожатие HNDSHKFA в метре (main.scm 0xF302B, Свит 0x113236), деловое 0,92 м (0x15CF78),
-рука на плечо 0,9 м (сцена со Свитом 0x93776), спор 1,2 м (`TASK_GOTO_CHAR` 0x2104E7). Место проверяется: земля на
-той же высоте и прямая видимость от груди до груди (`CWorld::GetIsLineOfSightClear`), иначе ответ «нет» и причина
-в чате. Пригласивший начинает, когда получает «начали», ответивший на половину пинга позже, так что обе части идут
-вместе. Если один остановился или его сбили, второму приходит «стоп». Поцелуй и шлепок по заду пользователь решил
-не добавлять (03.11).
-
-Превью в окне (`AnimPreview.cpp`) — копия тела нашего CJ, а в анимациях вдвоём ещё и копия тела напарника. Копия
-сделана так же, как игра делает тело педа (`CClumpModelInfo::CreateInstance`: `RpClumpClone`, своя иерархия костей
-из кадров клона, атомики кожи переведены на неё, `RpAnimBlendClumpInit`). Анимации на ней двигает анимационный код
-игры, а рисует её своя камера RenderWare в текстуру после основной камеры кадра (вызов `RwCameraEndUpdate` из
-`Idle`, 0x53EBF5, после хука Core), как игра рисует тень педа (`CShadowCamera`). В мире её нет: ни физики, ни
-задач, другой игрок её не видит. Сторона текстуры — степень двойки около двойного размера превью на экране (512,
-1024 или 2048): окно показывает её уменьшенной, и края фигуры выходят сглаженными. Анимацию копия играет так же,
-как скрипт (`TASK_PLAY_ANIM`) на педе: частичной поверх стойки `IDLE_stance`. В анимациях эмоций 26 костей, в стойке
-все 32: челюсть (8), брови (6, 7), живот (201) и «грудь» берутся из стойки. Когда анимация на всё тело играла
-целиком, а стойка уходила, у этих костей не оставалось источника, поворот собирался из пустой суммы, и рот с
-бровями съезжали (03.11). Чтобы корень при этом не проседал, данные анимации копии указывают на «сдвиг педа», как
-у настоящего педа и объекта катсцены (`m_PedPosition`, `CPed::SetModelIndex`): тогда корень идёт через извлечение
-скорости (0x4D1680), как у педа. Без этого корень тела без педа берёт место из суммы весов стойки и анимации
-(`FrameUpdateCallBackSkinned` 0x4D2B90), и сидящий CJ уходил вдвое глубже. После обновления костей превью зовёт
-`CPed::ShoulderBoneRotation` (0x5DF560), как игра в `CPed::PreRender` для модели игрока и в катсценах для
-CSPLAY: у кожи CJ между ключицей и плечом есть кости («грудь», 301 и 302), которые не двигает ни одна анимация.
-Без этого вызова плечи оставались в позе, в которой сделана кожа (руки в стороны), и торчали углами (03.11). Вызов идёт, только если в скелете есть
-кости 21, 22, 31, 32, 301 и 302: иначе код игры пишет до начала массива матриц. Камера держит тела целиком: кости
-проецируются на оси картинки, рамка сразу растёт и медленно сжимается (за 2 с), поэтому петля не «дышит», а
-лежащего CJ камера приближает, когда он лёг. Поворот мышью начинает рамку заново. Под телами пол: светлое пятно и
-тень каждого (`RwIm3D`, веер треугольников на высоте −1 м от середины педа, это низ его рамки столкновений). Свет
-свой: заполняющий, тёплый сверху со стороны камеры (повёрнутый `pDirect`) и холодный сзади для контура (лишний
-направленный, `AddAnExtraDirectionalLight`). После рисования свет кадра и все тронутые состояния отрисовки
-возвращаются. Кадр игры заканчивается с плоским затенением (`rwSHADEMODEFLAT`, видно в логе 03.11): с ним CJ
-выходил в гранях с тёмными треугольниками на джинсах, а пол не был виден (веер красится цветом вершины обода с
-нулевой прозрачностью). Поэтому на время превью затенение плавное (`rwSHADEMODEGOURAUD`). Буфер глубины для камеры
-RenderWare создаёт с типом сглаживания экрана (`_rwD3D9CreateZBufferRaster` 0x4CCE48 берёт `MultiSampleType` из
-`g_D3Dpp`, 0xC9C050), а у текстуры сглаживания нет. По правилам D3D9 они должны совпадать, поэтому на время
-создания нашего буфера сглаживание экрана обнуляется. После сброса устройства RenderWare пересоздаёт растры со
-сглаживанием экрана, тогда камера превью создаётся заново (проверка `GetDesc` буфера глубины). На стенде с Intel
-UHD и MSAA 2x превью рисовалось и без этого: драйвер прощает несовпадение, с другими драйверами не проверено.
-
-Свои анимации — файлы .ifp из папки `coop\anims` (до 32 файлов, до 4 МБ каждый). Игра читает их один раз, когда
-игрок появился, до первой катсцены: катсцена при выходе удаляет последний блок (`RemoveLastAnimFile`), и он
-должен быть её. Игра верит каждому числу в файле, поэтому сначала мод читает файл сам (`Ifp.h`: только ANP3 и ANP2,
-счётчики и размеры в пределах файла, рамки сжатых и несжатых ключей, время ключей не идёт назад, иначе цикл
-анимации не кончается). Блок называется `C_` и имя файла заглавными латинскими буквами, так он одинаковый у обоих
-игроков при любом регистре имени файла. Место в таблице анимаций (`ms_aAnimations`, 2500) у своих блоков в её
-конце, с 2150: блоки игры получают места по порядку, когда загружаются впервые (всего 1871, наш COOPCS 36,
-катсцена до 18), и блок, загруженный после своего, ушёл бы за конец таблицы. Мод регистрирует блок
-(`RegisterAnimBlock`), задаёт ему первое место и число анимаций, а загрузчик игры оставляет известному блоку его
-места (0x4D520A). Счётчик таблицы после загрузки возвращается назад. Если блоки игры всё же дошли до 2150 (игра с
-множеством модов анимаций), свои анимации выключаются. Другой игрок узнаёт свою анимацию не по номеру блока, а по
-имени (`G_PLAYER_ANIM`, операция 5): номера у своих блоков в разных играх разные. Если такого файла у него нет,
-копия просто стоит.
-
-Паки — чужие анимации, которые мод привозит сам (`package/coop/packs`, в игре `coop\packs`), вкладка «Паки» с
-разделом на пак (название и автор над его строками), номера с 601. Почти все паки на сайтах ставятся вместо файла
-игры (`crack.ifp`, `ghands.ifp`, `ped.ifp`), новые в них только анимации, которые отличаются от игровых. Скрипт
-`anim_pack.py` (в папке тестов, `scripts`) находит такие записи (`diff` с файлом игры), переносит их байт в байт в
-файл пака (запись ANP3 сама в себе: имя, последовательности, кадры) и даёт им свои имена (`Graf01`, `Fortnite01`).
-Пак грузится тем же путём, что свои файлы, но раньше них и с приставкой `P_` (`P_FORTNITE`): блоки игры остаются
-своими, скрипты миссий и катсцены видят прежние `GHANDS` и `CRACK`. Места паков в конце таблицы общие со своими
-файлами (с 2150 до 2500), и при переполнении таблицы игрой выключаются вместе с ними. Анимации, у которых корень
-уходит на метры (сальто, танцы, которые двигаются по полу), идут с флагом `MOVES`: `TASK_PLAY_ANIM` с замками X и Y,
-CJ уходит вместе с анимацией и остаётся там, где она кончилась. Без замков тело уходило вперёд и в конце
-возвращалось. Источники паков и авторы перечислены в README и инструкции. Fortnite v1 не взят: его скрипт включает
-танцы самой игры. Повторы выкинуты (в Acrostreet `onehandlayout` равен `onehandflash`, шесть анимаций Military
-Greeting одинаковые, `RHGsign2` из Fortnite совпадает с «Брейк 2» Arch по длине и ходу корня и оставлен у Arch).
-У двух анимаций (приветствие из GTA V, рэп) ключи начинались с −0,05 и −0,3 с, наша проверка такой файл не пускает:
-`anim_pack.py` сдвигает все ключи записи так, чтобы первый был в нуле. Юнит-тест `test_ifp.cpp` проверяет и паки
-(файлы после папки игры). По решению пользователя не взяты 39 анимаций из Assassin's Creed и разговор из GTA LCS. Превью поворачивает камеру к лицу тела, взятому по линии бёдер через 0,4 с после выбора анимации:
-анимации, сделанные для других мест игры, разворачивают тело, и танцы паков стояли спиной.
-
-Набор походки толстого или накачанного CJ лежит в своём IFP-блоке, а игра держит в памяти только блок своего
-игрока (`CClothes::RequestMotionGroupAnims`), поэтому толстый напарник ходил у другого игрока как обычный CJ.
-Теперь блок копии запрашивается по её статистике раз в секунду. Сборка тела копии (`ConstructPedModel` под
-`MuscleFrom`) просила блок по мышцам копии и отпускала блок своего игрока. Стриминг его выгружал, пока игрок стоял,
-и первый шаг читал пустой набор походки: так падала игра в `CTaskSimplePlayerOnFoot::PlayerControlZelda` (0x68861B).
-После каждой такой сборки блок своего игрока запрашивается снова. Сборку без словаря текстур модели мод
-пропускает: на балаклаве «Home Invasion» игра падала в `RwTexDictionaryForAllTextures` (0x7F3737).
-
-Стиль боя из спортзала (`CPed::m_nFightingStyle` +0x72D и приёмы +0x72E) идёт в описании облика, и копия дерётся
-так же, как владелец. Раньше бокс и кунг-фу у другого игрока выглядели обычными ударами. Приёмы теперь хранит
-и профиль напарника (версия 4).
-
-На одно место скрипта (кабинка тира, кресло парикмахера, тренажёр, примерочная, стол казино) каждая игра ставит
-своего игрока, и два тела стояли друг в друге. Копия, которая больше секунды стоит внутри своего игрока, теперь
-прячется вместе с именем над головой, пока они не разойдутся. В катсцене напарника показывает `ScenePartner`,
-и там копия не прячется.
-
-Дверь примерочной в магазине одежды — объект с анимацией (`CJ_BINCO_DOOR` и ещё пять моделей 2873–2879 из
-props2.ide). Его создаёт и качает (`PLAY_OBJECT_ANIM` блока `CLOTHES`) скрипт магазина `CLOTH` каждой игры, и только
-для своего игрока. Копия другого игрока входила в кабинку сквозь закрытую дверь (28.10). Теперь, когда у копии
-начинается анимация входа или выхода (`CLO_In`, `CLO_Pose_Out` — дверь `CLO_Pose_Out_O`, `CLO_Out`, `CLO_Pose_In` —
-`CLO_Pose_In_O`, в тех же парах, что в скрипте), игра качает свою дверь в 4 м от копии на том же времени
-(`SwingBoothDoor` в `Anims.cpp`). Если у второго своего скрипта магазина нет (пришёл через /tp), двери нет и
-качать нечего.
-
-Мотоцикл другого игрока у нас зеркало, и состояния владельца толкали его в бордюры и машины.
-`CBike::VehicleDamage` сбрасывает седоков (`DamageKnockOffRider`) раньше, чем проверяет защиту от столкновений,
-поэтому наш игрок слетал с заднего сиденья, хотя у водителя ехал дальше. Пока наш игрок сидит сзади на таком
-мотоцикле, сбросить его нельзя (`CPed` +0x474, биты 27–28, как `SET_CHAR_CAN_BE_KNOCKED_OFF_BIKE`), а потом он
-получает прежнее значение. Падение водителя решает его игра: если его копия здесь оказалась пешком без события
-выхода, наш игрок слезает тоже. Так же защищена копия на мотоцикле, которым правим не мы. На нашем мотоцикле её
-сбросить можно, иначе не падал бы и наш водитель: игра никого не сбрасывает, если одного из двоих сбросить нельзя.
-
-Модель игрока, которую сменил мод со скинами (`SET_PLAYER_MODEL`, 0x47A820), идёт в описании облика (0 — CJ
-в своей одежде). Другая игра меняет модель копии так же, как эта команда: удаляет объект RenderWare, ставит
-модель заново и сохраняет набор походки. Особые персонажи (290–299) загружаются под именем, которого другая
-игра не знает, поэтому там игрок остаётся CJ.
-
-Копия другого игрока умирает его анимацией. Его игра сообщает, каким падением из набора по умолчанию он упал
-(`G_PLAYER_DEATH`, перехват конструктора `CTaskComplexDie`). Флаг смерти в состоянии приходит раньше, поэтому
-копия ждёт эту анимацию до 300 мс. Раньше любая смерть игрока у другого выглядела одним падением навзничь.
-
-Напарник, которого убили или арестовали во время миссии хоста не дальше 300 м от хоста, возвращается справа от
-хоста, а не у больницы или участка на другом конце карты: враги миссии идут на любого PLAYER1, и миссия
-продолжается без него.
-
-Если хост во время миссии сел в транспорт, где напарнику нет места (мотоцикл, погрузчик, «Пикадор» Райдера
-с Райдером, полный «Гринвуд» Свита), напарник сразу садится за руль транспорта той же модели
-(`WARP_CHAR_INTO_CAR`) и получает сообщение в чате. Раньше транспорт только появлялся рядом, и пока напарник садился, хост
-уезжал (04.11). Пока напарника держит другое, транспорта нет, и попытка повторяется раз в секунду: скрипт или
-сцена (`DisablePlayerControls`, широкий экран, мини-игра), турель (`AttachedTo`), ранец, посадка в другую машину, смерть.
-Выйти из выданной машины можно, вторая на ту же машину хоста не придёт (`m_bikeFor`).
-
-В миссиях Зеро и Торено (сценарии `zero*`, `toreno*`, `des*` и `maf4`, восьмая миссия пустыни с ранцем, 0.3.3) так же выдаётся самолёт или вертолёт, если
-хост сам за штурвалом и места для напарника нет, и реактивный ранец, когда хост его надел (`TASK_JETPACK`, модель 370
-грузится в фоне). Ранец выдаётся один раз на каждый, который надел хост. Радиоуправляемые игрушки Зеро (RC Baron,
-Raider, Goblin, Tiger, Cam, Bandit) в счёт не идут: в них не летают.
-
-В миссиях самого Зеро хост не летит (0.3.3, решение 31.10, `features/story/rc-toys`). В «Air Raid» (`ZERO1`) он сидит
-на турели (`ATTACH_CHAR_TO_OBJECT`), в «Supply Lines» (`ZERO2`) ведёт RC Baron, в «New Model Army» (`ZERO4`) RC Goblin
-над столом в области 10. Пока турель или игрушка хоста работает, его игра шлёт напарникам `G_RC`, и игра напарника
-даёт ему своё: в «Air Raid» пулемёт рядом с турелью хоста, в остальных свою игрушку той же командой, что и миссии
-(`GIVE_REMOTE_CONTROLLED_MODEL_TO_PLAYER`): RC Baron на крыше Зеро или RC Goblin в 6 м от игрушки хоста на столе.
-`CRemote::GivePlayerRemoteControlledCar` (0x45AB10) ставит игрушку на землю под заданной точкой, записывает её в
-`CPlayerInfo::m_pRemoteVehicle` (+0xB0) и отключает машину, в которой сидит CJ: поэтому миссии сажают CJ в фургон или
-на велосипед. Пеший CJ ходил бы от тех же стиков и стрелял бы от той же кнопки, поэтому напарник на это время стоит
-замороженный и без оружия в руках. Подгрузка мира идёт вокруг игрушки (`CStreaming::Update`), а столкновения и
-интерьеры по области игрока: для стола его CJ переходит в область 10 там, где стоит, а назад его отпускают, когда под
-ним снова есть пол улицы. Клавиша посадки в машину возвращает напарнику его CJ, и до конца этой части миссии хоста ему
-больше ничего не дают. Вместо сбитой игрушки через 8 секунд дают новую. Пулемёт игрушки
-(`CWeapon::FireOneInstantHitRound`, 0x73AF00) бьёт машины без автора выстрела и с номером оружия Micro SMG: пока у
-игрока есть игрушка, `Damage` считает такое попадание по копии его выстрелом и пересылает владельцу. Игры сообщают
-друг другу сетевой номер игрушки своего игрока (`G_RC` 2), и без огня по своим её не ранят.
-
-Взрыв игрушки решает флаг `CVehicle::bDisableRemoteDetonation` (0xC1CC00), его ставит `SET_ENABLE_RC_DETONATE`. Машина
-в режиме `STATUS_REMOTE_CONTROLLED` взрывается от кнопки огня (`CarGunJustDown`), если флаг снят, а у самолёта RC
-Baron огонь это та же кнопка. Миссии Зеро взрыв выключают. Мод включал его, считая, что игрушку взрывает клавиша
-посадки, и самолёт напарника в «Supply Lines» взрывался вместо выстрела (31.10). Теперь взрыв выключен, как в миссиях.
-
-Пулемёт в «Air Raid» мод делает так же, как миссия делает его хосту. Турель хоста это невидимый объект без
-столкновений на крыше Зеро, к которому CJ прикреплён с миниганом (`ATTACH_CHAR_TO_OBJECT` со смещением -0,25 -0,5
-1,25, полным кругом и оружием 38, затем `SET_HEADING_FOR_ATTACHED_PLAYER 270 300` и `SET_CHAR_PROOFS`). Хост шлёт
-место и поворот своего объекта (`G_RC` 1 с моделью минигана 362). Игра напарника ищет в 1,8-3,5 м от него место, где
-пол крыши на той же высоте и нет препятствий, ставит туда свой объект и прикрепляет к нему CJ. Прикрепление даёт
-миниган (`CPed::AttachPedToEntity`), а отцепление возвращает в руку прежнее оружие. Миниган занимает слот тяжёлого
-оружия: что лежало в этом слоте, мод запоминает и потом отдаёт. Пока напарник у пулемёта, он неуязвим, а потом
-возвращается туда, где стоял. Раньше напарник получал здесь RC Baron, неотличимый от самолётов Беркли, которых сбивает
-хост (31.10).
-
-Пока напарник смотрит сцену хоста на движке (`SceneWatched`), игрушку ему не дают: сцена забирает камеру и в конце
-отдаёт её CJ, а не игрушке. Игрушка, выданная в начале «Supply Lines», летала вне кадра, а на экране стоял
-замороженный CJ (31.10). `CRemote::GivePlayerRemoteControlledCar` наводит камеру через `CCamera::TakeControl` (цель
-камеры в `TheCamera` +0x958, режим `MODE_BEHINDCAR`). Если цель камеры не игрушка, а сцены и катсцены нет, мод наводит
-камеру на игрушку снова.
-
-Игрушку игра ставит на землю под заданной точкой (`CWorld::FindGroundZFor3DCoord`), а столкновения подгружаются вокруг
-CJ. Для CJ напарника на улице стола в области 10 не было: вертолёт падал под него в пустоту, и экран оставался зелёным
-(31.10). Поэтому для стола CJ напарника сначала переходит в область 10 и ждёт рядом с местом, где миссия держит CJ хоста
-(на велосипеде в воздухе у -1004, 1001), а камера тем временем смотрит на стол с точки одного из планов самой `ZERO4`.
-Игрушка ждёт пол под своим местом до 8 секунд (`ToyPlace`). Место ищется кольцами в 4-8 м от игрушки хоста: пол не
-выше её точки и не ниже на 1,5 м на крыше или на 7 м у стола (стол лежит на 5 м ниже вертолёта хоста), и на метр
-вокруг пусто. Первая проверка ждала пол в 1,5 м от высоты вертолёта хоста и сам стол за пол не считала: напарник по
-8 секунд висел в пустоте снова и снова (31.10, четвёртая проверка). Если пол так и не появился, в этой части миссии
-игрушку больше не дают. После игрушки CJ возвращается на улицу туда, где стоял.
-
-Напарника дальше 300 м от магазина Зеро мод один раз за часть миссии переносит к его двери (`ComeOver`), как это
-сделал бы перенос за хостом (`CS_FOLLOW`): не из своей подработки, магазина или после гибели, а машина, которую он ведёт,
-переносится вместе с ним. Пока CJ хоста сидит в замороженном транспорте, `CS_FOLLOW` ждёт до конца миссии, и напарник,
-рядом с которым хост набрал /mission zero2 в 2,8 км от магазина, остался без самолёта (31.10). Для пулемёта в «Air
-Raid» переноса нет: туда напарника приводит обычный `CS_FOLLOW`, ведь хост на турели может двигаться. Сам /mission
-запускает миссию там, где стоит хост: из Лос-Сантоса `ZERO2` ставила самолёт хоста на крышу, которая ещё не
-загрузилась, и он оказывался под землёй. В игре миссию начинают в магазине, и этого не бывает. В тестовой сборке
-/mission для миссий Зеро сначала переносит хоста к двери магазина, если он дальше 50 м (01.11: в 4,4 км от магазина
-хост снова оказался под текстурами).
-
-Игрушку напарника мод убирает сам (`DropToy`). `REMOVE_RC_BUGGY` только возвращает игроку CJ, а машина остаётся в
-мире: RC-самолёт напарника падал без пилота и взрывался рядом с ним (01.11, «Supply Lines»). Теперь после этой команды
-игрушку удаляет `DELETE_CAR`. Игрушка для стола в «New Model Army» появлялась в нулевой области и в зале (область 10)
-была не видна: напарник управлял невидимым вертолётом (01.11). Теперь она получает область своего места
-(`SET_VEHICLE_AREA_VISIBLE`). После игрушки у стола CJ напарника выходит к двери магазина Зеро, а не на прежнее
-место в городе, откуда его забрали.
-
-У вертолёта напарника на столе магнит, как у хоста (выбор игроков 02.11, `Objects.cpp`). Магнит хоста работает через
-скрипт `ZERO4`: точка в метре под вертолётом (`GET_OFFSET_FROM_CAR_IN_WORLD_COORDS 0,0,-1`), предмет в метре от неё
-(`LOCATE_OBJECT_3D`), кнопка огня (кнопка 17) и `ATTACH_OBJECT_TO_CAR`. У напарника под вертолётом висит такой же
-`MINI_MAGNET`, и кнопка огня так же поднимает копию бочки (`BARREL2`) или доски (`KMB_PLANK`) и сбрасывает её. Игра
-хоста по `G_OBJ_HOLD` (`MAGNET`) цепляет настоящий предмет к своей копии вертолёта напарника, а при сбросе (`RELEASE`)
-отцепляет его там, где висела копия. Так напарник убирает препятствия с пути бандита. Предмет, который уже висит на
-магните (хоста или Беркли), взять нельзя, а если чужой магнит его забрал, напарник его отпускает. Бомба (`RCBOMB`)
-остаётся делом хоста: скрипт взрывает только ту, что сбросил его магнит. Хост видит магнит и под вертолётом напарника.
-
-Игра помнит, через какую дверь пед вошёл в интерьер (`CPed::m_pEnex` +0x78C), и по ней выводит его наружу.
-Игрок, перенесённый в интерьер к другому (`/tp`, сохранённое место, перенос к хосту), оказывался там без двери.
-Теперь он получает дверь копии того, к кому его перенесли, а если у копии её нет, ту дверь на улице, у которой
-стоял тот игрок (`StreetDoorOf`). Копия другого игрока тоже получает дверь, через которую он вошёл.
-
-После обработки копии её поворот выравнивается по владельцу, когда тот целится или когда они разошлись больше
-чем на 45°. С прицелом игра поворачивала копию туда, куда целится камера владельца из точки, где стоит сама
-копия, то есть до 7° в сторону. Стик в приседе игра раскладывает по осям самого персонажа, и кувырок вбок
-превращался у копии в шаг вперёд. Разворот на 180° мог идти в другую сторону. Кувырки в приседе
-(`CROUCH_ROLL_L/R`) идут как занятие, а присевшая копия после занятия возвращается в стойку приседа, а не в
-обычную стойку: раньше она на 0,4 с вставала. Перезарядка (`ANIM_ID_RELOAD`, `CROUCHRELOAD` групп оружия)
-передаётся анимацией: у копии патроны не кончаются, и сама она не перезаряжалась.
-
-Когда игрока ведёт задача, а не стик (проход к двери магазина `CTaskComplexGotoDoorAndOpen`, ходьба по команде
-скрипта: задачи 900–939), владелец ставит флаг `F_TASK_WALK`. Копия получает стик, который ведёт её тем же
-поворотом и с той же скоростью, а толчок двери (`Walk_DoorPartial`) идёт как занятие, которое её не держит:
-когда он кончается, копия идёт дальше, а не встаёт и не трогается заново. Раньше копия скользила стоя и
-крутилась юлой: её стик относительно неподвижной камеры у двери показывал куда попало. Флаг стоит весь переход
-через дверь (`CEntryExitManager::ms_exitEnterState`), а не только пока идёт задача двери. Пока экран темнеет,
-игрок идёт внутрь под пустой задачей `CTaskSimpleUninterruptable`, а пад у него уже снова включён: копия бежала
-по его стику и камере двери в сторону, а то и назад на улицу. Владелец передаёт и сам признак перехода
-(`F2_DOOR`), и копия, развернувшись больше чем на 115°, пропадает до переноса внутрь.
-Пока сама копия садится в машину (`EnteringCar`: задача посадки водителем или пассажиром), этот стик ей не даётся.
-К двери владелец идёт задачей, флаг стоит, и стик спорил с задачей посадки копии: она шагала на месте, пока
-синхронизация через несколько секунд не сажала её в машину (27.10).
-
-Хост и напарники стоят рядом по одному правилу. `PartnerRank` даёт напарникам порядок, одинаковый во всех играх: первый,
-второй, третий по номеру игрока, хост вне счёта. `PartnerSide` ставит первого справа от того, к кому его ведут, второго
-слева, третьего позади. Так идут перенос за хостом (`CS_FOLLOW`), возвращение после смерти рядом с хостом, появление после
-загрузки мира, вход в чужую подработку, места в конкурсе лоурайдеров и в танце. Турели и игрушки Зеро ищут место от разных
-точек круга вокруг хоста, второй стрелок и третий садятся рядом с первым со сдвигом 0,8 м. Точка старта миссии тем шире,
-чем больше игроков: на одном пятачке четверо не встанут.
-
-Перемещение `/tp` и `/tphere` при трёх и четырёх игроках идёт по номеру игрока (`/tp 2`): ники неудобно набирать. Номера показывают
-окно F2 и `/players`, над головами остаётся только ник, а команда без номера пишет в чат список. Ник тоже подходит. Запросов может быть несколько
-сразу: своих по одному на игрока (`g_asked`), чужие стоят в очереди, и Y или N отвечает первому (`g_asking`). При двух игроках номер не
-нужен и нигде не показывается. Те же команды в окне F2 идут кнопками со стрелками.
-
-Если игроков трое или четверо, игра владельца объявляет то, что стоит рядом с любым другим игроком, и сообщение идёт
-всем. Игрок вдали от этого места получил бы копии чужих улиц, которых при двух игроках у него нет, и они заняли бы пулы.
-`FarFromUs` держит такие машины в `m_pending`, а педов без педа в записи, пока до них дальше тех же расстояний, что у
-владельца (170 и 120 м на появление, 220 и 150 м на уход). Состояния при этом обновляют запись. Машины скриптов и
-машины, в которых сидит игрок, показываются всегда: на них держатся метки миссий, стрелки и сами игроки. Вид и
-повреждения вернувшейся машины приходят со следующей рассылкой владельца, она идёт раз в 10 секунд.
-
-Когда игрок уходит, его машины и людей оставляет себе одна игра (`WeInherit`): хоста, а если ушёл хост, то первая по
-номеру. Она объявляет их заново, остальные удаляют свои копии. Иначе каждая оставшаяся игра сделала бы их своими и
-показывала бы чужие поверх своих. Свою машину, в которой сидишь, игра не удаляет. Население двух напарников вдали от
-хоста создаёт первый из них (`UpdateSuppression`): без этого на одной улице были бы люди обеих игр.
-
-## Машины: водитель, пассажир, угон
-
-В машинах игроки равны.
-
-Сесть за руль можно в любую припаркованную машину, а машину с водителем-NPC можно угнать: водитель
-вытаскивается штатной анимацией. Это работает и с машинами, которые симулирует другой игрок. У владельца машины
-удалённый игрок выполняет ту же задачу посадки (`CTaskComplexEnterCarAsDriver`), а выкинутый NPC остаётся
-у владельца. Машину игрок забирает себе в первый же кадр за рулём. Раньше это ждало отправки состояния, которая
-идёт не чаще раза в 33 мс, и следующее обновление копии успевало вернуть ей заглушенный мотор владельца:
-машина не ехала, пока в неё не сядешь снова (issue #43).
-Когда NPC вытаскивает игрок этой игры или копия, у владельца педа тот уже стоит снаружи, а здесь его зеркало ещё
-тянет из машины задача посадки. Раньше зеркало в этот момент сразу ставилось рядом с машиной и вставало без
-анимации, будто от задержки связи (27.10). Теперь, пока в эту машину садятся (`m_nNumGettingIn`, +0x485, или
-задача посадки водителем 701/713 у нашего игрока или копии с этой машиной), зеркало ждёт конца анимации, но не
-дольше 6 секунд (`kCarTaskGraceMs`).
-
-Клавиша `G` (её можно поменять) сажает на ближайшее свободное пассажирское место. В одиночной игре такой
-возможности нет, а мод её добавляет. Сесть можно к напарнику, к NPC или в пустую машину. На геймпаде свободной
-кнопки нет, поэтому пассажиром садятся, удерживая кнопку входа (треугольник) полсекунды: начатая посадка за руль
-снимается, и игрок идёт к пассажирскому месту (`Players::HoldForPassengerSeat`). То же удержание действует и для
-клавиши входа на клавиатуре.
-Пока игрок целится или держит цель, `G` вербует бойцов Grove, и раньше CJ вместо этого шёл к машине рядом.
-В это время клавиша пассажира не работает.
-
-Место мод выбирает у ближайшей двери (`NearestFreeSeat`): для каждого свободного места игра называет его дверь
-(`CCarEnterExit::ComputeTargetDoorToEnterAsPassenger`) и точку, где её открывают (`GetPositionToOpenCarDoor`), и
-берётся место, чья точка ближе к игроку. Раньше бралось первое свободное место, то есть правое переднее, и CJ обходил
-машину мимо свободной задней двери (просьба пользователя, 03.11). Места без своей двери (у автобуса, четвёртое место
-фургона) идут последними. Так же выбирает место и клавиша входа у машины, за рулём которой другой игрок.
-
-Из воды к Skimmer, Vortex, Sea Sparrow и Leviathan игра плывёт к ближайшей из двух передних дверей, какое бы место ни
-было нужно (`CTaskComplexEnterCar::CreateFirstSubTask` и по дороге `CTaskComplexGoToCarDoorAndStandStill`, обе через
-`CCarEnterExit::GetNearestCarDoor`). Пассажир доплывал до двери пилота и брался вытаскивать оттуда копию напарника, а пилот
-до двери пассажира, где сидел напарник, и никто не садился. С пирса оба садились (жалоба игроков, 08.11). Теперь у игрока
-и копии игрока в воде, если место у выбранной двери занято, а у другой передней свободно, ответом будет свободная дверь
-(перехват `GetNearestCarDoor`, `Players.cpp`). На суше, у NPC и когда оба места свободны, всё как в игре.
-
-Пассажир стреляет из окна. Такая стрельба в игре есть только в режиме на двоих с разделённым экраном
-(`CTaskSimpleCarDrive::ProcessPed`, 0x6449AB): игрок на пассажирском месте высовывается с оружием
-(`CTaskSimpleGangDriveBy`). Мод подменяет в этой ветке вызов `CGameLogic::IsCoopGameGoingOn` своей проверкой:
-сеанс идёт, зажата правая кнопка мыши (в машине это `m_bVehicleMouseLook`) или R1 на геймпаде, камера ещё не
-в режиме прицела из машины, в руках огнестрельное оружие мгновенного попадания с патронами. Проверки слота
-пистолетов-пулемётов и камеры режима на двоих после вызова убраны: сама задача берёт любое оружие мгновенного
-попадания. В конце посадки игра ставит в руки узи, Tec-9 или MP5, если они есть
-(`CPed::RemoveWeaponWhenEnteringVehicle`, 0x5E6370). Пассажиру, который сел с другим огнестрельным оружием
-мгновенного попадания (M4, дробовик, пистолет), мод его оставляет (#83): на время вызова снимает
-`CPlayerInfo::m_bCanDoDriveBy`, и игра убирает модель оружия, как в машине без стрельбы, а наклон из окна
-возвращает её в руку. Водитель, пассажир с кулаками, холодным оружием или пистолетом-пулемётом получают своё
-оружие, как раньше. Высунувшись, пассажир меняет оружие колесом мыши или крестовиной геймпада вверх и вниз
-(`Players::PassengerWeaponWheel`): в машине обе выставляют `DPadUp`/`DPadDown` для радио. По кругу идёт оружие
-мгновенного попадания с патронами, выбранное остаётся в руках и после выхода (`m_nSavedWeapon` = 55). Радио в это
-время колесо не слышит: два его вызова `CPad::NextStationJustUp`/`LastStationJustUp` (0x4EB72A, 0x4EB753)
-перенаправлены. Задача стрельбы из окна держит данные оружия с начала (`m_pWeaponInfo`, +0x30), поэтому у игроков
-мод сбрасывает их каждый шаг, и задача берёт их у оружия в руке. Без кнопки задача стрельбы, которую начал мод, заканчивается: перехват
-`CTaskSimpleGangDriveBy::ProcessPed` ставит ей флаг завершения (+8), а стрельбу, которую дала миссия, не трогает.
-Обрабатывается тот игрок, что в фокусе, поэтому копия напарника высовывается у нас под его кнопками. Его игра
-добавляет кнопку мыши в R1 состояния, которое шлёт, пока он пассажир (`FillCommon`).
-Оружие копии в машине мод ставит сам, `CPed::SetCurrentWeapon` (0x5E6280): он сразу меняет слот и модель.
-`SET_CURRENT_CHAR_WEAPON` у педа-игрока только записывает выбор (`m_nChosenWeapon`), а применяет его
-`CPlayerPed::ProcessWeaponSwitch` (0x60D850) только пешком. Копия пассажира, сменившего оружие колесом,
-оставалась с узи, который игра дала ей при посадке, и второй игрок видел в её руке пистолет-пулемёт (27.10). Пока
-владелец не высунулся (нет R1), модель оружия у копии убрана (`CPed::RemoveWeaponModel`, 0x5E3990), как у
-сидящего пассажира.
-
-Водитель высовывается так же (0.3.3, выбор игроков 01.11). В игре это ветка водителя в `CTaskSimpleCarDrive::ProcessPed`
-под читом «прицеливание за рулём» (OUIQDMW, `CHEAT_WEAPON_AIMING_WHILE_DRIVING`): с включённым читом игрок за рулём
-высовывается с пистолетом-пулемётом из слота 4. Мод заменяет чтение флага чита (0x6446B6) вызовом своей проверки
-(`DriverDriveBy` в `Players.cpp`, через вставку, которая сохраняет ecx и edx) и убирает проверку слота 4 после него.
-С включённым читом проверка повторяет игру. Без чита в сеансе водитель высовывается, пока держит правую кнопку мыши
-(`m_bVehicleMouseLook`; R1 у водителя ручник, поэтому на геймпаде этого нет), с любым огнестрельным оружием
-мгновенного попадания в руке и пока миссия не запретила стрельбу из машины (`m_bCanDoDriveBy`). Отпустил кнопку, и
-задача заканчивается своей командой 7, как у пассажира. Копия водителя такой кнопки в состоянии не получает: она
-высовывается, пока камера её владельца в режиме прицела из машины (`MODE_AIMWEAPON_FROMCAR`, его ставит сама задача
-стрельбы для игрока, `CTaskSimpleGangDriveBy::SetupStaticAnimForPlayer`). Повторно задачу не дают, пока она идёт
-(`CTaskManager::FindActiveTaskByType`, задача 1022).
-
-Камеру высунувшегося водителя при стрельбе тянуло к центру (01.11, снова 02.11). Прицел из машины
-(`CCam::Process_AimWeapon`) у водителя ведёт таймер бездействия (0xB6EC48, мс). Когда тот прошёл 2 с и прицел ближе 30°
-к носу машины, или прошёл 5 с, камера плавно возвращается к носу. Таймер сбрасывает только стик режима на двоих и
-выстрел, пока таймер меньше 2 с. Мышь его не трогает, и пока водитель держал мышь на месте и стрелял, камеру уводило к
-центру. Пока водитель-игрок высунулся, мод держит таймер на нуле. Поворот педа здесь ничего не даёт: игра каждый кадр
-ставит водителю поворот машины (`CPed::SetPedPositionInCar`).
-
-Пассажир стреляет и из ракетниц (#94, только пассажир по выбору игроков). Задача стрельбы из окна сразу
-заканчивается для оружия не мгновенного попадания (0x62D3DF): эта проверка заменена вставкой, которая пропускает
-РПГ и самонаводящуюся ракетницу у пассажира-игрока (`DriveByWeaponOk`). `CWeapon::FireProjectile` стреляет ракетой
-игрока только из камеры прицеливания (`MODE_ROCKETLAUNCHER` и других от первого лица), а высунувшись она в режиме
-прицела из машины. На время выстрела (вызов `CWeapon::Fire` из `CTaskSimpleGangDriveBy::FireGun`, 0x628328) мод
-ставит камере `MODE_ROCKETLAUNCHER`, и ракета летит туда, куда смотрит камера. Захвата цели нет, самонаводящаяся
-летит прямо. У копии пассажира ракета не стреляет: её присылает игра владельца (`Fire`). Круглый прицел
-высунувшегося игрока `CHud::DrawCrossHairs` рисует только для оружия 22-33, 37 и 38, и у ракетниц прицела не было
-(01.11). Вставка на 0x58E1C7 добавляет к ним 35 и 36 в режиме прицела из машины.
-
-Машиной владеет её водитель. Как только игрок сел за руль, его игра начинает рассылать физику машины: позицию,
-кватернион, скорости, руль, газ и тормоз, повреждения, сирену и гудок. У зеркала статус машины под управлением
-ИИ, поэтому его ИИ-руление (`CCarCtrl::SteerAICarWithPhysics`) отключено: без задания оно жало тормоз и ручник,
-и зеркало ехало рывками. Повреждения владельца зеркало показывает так, как их строит загрузка сохранения: чинит машину
-(`CAutomobile::Fix`) и ставит детали по состоянию (`SetupDamageAfterLoad`). Эта сборка заново отбрасывает каждую
-отсутствующую деталь (`SpawnFlyingComponent`), и с каждой новой вмятиной у владельца зеркало снова роняло уже
-потерянные капот и бамперы: у одной машины их лежала куча (02.11). Сама сборка переписывает часть состояния
-(дверь, которой нельзя повредиться, `SetDoorDamage`), и зеркало, сверявшее живое состояние с присланным, собиралось
-дважды в секунду, роняя детали каждый раз. Теперь деталь, потерянная с прошлой сборки, падает один раз, остальные
-просто скрыты (на время сборки счётчик временных объектов `CObject::nNoTempObjects` стоит на 150, и игра обломков не
-создаёт), а пересборка идёт только при новом состоянии от владельца. На заднем сиденье Wayfarer (586) игроки видели
-искажённое лицо: челюсть вниз, брови набок (02.11). Это ошибка файла игры: `WF_passenger` единственная
-из анимаций пассажира без костей лица (26 костей против 32), и у этих костей нет ни одного узла с поворотом.
-`HoldWayfarerFace` (Players.cpp) держит на таком пассажире `CAR_sitp` из ped.ifp частичной анимацией с весом 1%: кости лица
-берут покой из неё, остальное она почти не двигает. Флаг вторичной задачи снимает её вместе с посадкой
-(`CCarEnterExit::RemoveCarSitAnim`), а `anim::Main` такие анимации не считает. Лог `NoteRideAnims` остался. Ручник (`bIsHandbrakeOn`) зеркало берёт у владельца (`F_HANDBRAKE`): оставшийся включённым
-с тех пор, как машина стояла в этой игре, он держал её задние колёса, и машина ехала с горящими стоп-сигналами и
-дымом из-под колёс, будто тормозит («Cesar Vialpando»). Если под точкой зеркала в этой игре нет земли, оно стоит точно на месте владельца.
-Зеркало, в которое врезалась машина нашего игрока (`CPhysical::GetHasCollidedWith`, 0x543540, в обе стороны),
-0,6 секунды движется только физикой этой игры и следующие 1,4 секунды возвращается к месту владельца в несколько
-раз медленнее обычного. Раньше его каждый кадр тянуло к месту владельца, которое ещё не знало об ударе, и
-машина из трафика другой игры стояла стеной: наша машина в неё упиралась (27.10). Машины с игроком
-внутри и самолёты с вертолётами это не затрагивает. Пустая машина остаётся за последним
-водителем, пока он рядом. Потом владение переходит к ближайшему игроку.
-
-Дверь интерьера на время затемнения (около 2 секунд) ставит до 32 вещам вокруг area 13, чтобы спрятать их, а после
-возвращает (`CEntryExitManager::SetAreaCodeForVisibleObjects`, `ms_visibleEntityList`, `ms_oldAreaCode`). Пустая машина у
-входа оказывалась там, где нет ни одного игрока: цикл `gone` в `ScanTraffic` слал `G_VEH_REMOVE`, другая игра забирала
-копию себе (`KeepsWhenDeleted`), а после двери обе объявляли машину заново, и их становилось две (у Binco, разобрано
-04.11). `TrueArea` (Game.cpp) видит сквозь это: машины и люди берут настоящую area. Такая же пара получалась, когда один
-игрок забрал машину другого (`createdByUs`) и оставил её, пока тот в интерьере: владелец отпускал её, потому что другой
-игрок в другой area, а его игра объявляла свой экземпляр поверх. Теперь такая машина ближе `kTrafficOut` к двери, в которую
-ушёл другой игрок (`rp.streetPos`), остаётся в сети (`ByTheirDoor`). Если её увезли дальше и бросили, пара ещё возможна.
-
-Пустую машину, под которой в игре её владельца нет земли (`CColStore::HasCollisionLoaded`, 0x410CE0: игрок ушёл
-далеко или в интерьер, а коллизия грузится только вокруг него), игра владельца держит неподвижной: флаг
-`FREEZE_CAR_POSITION` (`CPhysical::bDontApplySpeed`), проверка раз в полсекунды (`Vehicles::HoldCarsWithoutGround`).
-Так сама игра держит свои миссионные машины, пока под ними не загрузилась коллизия
-(`m_bIsStaticWaitingForCollision`). Стоящую машину без земли ничего не роняло, но стоило её тронуть, и она падала
-сквозь карту. Напарник ушёл в Binco, хост открыл дверь его Savanna: в игре напарника копия хоста открыла ту же
-дверь, машина проснулась и упала, а за ней копия у хоста и сам хост, который в неё садился (03.11, 0.3.2;
-«на расстоянии у напарника часто такое»). Машину отпускают сразу, как только земля вернулась, в неё сел
-наш игрок или машина больше не наша (тот, кто сел за руль, ведёт её в своей игре, где земля есть). Копия другого
-игрока, севшая пассажиром, удержание не снимает: она бы машину и разбудила. Машины с людьми, которые не игроки
-(трафик), мод не держит: их игра ведёт сама. Чужие флаги заморозки (миссия) мод не трогает: такие машины он
-пропускает. Позицию зеркало берёт с упреждением по
-скорости владельца на время с последнего состояния, а поворот теперь тоже: кватернион доворачивается по угловой
-скорости (`Quat::Turned`, юнит-тест `unit/test_quat.cpp` в репозитории тестов). Раньше машину, которую крутят на месте
-газом с тормозом (W+S, «пончик»), каждый кадр тянуло назад к повороту из прошлого состояния, и у другого игрока она
-крутилась медленнее и дёргалась. В тесте бота расхождение курса при таком развороте не больше 7°.
-
-С состоянием машины идут и части, которые двигает водитель. Зеркало их само не меняет, потому что его статус не
-игрока, и каждый кадр получает значения владельца:
-- `CAutomobile::m_wMiscComponentAngle`: сопла Hydra, приподнятая гидравлика, стрела эвакуатора, вилы погрузчика
-  и другие подвижные части;
-- шасси самолёта `CPlane::m_fLandingGearStatus`, при подъёме и выпуске ещё `SetGearUp`/`SetGearDown`, чтобы колёса
-  пропали или вернулись, а для пламени двигателей `m_fAccelerationBreakStatus`;
-- башни Rhino, фургона SWAT и пожарной машины (`m_fDoomVerticalRotation`, `m_fDoomHorizontalRotation`).
-- наклон мотоцикла и велосипеда (`CBike` +0x648, +0x650). Его `CBike::ProcessControl` выводит из изменения
-  боковой скорости за шаг, а скорость зеркала ставит каждое состояние: копия качалась из стороны в сторону,
-  а вперёд и назад седок не наклонялся.
-
-Гудок звучит, пока поднят счётчик (`CVehicle::m_HornCounter`), только в машине своего игрока. В любой другой
-машине звук гудка играет случайный рисунок сигналов, поэтому зеркало гудит через перехват
-`CAEVehicleAudioEntity::GetHornState`: ровно пока гудит владелец. Владелец берёт гудок своего игрока с кнопки
-(`CPad::GetHorn`), а у машин NPC со счётчика. Сигнализация держит в том же счётчике своё время, поэтому у
-машины с сигнализацией мод его не трогает.
-
-Прожектор вертолёта (`CHeli` +0xA11 включён, +0x9F4 точка, +0xA00 яркость) идёт с состоянием машины.
-`CHeli::ProcessControl` у зеркала его выключает (здесь нет ни полицейского ИИ, ни игрока за штурвалом), поэтому
-мод ставит значения владельца после обработки, и ночью `CHeli::PreRender` добавляет свет в кадр, как у
-владельца. Мест для прожекторов в кадре четыре (`CHeli::HeliSearchLights`), а `AddHeliSearchLight` границу не
-проверяет: с вертолётами другой игры ночная погоня зажигала пятый поверх того, что лежит за массивом. Лишние
-пропускаются.
-
-Высоту колёс гидравлики игра держит только в локальных переменных, пока считает её из правого стика. Поэтому
-у машины, за рулём которой удалённый игрок, высоты считаются здесь из его стика той же формулой. Зеркало имеет
-статус миссионной машины, и для неё `CAutomobile::HydraulicControl` берёт высоты из
-`CVehicle::m_aSpecialHydraulicData` (слот выделяет `GetSpecialColModel`, слотов на всю игру четыре).
-
-Прицеп или машину, которую тянет машина игрока, его игра забирает себе (`m_pVehicleBeingTowed`) и рассылает так
-же часто, как машину с водителем. Зеркалу прицепа статус физики не навязывается: брошенный прицеп сам ищет тягач
-(`CTrailer::ScanForTowLink`), даже если тягач в этой игре зеркало.
-
-`CREATE_CAR` помечает машину занятой скриптом (`CVehicle::bIsLocked`), а эвакуатор и тягач такую не цепляют
-(`CAutomobile::TowTruckControl`). Зеркала создаются этой же командой, поэтому у зеркал обычных машин метка
-снимается, а у машин миссии остаётся, как в игре владельца. Цепляет машину только кнопка водителя эвакуатора,
-поэтому сцепку передаёт игра водителя (`X_TOW`, сетевой id тягача), а другая сцепляет копии
-(`CVehicle::SetTowLink`) и оставляет машине на крюке статус буксируемой: с любым другим её обработка разрывает
-сцепку. Багажный поезд в аэропорту — цепочка, где каждая тележка тянет следующую, и игра водителя забирает себе
-всю цепочку.
-
-События «начал садиться» (машина, место, водитель или пассажир, угон) и «вышел» передаются надёжно. Удалённый
-пед проигрывает штатные задачи посадки и выхода, а если анимация не удалась из-за рассинхрона, пересаживается
-мгновенно (`WARP_CHAR_INTO_CAR*`). Анимации не будет, если машина уже уехала: её скорость больше 3 м/с или до неё
-больше 8 м (`CarGoneOn`). Тогда копия сразу садится на место. Раньше она до 4 секунд бежала за машиной или
-мотоциклом, на который владелец сел за секунду, и только потом переносилась (27.10). Пока
-владелец ещё идёт к машине (его состояние «пешком»), порог скорости 8 м/с: угоняют и машину, которая катится до
-остановки. При 3 м/с копия к двери не шла, водителя у напарника вытаскивала синхронизация, и он проигрывал анимацию
-«вытащенного» в стороне, у фонаря, а копию сажали в машину без анимации (28.10). Пропуск входа пишется в лог со
-скоростью машины и расстоянием до неё.
-
-Если наш игрок сидит пассажиром у напарника за рулём, его спутники (группа игрока: Дениз в «Burning Desire»,
-завербованные грувовцы) садятся на свободные места той же машины, а когда он выходит, выходят и они
-(`Players::GroupRides`). Игра сама зовёт группу в машину только событием «лидер сел за руль»
-(`CEventLeaderEnteredCarAsDriver`), поэтому раньше спутники оставались снаружи, пока за руль не сядет хост. Мод
-сажает их через 3 секунды после посадки игрока и только тех, кто просто идёт за ним (задачи 913, 923, 1207):
-миссия, которая рассаживает своих людей сама (Sweet's Girl), успевает раньше. Запрет миссии (`m_bGroupNeverFollow`,
-`m_bMembersEnterLeadersVehicle` группы) соблюдается.
-
-Детали кузова (`CVehicle::m_anExtras`, +0x438: доска на крыше Picador, поднятая или сложенная крыша кабриолета)
-игра выбирает при создании машины случайно, и у двух игроков они не совпадали. Владелец шлёт их с объявлением
-машины, а копия создаётся с ними (`CVehicleModelInfo::ms_compsToUse`, 0x8A6458: перед `CREATE_CAR` номера
-деталей, после него снова «случайно», -2). Припаркованная машина, которая уже стояла в обеих играх и была
-принята как копия, остаётся со своими деталями.
-
-Пассажир видит машину напарника как зеркало, которое плавно движется по сетевым данным. У водителя пассажир
-показан удалённым игроком на своём месте.
-
-Если владелец удалил машину, в которой наш игрок едет пассажиром («Home Invasion» убирает фургон у склада), наш
-игрок выходит рядом с игроком владельца, когда тот пешком и не дальше 50 м, а иначе на месте машины. Раньше он
-оставался в ней: машина становилась его собственной, застревала в воротах, которые здесь закрыты, и он
-проваливался под пол.
-
-Здоровье машины шло в состоянии и раньше, но стоящая машина рассылалась раз в 2 секунды. Перевёрнутая или горящая
-машина теряет около 200 единиц в секунду, и дым копии (по здоровью он белый, потом чёрный) и огонь отставали от
-владельца. Теперь машина, у которой изменилось здоровье, рассылается так же часто, как едущая.
-
-Радиоуправляемая модель — обычная машина своей игры без водителя. Игрок, который ею управляет, остаётся пешком
-(`CPed::bInVehicle` не ставится, модель лежит в `CPlayerInfo::m_pRemoteVehicle`), поэтому его состояние идёт как
-пешком, а модель другая игра видит зеркалом, как любую машину.
-
-Поезда сетевыми машинами не стали: вагоны едут по рельсам сами, за первым вагоном. Их показывает `Trains.cpp`
-(см. «Общий мир»). Игрок в поезде шлёт состояние пешехода с флагом `F_IN_TRAIN`, и другая игра сажает его копию
-в кабину ближайшего своего поезда (`CTrain::FindNearestTrain`), убрав водителя-NPC, с которым поезд создаётся.
-Если игрок садится в кабину копии чужого поезда, игра владельца поезда сначала ведёт к кабине его копию
-(`TRAIN_ENTER`), а пересаживает, только если та не дошла.
-
-**Радио в машине** (`Radio.cpp`, `G_RADIO`; просьба пользователя 03.11, устройство из PR #49). Радио у каждой игры
-своё (`CAERadioTrackManager`, 0x8CB6F8). Удалённый водитель для звука машины не игрок (перехват
-`CAEVehicleAudioEntity::Service` в `Players.cpp`), поэтому у пассажира радио включала его собственная посадка
-(`TurnOnRadioForVehicle`): станция машины, случайная дорожка со случайного места, и переключал её пассажир сам. Теперь
-станцию выбирает водитель (выбор пользователя). Пока в его машине едут игроки, его игра шлёт станцию, дорожки очереди
-(`m_ActiveSettings.TrackQueue`, их типы и номера) и место в играющей дорожке (`PlayTime`: позиция потока, которую
-`CAERadioTrackManager::Service` получает каждый кадр). Шлёт сразу при смене станции, дорожки или пассажиров, а для
-поправки раз в 3 секунды. Пока радио водителя перестраивается, не шлёт ничего. Игра пассажира ставит ту же станцию так
-же, как кнопка (`StartRadio`, 0x4EB3C0), и заменяет в `m_RequestedSettings` выбранные ею дорожки дорожками водителя.
-Место она ставит, когда `Service` запускает дорожку (вызов `AEAudioHardware.PlayTrack` в 0x4EBB11): там, где водитель
-сейчас, с поправкой на пинг и на время, которое поток тратит на запуск. Если пассажир разошёлся с водителем больше
-чем на секунду, дорожка запускается заново, но не больше двух раз на дорожку. Щелчок, звук перестройки и название
-станции на экране те же, что у кнопки.
-
-Пока игра сама запускает ту же дорожку (пассажир только что сел, `m_nMode` меньше `RADIO_PLAYING`), сверка ждёт. Если
-дорожка ещё в канале потока (`CAEStreamingChannel`, состояние «готова» или «останавливается»), `CAEStreamThread::Service`
-её не перематывает, а только отпускает (`SetReady`), и место из запуска пропадает. Этой веткой игра сцепляет дорожки
-(`CheckForTrackConcatenation`). Дорожка шла с места, которое выбрала игра, на 135 с от водителя (05.11), и на этом
-терялась одна из двух поправок. Счёт поправок начинается заново с новой поездки и новой станции. Чем кончилась
-поправка, пишет лог: «in step» с разницей в мс или «kept missing». Дорожки мод сверяет по номеру, поэтому у игроков с разными
-звуковыми файлами (мод) номер совпадёт, а песня нет. Длина дорожки у водителя приходит в том же сообщении, и если своя
-другая, лог пишет это один раз на дорожку («the two games' audio differs»).
-
-Время дорожки сама игра считает неточно. Буфер канала потока состоит из двух половин, у дорожки 32 кГц половина играет 3072 мс.
-`CAEStreamingChannel::PrepareStream` заполняет обе и ставит `m_lastSlot` в 0, а `m_lastWrittenSlot` оставляет от прошлой дорожки.
-Если там 1, `UpdatePlayTime` показывает на половину буфера больше, пока не доиграет первая половина. Пассажир сверялся через 3 с
-после запуска и видел разницу в 3 с там, где её не было, и второй раз зря запускал дорожку. Водитель, только что севший в машину,
-присылал место на 3 с вперёд, и пассажир в самом деле уходил вперёд до следующей поправки (05.11: 7 поездок из 12 кончились
-«kept missing» с разницей 2,9-3,1 с). Хук `PrepareStream` в `Radio.cpp` выравнивает поле, и время верно с первого кадра. Поле
-читает только `UpdatePlayTime`, других потребителей у него нет.
-
-Кнопки радио у пассажира удалённого водителя не работают: `Service` пропускает `CheckForStationRetune` и
-`CheckForStationRetuneDuringPause` (0x4EB9F4, 0x4EB9FD), а их запросы (кнопки, `RetuneRadio` скриптов, страница звука
-в меню, при `no_pause_menu` и под открытым меню) сбрасываются. После первого нажатия за сессию чат пишет, что радио
-переключает водитель. User Track Player играет файлы с компьютера водителя, поэтому у пассажира включается его
-собственный, а без своих файлов радио выключено, и это тоже пишет чат. Музыку по сети мод не передаёт. Сменился
-водитель или пассажир вышел, синхронизация кончается, и радио остаётся как было. С водителем-NPC и в машине со
-спецрадио (полицейский сканер) всё как в игре.
-
-Выходя из машины, игра запоминает станцию (`CAERadioTrackManager::StopRadio`, 0x4E9820: станция в +0x74, время в
-+0x58, день и час игры в +0x16 и +0x17) и в следующей машине в течение минуты включает её сама (`StartRadio` при
-включённой в меню автонастройке радио). После поездки пассажиром так в собственную машину хоста приходила станция
-напарника (03.11: машина хоста заиграла SF-UR из поездки двумя минутами раньше), и меню паузы показывало её
-выбранной: меню берёт текущую станцию при открытии. Теперь игра пассажира запоминает эти четыре поля, когда
-садится к удалённому водителю, и возвращает их, когда выходит из этой машины (как только `StopRadio` записал своё,
-или через секунду). Если пассажир пересел за руль той же машины, станция уже его, и ничего не возвращается.
-
-При выходе из меню паузы у хоста «игра не показывалась, были засветы» (03.11), в логах этого не видно: меню мод не
-записывал. Теперь `Diagnostics` пишет открытие и закрытие меню паузы, идёт ли перенастройка радио (пока она слышна,
-`CMenuManager::CheckForMenuClosing` не закрывает меню по Esc: `CAudioEngine::IsRadioRetuneInProgress`) и затемнение
-экрана (`TheCamera` +0xBFC; пока экран затемнён, `Idle` не рисует мир). Если через 1,5 с после закрытия экран всё ещё
-затемнён, это предупреждение в логе.
-
-## Машины и NPC: кто чем владеет
-
-У каждой сущности (машины, педа, объекта) есть владелец, то есть игра, которая её симулирует. Владелец рассылает
-её состояние, а у остальных игроков вместо неё создаётся зеркало: миссионная сущность без ИИ, которую двигает
-сеть.
-
-Население каждый игрок создаёт вокруг себя. Если напарник ближе 60 м к хосту (гистерезис до 90 м) и у него нет
-розыска, он не создаёт пешеходов, трафик и припаркованные машины. Всё это делает хост (`Population.cpp`).
-С розыском напарник вызывает своих копов сам, но генераторы припаркованных машин у него и тогда стоят
-(`g_covered`): за погоню отвечают его трафик и полиция, а стоянки рядом даёт игра хоста. Игра напарника в розыске
-ставила свои машины на те же места стоянки, что и хост, обе объявили их разом, и копия каждой стёрла у другой игры
-её машину (08.11, вчетвером, дальше о том, что из этого вышло). Когда своё население у напарника включается снова, счётчики
-начала игры (`CPopulation::m_CountDownToPedsAtStart`, `CCarCtrl::CountDownToCarsAtStart`) заполняют округу сразу,
-а не по одному пешеходу с краю экрана. Включаются они только за тёмным экраном: они ставят людей в 10 м на
-виду, а машины вплотную к игроку. Своих педов и машины около напарника хост держит, только пока у него под
-ними есть земля (не дальше 100 м от хоста). Иначе движок удалял бы их по камере хоста, а без земли они
-проваливались.
-
-С игрушкой на радиоуправлении игра создаёт население вокруг неё: `FindPlayerCentreOfWorld` (0x56E250) берёт
-`CPlayerInfo::m_pRemoteVehicle` раньше машины и самого игрока. Поэтому, если у напарника или хоста есть игрушка,
-расстояние для этого правила меряется от неё, а игрушку хоста напарник находит по её сетевому номеру (`G_RC` 2). В
-«Supply Lines» оба CJ стояли на крыше Зеро, население напарника было выключено, хост создавал своё вокруг своей
-игрушки, и самолёт напарника летал над пустыми улицами (31.10).
-
-Пешеходов владелец объявляет в радиусе 120 м от другого игрока. Машины с водителями и пассажирами он объявляет
-в радиусе 170 м. Дальше 150 и 220 м соответственно он снимает их с сети (`Peds.cpp`, `Vehicles.cpp`). Зеркало
-педа получается из гражданского педа той же модели с пустым decision maker (шаблон 65542) и всеми proofs. Ходит
-оно задачами «иди к точке», поэтому анимации ходьбы и бега обычные. Копы хоста видны напарнику как зеркала,
-и наоборот. Зеркало, которое не получилось создать за 5 секунд, один раз попадает в лог с причиной: особая модель,
-модели нет в этой игре, модель ещё не загружена, машины нет или место в ней занято, пул педов полон (не больше 30
-за сеанс). В «Robbing Uncle Sam» напарник не видел нападавших на Райдера (01.11), а в логе причины не было.
-
-Расстояние до другого игрока меряется и от его игрушки (`RemoteViewDistance`): напарник видит то, что рядом с его
-самолётом, а не только то, что рядом с его CJ на крыше. Без этого цели хоста в «Supply Lines» были у напарника только
-метками на радаре (31.10). Свою игрушку игра объявляет, как бы далеко та ни улетела, чтобы другая игра знала, откуда
-смотрит её игрок.
-
-Если такая же машина на этом месте уже есть (припаркованные машины обе игры создают одинаково), она становится
-зеркалом вместо новой. Машину, которую создал скрипт, так не берут: потом она стала бы обычной машиной, движок
-её убрал бы, а скрипт упал бы на следующей команде с ней.
-
-Машиной с игроком за рулём владеет этот игрок. Остальными машинами и педами владеет тот, кто их создал. Своих
-педов и машины рядом с напарником владелец не удаляет (перехвачены ManagePed и PossiblyRemoveVehicle).
-
-Машина, на которой игрок приехал, ждёт у входа, пока он в интерьере. Интерьер лежит за километры от двери,
-а `CCarCtrl::PossiblyRemoveVehicle` меряет расстояние по карте, поэтому игра удаляла машину или отдавала её
-другому игроку обычной машиной, и та исчезала, как только он тоже уходил. Теперь на время интерьера машина
-числится машиной миссии, а после выхода получает прежний тип.
-
-Замок дверей (`CVehicle::m_nDoorLock`) идёт с внешним видом машины: миссия запирает и отпирает свои машины уже
-после того, как обе игры о них знают. Раньше оставался замок, который был, когда машина стала известна, и
-напарник, севший в запертую миссией машину, не мог из неё выйти (Savanna после «Cesar Vialpando»).
-
-Когда игра владельца сама убрала бы своего прохожего или обычную машину, а другой игрок заметно ближе к ним
-(на 30 м для педа, на 40 м для машины), она передаёт их игре другого игрока (`G_PED_OWNER`, `G_VEH_HANDOVER`).
-Машина уходит вместе с сидящими в ней педами. Принявшая игра делает своё зеркало обычным педом или машиной
-и пускает машину с водителем ездить по городу, а убирает их потом сама. Раньше такие прохожие и машины исчезали
-перед напарником, как только хост отъезжал. Без запаса по расстоянию они перебрасывались туда и обратно, пока
-игроки стояли рядом. Передаётся только то, что игра удалила бы и сама (`CVehicle::CanBeDeleted`,
-`CPed::CanBeDeleted`: не персонажи миссий, не завербованные, не те, кто садится в машину или выходит), чего не видно
-на её экране и что не держит её скрипт (`CTheScripts::MissionCleanUp`, `StoreVehicleIndex`). Обычную машину,
-которую игра владельца всё же удалила рядом с другим игроком (ближе 80 м, в той же области), эта игра оставляет себе
-вместе с сидящими в ней (`Vehicles::KeepsWhenDeleted`, `TakeOver`). Если рядом с машиной несколько игроков, её
-оставляет одна игра: хоста, если хост рядом, иначе игрока с меньшим номером (тот же порядок, что у двоих за рулём).
-Остальные удаляют свою копию и получают машину из объявления этой игры, так что у них она пропадает примерно на 0,3 с.
-Втроём и вчетвером каждая игра рядом оставляла себе свою копию и объявляла её заново, и на одном месте вставало по
-машине от каждой (08.11). Если двое на границе 80 м посчитают иначе и оставят машину оба, их копии сотрут друг
-друга при появлении и уйдут, как машины, уступившие место (ниже). Так после смерти хоста его игра убирает с улиц
-полицию, а полицейские машины передать нельзя: их экипаж переходит в чужую игру, только чтобы гнаться. Раньше они
-исчезали перед напарником. Во время миссии хоста напарник таких машин себе не оставляет: миссия расчищает место
-сцены (`CLEAR_AREA` у конкурса лоурайдеров), и оставленная машина возвращалась к хосту уже машиной напарника. Машины миссий, остовы и вертолёты с самолётами по-прежнему уходят: вертолёт без
-полицейского ИИ висел бы в воздухе. Копы, медики
-и пожарные не передаются: зеркало у другого игрока всегда гражданский пед. Не передаётся и человек со скриптом-мозгом
-(`CPed::bHasAScriptBrain`): кассир закусочной, продавец Ammu-Nation, парикмахер, татуировщик. Игра ставит его у
-аттрактора и ведёт скриптом, а у другого игрока он оставался копией без того и другого. Аттрактор там считался
-пустым, игра ставила своего кассира, и их становилось два. Получает только игрок, который сейчас
-в игре: пока напарник загружает мир, ему ничего не отдаётся.
-
-В «Ryder» скрипт закусочной хоста (`JFUD`) по сигналу миссии (`$352`) удаляет своего кассира, а миссия ставит своего
-в 0,9 м от его места (`CREATE_CHAR 24 155`), и его копия уходит напарнику. У напарника такой сигнал не приходит, и его
-`JFUD` (он идёт, если игрок напарника вошёл в дверь) держит своего кассира: два кассира рядом, спокойный и с
-поднятыми руками (28.10). Теперь человек скрипта этой игры (`Peds::MarkLocal`) у напарника скрыт, пока
-во время миссии хоста в 1,5 м от него стоит копия человека миссии хоста той же модели, и снова виден, когда они
-разошлись (`Peds::HideTwins`). Удалять его нельзя: `JFUD` без кассира каждый кадр стирает подсказки (`CLEAR_HELP`).
-
-Машины полицейской штрафстоянки (`IMPND`, его запускает `IMPND_L`, когда игрок ближе 120 м) каждая игра ставит
-сама, и копии чужих вставали поверх своих («почему машина сверху», «клонировались», 28.10). Машины, которые создал
-этот скрипт, остаются каждой игре своими, пока за рулём никого нет (`Vehicles::KeepLocal` из перехвата
-`CCarCtrl::CreateCarForScript`, проверка в `ScanTraffic`). Его люди и так были своими (`MarkLocal`).
-
-Так же остаются у своей игры машины скриптов других модов (Busy Pedestrian, Urbanize: CLEO-скрипты ставят машины в
-постоянных местах и пускают свои мусоровозы). Их код лежит вне пространства main.scm, и это не поток main.scm из
-отдельного файла (`m_bIsExternal`), как в #36. Каждая игра делала свои, копии машин другой игры вставали в них, и
-машины взрывались (30.10). Такая машина уходит другой игре, только когда в ней сидит игрок.
-
-Машину, которую владелец убрал в гараж убежища (дверь закрылась и игра сохранила её в гараже, или хост забрал машину
-напарника), игра владельца удаляет, и другая игра оставляла копию себе как обычную машину (`KeepsWhenDeleted`). В
-гараже машина была в двух местах сразу: в записи гаража и на полу. Гараж наполнялся, машины выезжали из него снова
-и снова, а дверь не открывалась (гараж CJ, 28.10). Теперь копия, которая стоит в гараже убежища
-(`CGarages::IsPointWithinHideOutGarage`), когда владелец её удаляет, уходит и здесь (`HandleRemove`): её держит
-запись гаража.
-
-Пешехода, который дерётся, стреляет или убегает, игра не отдаёт, пока под ним есть земля: переданный, он
-становился спокойным прохожим посреди драки. Дальше 100 м от своего игрока земли под педом у этой игры может не
-быть, и тогда его отдают даже на виду, иначе он провалится. Отпущенного скриптом исчезать (`REMOVE_CHAR_ELEGANTLY`,
-`CPed::bFadeOut`) не держат и не отдают: Каталина после проваленной миссии стояла на перезапуске дважды.
-
-Игра удаляет своих прохожих по своей камере: вне её и дальше 25 м пед пропадал за 4 секунды, хотя стоял перед
-другим игроком. Теперь пед остаётся, пока другой игрок на него смотрит (не дальше 60 м и в пределах 60° от
-направления его камеры, камера идёт в его состоянии) и у этой игры есть под ним земля.
-
-Проходя через дверь, игра удаляет всех своих прохожих (`CEntryExit::TransitionFinished` →
-`CPopulation::RemoveAllRandomPeds`). Улица вокруг другого игрока пустела, когда этот заходил в магазин, а люди
-интерьера пропадали у того, кто остался внутри. Теперь те, кто в 60 м от другого игрока, сначала переходят в его
-игру.
-
-Машина, которую передала другая игра, теряет защиту зеркала (`Release`). Раньше защита от столкновений на ней
-оставалась, и свой трафик не получал повреждений в авариях.
-
-Зеркало защищено от населения своей игры: пока машина чужая, она числится созданной миссией, а когда снова
-становится своей, получает прежний тип (`Protect` и `Release` в `Vehicles.cpp`). Раньше машина, которую забрал
-другой игрок, оставалась обычной в игре прежнего владельца и удалялась, как только он отъезжал, вместе с сидящим
-в ней персонажем другого игрока. Машина скрипта другой игры остаётся миссионной и у нового владельца: её нельзя
-убирать посреди миссии. Если владелец убирает машину, а её копия здесь не создана модом, а взята из своего мира,
-она не удаляется и возвращается своей игре, машина скрипта остаётся у своего скрипта. Когда скрипт отпускает
-машину, которая в его игре сейчас зеркало (его миссия кончилась), владелец узнаёт об этом (`G_VEH_SCRIPT_FREE`)
-и делает свою копию обычной машиной. Иначе она оставалась миссионной навсегда и при новом объявлении вставала
-второй.
-Идущее зеркало может отстать: задача ходьбы ждёт, путь перегородило то, что есть только в этой игре, или прямая
-не совпала с маршрутом владельца. Если отставание больше 1,5 м, зеркало каждый кадр подтягивается на 5% к месту
-владельца. Идёт зеркало к точке чуть впереди, по прежнему направлению владельца, примерно на секунду вперёд, чтобы
-ходьба не замирала между состояниями. Когда владелец сворачивает за угол, эта точка оказывается в стене, и зеркало
-шло в здание (issue #43). Если до неё мешают здание или объект (`CWorld::GetIsLineOfSightClear`), зеркало идёт
-прямо к месту владельца.
-Зеркало приседает вместе с педом владельца (за укрытием в перестрелке): флаг приходил и раньше, но не применялся.
-
-Пед, который у владельца оказался вне машины без задачи выхода (слетел с мотоцикла, выброшен аварией, вытащен),
-здесь выходит сразу на своём месте. Раньше `TASK_LEAVE_CAR` слезал вежливо или несколько секунд сидел на
-скользящем мотоцикле. Пока в машину здесь кто-то садится (наш игрок её угоняет), водителя назад не пересаживают:
-следующим придёт состояние, что его вытащили. Водителя, которого миссия держит за рулём (`CPed::bDontDragMeOutCar`:
-Смоук на мотоцикле в «Just Business»), не вытащить и из зеркала. Раньше наш игрок забирал здесь мотоцикл миссии,
-а у владельца Смоук сидел на ставшей копией машине и никуда не ехал.
-
-Локальный менеджер населения зеркала не трогает: удаление приходит от владельца. Когда игра у игрока
-запустилась или перезапустилась, он шлёт `G_RESYNC`, и остальные заново объявляют свои машины и педов.
-
-Задача, которую выдал скрипт, занимает одну из 128 записей `CPedScriptedTaskRecord`, пока пед её не возьмёт.
-Зеркало там, где у этой игры не загружена коллизия, задачи не берёт, а новые копились, пока записи не кончались,
-и игра падала. Теперь зеркалу не дают новую задачу, пока старая ждёт (`TaskPending` в `Peds.cpp`). Если записи всё
-же кончились, игра сначала освобождает выполненные, а в журнал пишется, какие команды их держат.
-
-Время суток и погоду задаёт хост (`World.cpp`, раз в секунду). Напарник подводит свои часы, когда они разошлись
-с часами хоста больше чем на полминуты игры. Пару погод хоста (старую и новую) он берёт, только пока у обоих идёт
-один и тот же час. Долю часа (`CWeather::InterpolationValue`) каждая игра считает по своим часам, а её уменьшение
-`CWeather::Update` (0x72B8A1) принимает за новый час и переходит к следующей погоде своего списка. Раньше мод
-записывал напарнику долю часа хоста. Из-за задержки сети она часто чуть обгоняла его собственную, и у напарника
-погода и цветокоррекция переключались примерно раз в секунду. Теперь после подводки часов мод ставит долю часа по
-новым часам напарника. Ещё игра сама переводит часы после смерти или ареста (12 часов), сохранения (6 часов)
-и пропуска поездки (`CGameLogic::PassTime`). У напарника в мире хоста этот перевод пропускается (вызов
-`CClock::SetGameClock` в 0x441534): часы мира общие, и раньше их через секунду возвращала синхронизация, а свет
-дважды скакал.
-
-Розыск хоста, который приезжает к напарнику вместе с сохранением, при старте сбрасывается.
-
-Действия NPC повторяются средствами самой игры. Прицеливание и стрельба повторяются задачами «целиться»
-и «стрелять» с позой, вспышкой, звуком и трассерами. Целью может быть игрок, сетевой пед или точка. Копии
-полицейских выглядят как сами полицейские, по трём правкам, сверенным ботом по анимациям на обоих экранах.
-Пистолет полицейский держит двумя руками (`colt45_fire_2hands`): игра даёт навык `WEAPSKILL_COP` пистолету педа
-типа COP, а копия гражданская, чтобы не считаться полицией, поэтому навык (`CPed::m_nWeaponSkill`, +0x72C) ей
-ставится сам, пока в руке пистолет. Шаг боком с оружием (`GunMove_L/R/FWD/BWD`) копия делает своей задачей
-стрельбы: в `CTaskSimpleUseGun::m_MoveCmd` (+0x14) пишется направление скорости владельца относительно копии.
-Через `ControlGunMove` нельзя: при высоком FPS его шаги не дорастают до порога 0,1, и копия стояла и скользила.
-Присед копии (`SetTaskDuckSecondary`) создавался как присед, который держит другая задача
-(`DUCK_TASK_CONTROLLED`). У полицейского его держит задача атаки, а у копии никто, и через 4 кадра он кончался.
-Мод ставил его снова каждые 0,4 с, и каждый раз игра снимала анимацию оружия, так что копия ни разу не
-стреляла присев. Теперь присед переводится в скриптовый (`CTaskSimpleDuck::SetControlType`,
-`DUCK_SCRIPT_CONTROLLED`) и держится, пока не встанет владелец. Полицейские пешком переходят в игру
-разыскиваемого игрока только с двух звёзд: при одной гонится один полицейский, а остальные стояли рядом
-и не давали звезде сгореть (issue #56). Посадка
-в машину и выход из неё повторяются штатными задачами. Всё остальное (разговоры, телефон, скамейки, драки,
-падения) передаётся как текущая «анимация действия» владельца: номер IFP-блока и номер анимации в нём. Ходьба,
-бег и стойка (группа движения педа) не передаются, мимика лица (флаг `ANIMATION_FACIAL`) тоже: её ведёт своя
-задача каждого педа. Частичная анимация (удар, блок) накладывается на полную (боевую стойку) и считается действием,
-пока играет. Зеркало держит полную под ней и продолжает её, а не начинает сначала. Зацикленная анимация, у которой
-время ушло назад, просто пошла на новый круг, это не перезапуск. Пока зеркало держит полное действие, игра не
-меняет ему позу ходьбы и стояния (`CPed::SetMoveAnim`): у настоящего педа это делает задача драки, а у зеркала её
-нет. Без этого стойка гасла и поднималась заново после каждого удара, и казалось, что NPC всё время замахивается.
-
-Обновление анимаций педа берёт первую из них не глядя (выделение скорости, 0x4D1750), поэтому пед совсем без
-анимаций роняет игру. У педов самой игры под всем остальным всегда остаётся стойка или ходьба. Действие зеркала
-(боевая стойка) затухает, когда кончилось у владельца, а позу ходьбы игра даёт, только когда меняется состояние
-движения, и игры вылетали через полсекунды после драки. Теперь зеркалу без длительной анимации тела
-возвращается стойка его набора (`CAnimManager::BlendAnimation`, `ANIM_ID_IDLE`).
-
-Пешком зеркало NPC стреляет задачей стрельбы (`TASK_SHOOT_AT_CHAR`, `TASK_SHOOT_AT_COORD`), пока его владелец
-стреляет, а в остальное время только целится. Что NPC стреляет, игра владельца видела по пустеющей обойме, а чит
-бесконечных патронов (`FULLCLIP`, у каждой игры свой) обойму не тратит ни у кого: у напарника люди хоста только
-целились (29.10). Теперь выстрел замечается и в самом `CWeapon::Fire`. Зеркалу выдаётся 25000 патронов: с такого
-запаса игра у NPC патроны не тратит, а прежние 500 кончались в долгой перестрелке, и зеркало дальше только целилось.
-
-Стрельбу NPC из машины зеркало повторяет штатной задачей банды (`TASK_DRIVE_BY`, задача 1022): высовывается,
-целится и стреляет в ту же цель, что у владельца (в копию его цели или в точку). Его выстрелы ранят то, чем
-владеет эта игра, в том числе её игрока, как и стрельба зеркала пешком. Заканчивает стрельбу владелец: зеркалу
-очищаются задачи (`CPedIntelligence::ClearTasks`), и оно снова просто сидит.
-
-Людей интерьера (полицейских участка, покупателей магазина, жильцов обставленного дома) игра создаёт, когда её
-игрок входит (`CEntryExit::GenerateAmbientPeds`, `InteriorGroup_c::SetupPeds`). Раньше у каждого игрока были
-свои, а чужих он не видел. Теперь их создаёт игра того, кто вошёл первым, а другая пропускает эти вызовы, пока
-в том же интерьере другой игрок. Проверка идёт по точке, которую передаёт игра: свой игрок в этот момент ещё
-стоит у двери снаружи. Такие люди остаются в нулевой области, поэтому `Peds.cpp` считает их в интерьере игрока,
-рядом с которым они стоят. Это может быть и другой игрок: раньше, когда хост выходил, его игра снимала их с сети,
-и у напарника, оставшегося внутри, они исчезали. Теперь они переходят в игру напарника.
-Большинство интерьеров висит высоко над картой, но некоторые стоят на уровне улицы (Atrium, Lil' Probe Inn), и
-люди улицы вокруг них считались внутри и пропадали у игрока снаружи. Ниже 500 м пед всегда считается на улице.
-
-Людей, которых создаёт скрипт, кроме сюжетной миссии хоста (продавец Ammu-Nation, стрелки тира, крупье казино,
-боксёры спортзала, охрана аэропорта), тот же скрипт создаёт и в другой игре для её игрока. Объявленные в сеть,
-они стояли у каждого по двое на одних местах. Теперь такие педы остаются в своей игре, как подборы (перехват
-`CPed::SetCharCreatedBy`). Пед, который уехал на машине, объявляется снова, а людей подработки на улице (пассажир
-такси, преступники линчевателя) другой игрок по-прежнему видит. Модели таких людей в двух играх могут
-различаться: скрипт выбирает их случайно. Проверено ботом в Binco и Ammu-Nation: в каждой игре один продавец,
-покупатели хоста видны напарнику, и никто не стоит дважды.
-
-Исключение — тренер спортзала на ринге (`GYMLS`, `GYMSF`, `GYMLV`). Пока он дерётся с нашим игроком (задача
-`TASK_COMPLEX_KILL_PED_ON_FOOT` с целью — нашим игроком, здоровье выше 100 после `SET_CHAR_HEALTH 1000`; спарринг-пара
-в углу зала здоровье не меняет) или учит его приёму после первой победы (широкий экран, ближе 8 м), он объявляется в
-сеть (`GymOpponent` в `ScanOwned`). Раньше второй игрок видел, как копия бьёт пустоту: «дерёшься с невидимым» (28.10).
-Свой тренер второго игрока в это время стоит в своём углу, его не прячем: в Лас-Вентурасе той же моделью боксирует
-спарринг-партнёр, и скрытая модель оставила бы другого без пары.
-
-Пешехода, которого передала другая игра, нужно снова сделать обычным: зеркало было гражданским без реакций.
-Ему возвращаются тип владельца (кроме копов, медиков и пожарных, у которых другой класс) и стандартный decision
-maker по его статистике (`CPed::SetPedDefaultDecisionMaker`). Так же становятся своими зеркала игрока, который
-вышел: раньше они удалялись, и его машины оставались на дороге без водителей. Машины ушедшего становятся своими и
-уходят с сети. Когда он подключится снова, его игра начнёт считать номера с начала, и совпавший номер отдавал ему
-нашу машину. Счётчик номеров теперь и начинается каждый раз с нового места.
-Принятый пед переходит в счётчиках населения из типа, с которым его создали, в свой
-(`CPopulation::UpdatePedCount`). Без этого каждый оставлял лишнего гражданского и недостающего бандита, и состав
-улиц за долгую игру съезжал. Ему возвращаются и чувства прохожего (банды слышат и видят на 40 м, остальные на
-15 м): зеркало создано скриптом, а скриптовый пед слышит и видит на 30 м и не зовёт своих.
-
-Зеркало машины неуязвимо для столкновений (`bCollisionProof`), пока оно зеркало. Один сильный удар (таран «Рино»
-считается пятнадцатикратным) взрывал копию сразу, её пассажиры гибли в этой игре, а машина у владельца ехала
-дальше. Свою машину на месте зеркала игра отдаёт под него, только если та стоит пустая (машина генератора
-парковок есть в обеих играх): машину с водителем дальше вёл бы её водитель, против состояний владельца.
-
-Двое за рулём одной машины (сели одновременно, или один вытащил другого, а игра второго этого не увидела) раньше
-пересылали друг другу заявки на неё, пока оба ехали, и каждый видел копию другого застывшей рядом. Машина
-остаётся у игрока с меньшим номером, то есть у хоста, а второй пересаживается на соседнее место, если оно
-свободно. Машина миссии хоста, на которой ездил напарник, возвращается хосту, когда постоит пустой 2 секунды.
-Иначе команды миссии хоста (переставить, заморозить, починить, удалить) действовали только на её копию у хоста
-и тут же откатывались.
-
-Команды, которыми мод создаёт и двигает копии людей и предметов (`CREATE_CHAR`, `SET_CHAR_COORDINATES`,
-`WARP_CHAR_FROM_CAR_TO_COORD`, `CREATE_OBJECT`), больше не расчищают место вокруг них
-(`CTheScripts::ClearSpaceForMissionEntity`). Копия напарника удаляла такси этой игры вместе с водителем, когда
-напарник ехал в нём, а копия вставала на его место. Копии машин место по-прежнему расчищают, иначе две машины
-в одной точке разлетались.
-
-Своя объявленная машина, которую так стёрла копия машины другой игры, уступила ей место. Игра шлёт её удаление с
-пометкой (`G_VEH_REMOVE`, байт 1, `NetVehicle::gaveWay`), и такую машину себе не оставляет никто: на её месте стоит
-та, чья копия её стёрла. Две игры поставили свои машины на одни места стоянки и объявили их разом, копия каждой
-стёрла у другой её машину. Остальные игры оставляли стёртые себе и объявляли снова, эти копии стирали друг друга в
-свою очередь, и вчетвером за 15 с на одном месте набралась сотня машин: пул заполнился, кадр шёл по 0,7 с (08.11).
-Если обе машины стёрли друг друга одновременно, на месте не остаётся ни одной.
-
-Походку, которую скрипт дал пешеходу (`SET_ANIM_GROUP_FOR_CHAR`: пьяный, старик), владелец шлёт в состоянии
-(`CPed::m_nAnimGroup`), и копия ходит так же, как только блок этих анимаций загружен.
-
-Копия бандита, дилера, преступника, проститутки или бомжа получает тип владельца. `CREATE_CHAR` делает для всех
-этих типов того же гражданского, и банды этой игры не считали копии чужими: драка между людьми двух игр не
-начиналась. Сама копия ни на что не реагирует, на неё реагируют люди этой игры. Удар нашего пешехода по копии
-чужого получает владелец (`G_DAMAGE` вида `TARGET_PED_BY_PED` с номером нападающего), и там его педа ранит наша
-копия нападающего.
-
-Копы этой игры рядом с другим игроком, у которого розыск (а у нас нет), переходят в его игру: гнаться за ним может
-только она. Там принятый коп создаётся копом (`CREATE_CHAR` с типом 6) и сам начинает погоню.
-
-Бойца Grove можно завербовать и тогда, когда он копия, а проститутку позвать к своей машине тоже. Игра просит
-владельца отдать педа (`G_PED_OWNER`, адресованный самому отправителю), и принятый пед вступает в группу игрока
-(`MakeThisPedJoinOurGroup`).
-
-Тело, которое владелец убрал, у другого игрока растворяется (`0x034F`), а не пропадает сразу. Если пул педов или
-машин полон, копия занимает место самого дальнего прохожего этой игры, которого не видно, или пустой случайной
-машины. Раньше копия просто не появлялась.
-
-Копия, чей владелец в воздухе (боец SWAT на тросе вертолёта, падение), висит там же, где он. Раньше её тянула
-вниз гравитация, правило «разница высот больше 4 м» ставило её обратно, и боец прыгал вверх и вниз. Копия
-с моделью, которой в этой игре нет (мод у другого игрока), не показывается, и журнал один раз пишет, какой
-модели нет.
-
-Игра ставит новых людей и машины, глядя только на свою камеру. Другой игрок рядом видел, как люди появлялись в
-5–45 м перед ним, а машины прямо впереди. Теперь место ближе 42,5 м (для машины 90 м) к камере другого игрока
-и в пределах 60° от её направления пропускается до следующей попытки (`CPedPlacement::IsPositionClearForPed` в
-двух вызовах `CPopulation::AddToPopulation`, `CCarCtrl::GenerateCarCreationCoors2`). Ещё два вызова проверки
-для людей не тронуты: один собирает соседей, а в другом «занято» значит «ставить».
-
-Генератор машин (`CCarGenerator`, припаркованные машины) тоже смотрит только на своего игрока
-(`CheckIfWithinRangeOfAnyPlayers`), а генератор с высоким приоритетом ставит машину на любом расстоянии. Фургон
-ограбления (`CREATE_CAR_GENERATOR` модели 609) появился в 2 м от другого игрока, внутри фургона их совместного
-ограбления: оба взорвались, и ограбление провалилось (03.11). Машины генераторов делала игра того, кто вёл
-ограбление, а игра второго включала свои генераторы всякий раз, когда один игрок был в доме, а другой на улице.
-Теперь генератор ждёт, пока другой игрок стоит ближе 20 м от его места или видит это место с 90 м
-(`CCarGenerator::CheckForBlockage`), так же как место для случайной машины.
-
-Генератор с высоким приоритетом ставит машину и дальше 140 м от своего игрока, а `CCarCtrl::PossiblyRemoveVehicle`
-сразу убирает машину вне камеры дальше 45 м. Генератор ставит новую через 0–10 с, и так по кругу. Хост ждал у
-автошколы в 144 м от генератора фургонов ограбления в Сан-Фиерро, и за 10 минут мод объявил другой игре 37 фургонов,
-а та каждый создала и удалила. Теперь припаркованная машина уходит в сеть, только когда простояла 5 с
-(`CVehicle::m_nCreationTime`, +0x430) или в ней сидит игрок (`Vehicles::ScanTraffic`).
-
-Людей интерьера создаёт игра того, кто вошёл первым. Если хост и напарник вошли одновременно, каждая игра видела
-другого ещё снаружи и создавала своих. Теперь хост сообщает, что создал людей интерьера (`G_INTERIOR_POP`), и
-напарник убирает своих. Места интерьера для посетителей (покупатели Ammu-Nation) заполняет только игра, которая
-их создала.
-
-Пешеход этой игры рядом с другим игроком молчал, если наша камера была дальше 40 м: игра не начинает фразу
-дальше от своей камеры. Для таких фраз проверка расстояния идёт от камеры другого игрока (`PedSpeech`).
-
-## Урон
-
-Педов и машины повреждает только игра-владелец. Попадание локального игрока по зеркалу уходит владельцу
-(`G_DAMAGE`), и тот применяет его штатно (`CWeapon::GenerateDamageEvent`, `CVehicle::InflictDamage`), считая
-атакующим удалённого игрока. NPC убегает, даёт сдачи или умирает как обычно.
-
-Удар NPC в ближнем бою по удалённому игроку его игра пересылает игре этого игрока (`G_DAMAGE` с целью «игрок»).
-Здесь у удалённого игрока все защиты, а зеркало NPC в той игре только повторяет анимацию, поэтому без пересылки
-кулаки и биты никого не ранили. Пули NPC пересылать не нужно: зеркало в той игре стреляет по-настоящему.
-Собственный удар зеркала по игроку не считается нигде: о настоящих ударах сообщает владелец. Зеркала иногда дрались
-сами, и игрок получал удар второй раз невпопад (29.10).
-
-С ударом идёт приём, которым его нанесли в игре бившего (`CTaskSimpleFight`: набор и номер удара). Ответ на удар игра
-жертвы выбирает по задаче драки бившего (`CEventDamage::ComputeDamageAnim`: `HitA_1..3` стиля, сбивающий с ног
-последний удар серии), а у зеркала такой задачи нет, и жертва всегда вздрагивала одинаково. На время вызова урона в
-слоте атаки бившего лежит задача драки с этим приёмом (`FightAs`), потом слоту возвращается своя. Сторону удара по
-своему игроку игра жертвы определяет сама (`ComputePedShotSide`), по тому, как её игрок стоит на самом деле: копия
-жертвы в игре бившего поворачивается с запаздыванием.
-
-Катана, бьющая игрока насмерть, сносит ему голову (`CPed::RemoveBodyPart`: флаг `bRemoveHead` и часть тела в +0x754).
-В одиночной игре так CJ не убить, а копия другого игрока — ped `PLAYER1`, и её катана так убивает. Воскрешение голову
-не возвращало (`CPlayerPed::SetInitialState` этих полей не трогает), и оба игрока ходили без головы (29.10). Теперь при
-воскрешении своего игрока флаг снимается, а часть тела сбрасывается.
-
-Преступление засчитывает игра того, кто его совершил. Движок записывает преступление на игрока в фокусе
-(`CEventGroup::Add` → `ReportCriminalEvent` → `FindPlayerWanted`), так что удары напарника, которые применяет
-игра хоста, поднимали розыск хосту. Теперь, применяя чужой удар, владелец возвращает свой `CWanted` как был
-(до звукового объекта полицейского сканера), а игра того, кто бил, записывает преступление сама, как игра
-записывает удары своего игрока (`CEventDamage::ReportCriminalEvent`): в очередь `CWanted::RegisterCrime`, с тем же
-типом преступления по оружию. Звёзды дают полицейские, которые его увидят, через множитель розыска миссии.
-`CCrime::ReportCrime`, который здесь стоял раньше, при полицейском ближе 14 м сразу ставил звезду мимо множителя, и
-напарник получал звёзды в миссиях, где хост их не получает.
-
-Полицейские хоста у напарника стоят копиями с типом обычного прохожего: задачи полиции им не нужны.
-`CWanted::WorkOutPolicePresence` считает только людей типа `PED_TYPE_COP`, и угон машины на глазах у такой копии
-звезды не давал (#92). Теперь на время отчёта о своём преступлении (`CCrime::ReportCrime`) копии полицейских получают
-свой настоящий тип, а после возвращают прежний.
-
-Угон игра записывает прямо в задаче посадки: `CTaskSimpleCarSetPedInAsDriver` и `AsPassenger` зовут
-`ReportCrime(CRIME_CAR_STEAL, машина, FindPlayerPed(-1))`, кто бы ни садился. Копия напарника, садясь в машину у хоста,
-давала звезду хосту (#92, разобрано 04.11). `HookReportCrime` пропускает отчёт об угоне, если машина не та, в которую садится
-наш игрок (`m_pVehicle` задача ставит раньше отчёта), или если в ней другой игрок. В своей игре напарник отчёта не получал:
-`CREATE_CAR` помечает копию как уже бывшую у игрока (`bHasBeenOwnedByPlayer`, бит 2 в +0x42A), и задача его пропускала.
-Теперь `VehicleSpawn::owned` несёт настоящий бит владельца, и копия обычной машины берёт его. Машина, которая уже была у
-игрока, угоном не считается, поэтому посадка к хосту пассажиром звезды не даёт.
-
-Таран полицейской машины даёт звезду в `CBike::VehicleDamage` и `CAutomobile::VehicleDamage`, но после проверки защиты от
-столкновений, а копии её имеют: сбитый полицейский другой игры ничего не стоил (разобрано 04.11). `RammedPoliceCopy`
-(Damage.cpp, хуки 0x6B8EC0 и 0x6A7650) повторяет условия игры для копии с полицейским за рулём: удар сильнее 25, наша машина
-быстрее и быстрее 0,1. Флага `bIsLawEnforcer` у копии нет, проверяется модель (`IsLawEnforcementVehicle`) и тип водителя
-(`pedType`). Если множитель розыска миссии 0, звезды нет.
-
-Машину другого игрока здесь ведёт его копия, пед PLAYER1, и её преступления записывались на этого игрока. Кого
-эта машина задела на малой скорости (`CTaskSimpleKillPedWithCar` поднимает «наезд»), какие копы от неё
-отпрыгнули, её взрывы и огонь поднимали розыск этому игроку: «мне дают звёзды, когда напарник давит людей». Игра
-водителя засчитывает это сама, а здесь такие отчёты пропускаются, если виновник — копия: `CCrime::ReportCrime`,
-`ReportCriminalEvent` наезда, урона, урона машине и сбивания с мотоцикла, прыжок в сторону
-(`CTaskSimpleEvasiveDive`).
-
-Наезд машиной (`CPed::KillPedWithCar`) тоже решает игра водителя. Зеркало защищено от столкновений и стояло бы
-как камень, поэтому его сбитие уходит владельцу, и тот сбивает педа машиной удалённого игрока. Сама эта машина
-у владельца никого не сбивает. Баллончик и огнетушитель до зеркала не долетают (`CShotInfo` пропускает
-огнеупорных педов), поэтому их действие на своих педов владелец применяет сам, кроме действия на своего игрока.
-
-Слабый удар машиной (импульс меньше 12) не валит человека ни в одной игре (`CPed::KillPedWithCar`). Копию при этом
-каждый кадр тянуло обратно на место её владельца, и она стояла перед машиной как стена (30.10). Теперь секунду после
-удара нашей машиной (`lastRamMs`) копию не тянут, и наша физика отталкивает её, как своего человека. Дальше 6 м копия
-по-прежнему переносится сразу.
-
-Деньги и оружие убитого педа выпадают в игре того, кто его убил. Если пед умер от пересланного удара, владелец
-своё выпадение отключает. Зеркало у убийцы получает флаг выпадения оружия и деньги через `SET_CHAR_MONEY`:
-скриптовый пед роняет только деньги, выданные скриптом. Полицейские, медики и пожарные денег не роняют, как
-и в одиночной игре. Подборы не синхронизируются, так что выпавшее видит только убийца.
-
-Зеркало, убитое нашим ударом, падает так, как бросает игра: мод применяет к нему тот же удар (оружие, часть тела,
-направление) с уроном 1000. Раньше `TASK_DIE` для любой смерти играл одно падение навзничь, «они просто
-валятся». Убийцей при этом никто не записан: убийство засчитывает ответ владельца. Убитое кем-то другим зеркало
-сначала встаёт на место, где лежит его пед у владельца (бегущее отставало), и умирает как раньше. После смерти
-тело копии продолжает идти за телом владельца: если то отлетело (мод «супер-удара», взрыв) или лежит дальше 1,5 м,
-копия переносится туда раз в 0,5 с и летит с его скоростью. Раньше копия лежала там, где упала. В тесте тело,
-отброшенное взрывом на 7 м, лежит у обоих в одной точке.
-
-Выстрелы удалённого игрока у нас только повторяются эмуляцией геймпада, и их урон отбрасывается. О попаданиях
-сообщает игра стрелявшего. Наезды машиной считает владелец жертвы.
-
-Мод стрельбы из машины (любое оружие за рулём, своё прицеливание) стреляет своим кодом, и он работает только для
-своего игрока: копия у другого игрока по геймпаду не стреляла, и выстрелов друг друга игроки не видели (#76).
-Теперь каждая игра сообщает пули, которые её игрок выпустил из машины (`Shots.cpp`, `G_BULLET`: откуда, куда, оружие,
-перехват `CWeapon::DoBulletImpact`). Игра другого игрока через 200 мс рисует их у копии: трассер
-(`CBulletTraces::AddTrace`), вспышку у ствола (`g_fx.TriggerGunshot`) и звук выстрела
-(`AudioEngine.ReportWeaponEvent`). Если копия за это время выстрелила сама (обычная стрельба из машины приходит по
-геймпаду), пули не рисуются, и выстрелы не задваиваются. Так же идут очереди пулемётов, закреплённых на машине
-(`CVehicle::FireFixedMachineGuns`: Hunter, Seasparrow, Rustler, Predator): копия их никогда не стреляет
-(`CVehicle::ProcessWeapons` работает только для машины игрока), и другой игрок не видел этих выстрелов.
-
-Выстрелы NPC, взрывы и огонь повреждают то, чем владеет эта игра, в том числе своего игрока.
-
-Команды `SET_CHAR_ONLY_DAMAGED_BY_PLAYER` и `SET_CAR_ONLY_DAMAGED_BY_PLAYER` (цель миссии, преступники на
-подработке полицейского) пропускают только попадания `FindPlayerPed` (`CEventDamage::AffectsPed`,
-`CVehicle::CanVehicleBeDamaged`), и попадания напарника по ним не действовали. Другой игрок тоже игрок, поэтому,
-пока владелец применяет его попадание, этот флаг (`CPhysical::bInvulnerable`) снят.
-
-Во время сцены скрипта (широкий экран камеры) сторона другого игрока здесь ничего не ранит: его игрок бегает
-дальше, пока этот смотрит, а миссия проваливалась, когда в сцене ранили её людей (машину напарника, оставленную
-у парикмахерской, задело, и в ней появился Райдер).
-
-Урон между игроками включает хост галочкой «Урон по напарнику» перед созданием игры. Сервер получает её ключом
-`--friendly-fire` (у выделенного сервера это `friendly_fire` в `server.ini`) и сообщает всем в `Welcome`. Без
-неё ничто от удалённого игрока или его машины своего игрока не ранит. С ней пули и удары считает игра
-стрелявшего: она видит попадание по копии напарника и пересылает его (`G_DAMAGE` с целью «игрок от игрока»),
-а игра напарника применяет его штатно, и атакующим считается копия стрелявшего. Взрывы, огонь, газ и машину
-решает игра пострадавшего. У копии напарника все защиты, а `CWorld::TriggerExplosionSectorList`
-и `CShotInfo::Update` защищённых педов пропускают, поэтому до игры стрелявшего такие попадания не доходят.
-Ракета, коктейль или машина стрелявшего повторяются в игре пострадавшего и ранят её игрока там.
-Тихое убийство ножом со спины идёт мимо `GenerateDamageEvent`: игра атакующего сама даёт жертве урон и задачу
-`CTaskSimpleStealthKill`, а копия атакующего у жертвы делает то же под его падом и убивала напарника и без
-галочки (issue #58). Без галочки `CPedIntelligence::TestForStealthKill` на игрока отвечает «нельзя», и нож бьёт
-обычным ударом, который до напарника не доходит.
-
-Галочка «Общая жизнь» (0.3.3) идёт той же дорогой: `shared_life` в `coop.ini` и `server.ini`, ключ `--shared-life`,
-флаг в `Welcome`. Когда напарник погибает (флаг `F_DEAD` в его состоянии) во время сюжетной миссии хоста, игра хоста
-проваливает миссию так же, как при смерти хоста: ставит сценарию миссии флаг смерти (`CRunningScript` +0xD4, его
-читает `HAS_DEATHARREST_BEEN_EXECUTED`) и даёт `FAIL_CURRENT_MISSION`. Одна `FAIL_CURRENT_MISSION` вернула бы миссию
-из основной части прямо в очистку, без надписи «Миссия провалена».
-
-Без галочки гибель хоста в сюжетной миссии её не проваливает, пока в его мире жив напарник (решение 31.10): хост
-встаёт рядом с напарником и играет дальше, а провал бывает, только если погибли оба. Пока CJ лежит мёртвым,
-`CGameLogic::Update` каждый кадр вызывает `CPlayerInfo::KillPlayer` (0x56E580). Мод его перехватывает, и игрок
-остаётся в `PLAYERSTATE_PLAYING`: без `PLAYERSTATE_HAS_DIED` проверка смерти скрипта миссии
-(`CRunningScript::DoDeathArrestCheck`) не срабатывает. Через 1,5 секунды экран темнеет, и мод поднимает CJ сам
-(`Revive`): вынимает из машины, как это делает игра при возрождении, даёт полное здоровье, вызывает
-`CPlayerPed::SetInitialState` и `RestartNonPartialAnims` и переносит к напарнику (`Players::GoTo`, справа в 1,5 м или
-в 2,5 м от его машины, на землю под ним). `CGameLogic` при этом уже стоит в `GAMELOGIC_STATE_WASTED` и через 3
-секунды после последнего вызова отправил бы CJ в больницу, поэтому мод возвращает `GameState` (0x96A8B0) в
-`PLAYING`. Своё возрождение игры (`RestorePlayerStuffDuringResurrection`) не подходит: оно убирает людей, машины и
-огонь на 4 км вокруг и снимает розыск, а путь через больницу переводит часы на 12 часов и берёт $100. Оружие,
-звёзды и время у хоста остаются. Если напарник за это время тоже погиб или миссия кончилась, `KillPlayer` проходит
-как обычно.
-
-Без огня по своим выстрелы игрока по копии машины, в которой сидит другой игрок, ей не передаются. В «Just Business»
-промахи напарника по русским попадали в мотоцикл Смоука с хостом, и его полоска таяла вдвое быстрее (30.10). Пустая
-машина другого игрока урон получает, как раньше.
-
-Смерть удалённого игрока определяет его игра. У нас его пед проигрывает смерть и создаётся заново после
-респавна.
-
-Убийство засчитывает игра убийцы: статистику, уважение, бойню и провокацию войны банд. Владелец педа, убитого
-чужим ударом, сообщает убийце (`G_DAMAGE` с видом «твоё убийство», перехват `CEventHandler::RegisterKill`), а у
-себя считает его убитым кем-то другим (`CDarkel::RegisterKillNotByPlayer`). Игра убийцы вызывает
-`RegisterKill` для своей копии педа, на время вызова дав ей тип педа у владельца: копии создаются гражданскими.
-Войны банд идут только в игре хоста, поэтому убийство напарником балласа или вагоса в 100 м от хоста игра
-напарника пересылает хосту, и тот добавляет его в провокацию (`CGangWars::AddKillToProvocation`).
-
-Взрывы удалённого игрока (ракеты, гранаты, танк) происходят и у нас, повторённые `Fire.cpp`. У зеркал педов в
-игре стрелявшего все защиты, и взрыв их пропускает, поэтому своих педов ранит взрыв здесь: исключение в
-`GenerateDamageEvent` для `WEAPON_EXPLOSION`, розыск при этом сохраняется. Машины взрыв ранит в игре
-стрелявшего, и попадание пересылается владельцу, как пуля.
-
-## Сюжет и миссии
-
-Мир общий благодаря сохранению хоста. При подключении напарник получает файл сохранения хоста и загружает его,
-поэтому у обоих одинаковые открытые районы, банды, дома и магазины. Розыск хоста из сохранения у напарника
-сбрасывается.
-
-Новую игру хост выбирает в окне F9 последним пунктом списка сохранений. Пролог (миссия `INTRO`: две катсцены,
-поездка в машине полиции под титры, велосипед) хост проходит один: это миссия, а во время миссии игра не
-сохраняется, так что передать мир нечем. Порядок такой:
-
-1. Когда у хоста запускается пролог, его игра шлёт `C_WORLD_NEWGAME`. Сервер удаляет сохранённый мир (он от
-   прежней игры), а тем, кто просит мир, отвечает `S_WORLD_WAIT`. Напарник ждёт в меню со статусом «Хост
-   проходит пролог», и его игра не бросает ожидание через 120 секунд, как обычно.
-2. Пролог кончается, когда CJ садится на велосипед. Сохраниться на велосипеде тоже нельзя, поэтому хост шлёт
-   `C_WORLD_FOLLOW`, а сервер отправляет ждущим `S_WORLD_NEWGAME` и помечает их. Если кто-то попросит мир, пока
-   хост едет, он получит то же самое.
-3. Напарник начинает свою новую игру. Её пролог заканчивается сразу: как только запускается поток `INTRO`, его
-   первая команда заменяется на `TERMINATE_THIS_SCRIPT`, а затемнение, которое `main.scm` включает перед
-   прологом, мод снимает сам. Игра переносит напарника к хосту, и, раз хост на велосипеде, рядом с напарником
-   появляется такой же (`Players::FollowHost`).
-4. Как только хост слез с велосипеда, его игра делает снимок мира. Сервер отправляет его помеченным напарникам,
-   и те переходят в мир хоста обычной загрузкой.
-
-Сохранение игра загружает, не проверяя, что оно от того же `main.scm`: `CTheScripts::Load` читает размеры
-скрипта и выбрасывает их, а потоки ставит по их местам в загруженном `main.scm`. Мир хоста с другим `main.scm`
-вылетал у напарника в первых же скриптах. Сохранение эти размеры хранит, поэтому перед загрузкой мира хоста игра
-напарника ищет в нём свои (`MainScriptSize`, размер самой большой миссии, число миссий): загруженного
-`main.scm`, а если он ещё не загружен, файла игры или замены из modloader. Не нашла — мир не грузится, и чат
-говорит, в чём дело.
-
-Велосипед напарник получает и тогда, когда хост садится на велосипед по сюжету миссии (например, в Big Smoke),
-если хост рядом. Так же напарник получает свою машину, когда в машине хоста нет места: Picador Райдера, Greenwood
-Свита с бандой. Место, к которому идёт копия человека хоста, считается занятым (`Peds::SeatClaimed`), иначе
-напарник садился на место Райдера. Машина ставится в 3,5 м справа, слева, сзади, спереди или между ними, где есть
-земля, нет стены или столба на пути (`CWorld::GetIsLineOfSightClear`) и нет машины или человека в квадрате 2×2 м
-(`IS_AREA_OCCUPIED`). Эта команда считает всё, до чего достаёт ограничивающая сфера. Сфера самого напарника (1,25 м)
-задевала прежний квадрат 5×5 м у каждого места, и велосипед не появлялся вовсе (INTRO1). Модель грузится в фоне, а
-неудачная попытка повторяется раз в секунду, пока напарник в 150 м от хоста. Машину хоста, для которой напарник уже
-получил свою, игра помнит по хэндлу: новая машина в том же слоте пула уже другая.
-
-Скрипты main.scm работают у обоих, так что магазины, качалки, еда, парикмахерские, тату и тюнинг доступны
-каждому. Сюжетные миссии запускает только хост. У напарника `CPlayerPed::CanPlayerStartMission` отвечает «нет»,
-если спрашивает поток основной части main.scm (это триггеры миссий). Стриминговые скрипты магазинов, еды
-и парикмахерских (ammu, junkfud, barber, tattoo, clothes и другие) спрашивают из своих буферов и работают как
-обычно.
-
-Миссия начинается, когда в маркере стоят оба. Жёлтые маркеры сюжета рисует радар у точек контакта
-(`BLIP_CONTACT_POINT`), а триггер только проверяет, где игрок, и спрашивает `CanPlayerStartMission`. Если хост
-стоит у точки контакта или в маркере locate-команды, а напарника рядом нет (на двоих есть метр запаса), у хоста
-этот вопрос тоже получает «нет», и хост шлёт `G_MISSION_WAIT`. У хоста на экране написано «Ждём напарника», у
-напарника — «<хост> ждёт вас у маркера миссии», и маркер рисуется у него там, где стоит хост. Миссии без маркера
-(звонок, сюжетное событие) начинаются как обычно.
-
-У цели хост тоже ждёт напарника (0.3.3). Если хост дошёл до метки своей сюжетной миссии (`LOCATE_..._2D/3D` его игрока
-с нарисованной меткой), а напарник в 30–300 м от неё, игра хоста отвечает скрипту «ещё не на месте»
-(`ObjectiveAnswer`). Ожидание длится, пока напарник не подойдёт ближе 30 м, но не дольше 45 секунд. Его нет, пока на
-экране идёт таймер миссии: ожидание могло бы его исчерпать. Напарника дальше 300 м хост не ждёт, тот занят своим. У
-хоста написано «Ждём напарника у цели», у напарника «<хост> ждёт вас у цели» (`G_MISSION_WAIT` с последним байтом 1).
-
-Первым в точку начала может прийти и напарник. Его игра раз в секунду сообщает хосту, что он стоит в ней пешком
-(`G_MISSION_WAIT` в обратную сторону, флаг `PW_AT`), а у напарника написано «Ждём <хост> у маркера миссии». Если
-точка на улице, а хост свободен (не в миссии и не в катсцене, управляет собой и сам не стоит в маркере), у хоста
-появляется «<напарник> ждёт вас у маркера миссии» с подсказкой «Y — переместиться к маркеру, N — нет». По Y хост
-встаёт в точку рядом с напарником, в её середину или в 0,9 м от неё, если напарник стоит у самой середины. Дальше
-миссию запускает обычный триггер хоста. N убирает приглашение, пока напарник не выйдет из точки.
-
-Пока игрок на задании (`CTheScripts::IsPlayerOnAMission`), радар не рисует точки начала миссий: их буквы
-и маркеры. У напарника своей миссии нет, и он видел их, пока шла миссия хоста. Теперь в этих двух вызовах
-(`CRadar::DrawCoordBlip`, `CRadar::Draw3dMarkers`) у напарника считается и миссия хоста.
-
-Сами точки начала (буква контакта на карте и маркер у его дома) ставит и убирает скрипт миссии, которая прошла, то
-есть игра хоста. Раньше напарник получал их только с миром хоста, а мир загружается в спокойную минуту: пешком, без
-звёзд, вне миссии. Пока напарник ездил, у него оставалась точка пройденной миссии, неактивная, а новой не было, порой
-до следующей миссии. Теперь хост раз в секунду сверяет свои точки контакта (без домов и сохранений) и при изменении
-шлёт их `G_CONTACTS`, а заодно повторяет раз в 5 секунд. Напарник убирает у себя точки, которых у хоста нет,
-добавляет недостающие (`ADD_SPRITE_BLIP_FOR_CONTACT_POINT`) и выставляет им вид хоста, вместе с привязкой к двери
-интерьера.
-
-Сцену миссии на движке игры (широкие полосы или отнятое управление вместе с камерой скрипта) напарник смотрит
-камерой хоста (`G_SCENE_CAM`). Пока камера хоста движется, он шлёт её положение, направление и угол обзора 20 раз в
-секунду, а пока стоит, 4 раза. Склейку он отмечает сам: по флагу камеры или по прыжку больше чем на 3 м. Конец сцены
-уходит надёжным сообщением. Напарник берёт сцену, если он в 100 м от хоста и в 150 м от камеры, в том же интерьере
-и его камера свободна (не его катсцена). Его игрок замирает, а камера каждый кадр встаёт туда, где камера хоста
-сейчас, с предсказанием по двум последним пакетам и сглаживанием. Ушедший дальше 150 м от хоста или 200 м от камеры
-сцену бросает. В конце камера возвращается за спину, и управление снова у напарника. Кто сцену не смотрит, в 300 м
-от хоста всё равно теряет управление вместе с ним (`SET_PLAYER_CONTROL`), чтобы не толкнуть её участников: на
-кладбище в «Los Sepulcros» сцена из-за этого стояла несколько минут.
-
-Пока у хоста идёт миссия или её триггер, у напарника повторяется следующее (`Missions.cpp`):
-
-- Тексты `CMessages` (малые, большие, с числами), подсказки `CHud::SetHelpMessage` и их очистка, а с ними
-  и субтитры катсцен, потому что их печатает скрипт миссии. Тексты лежат в постоянном пуле, так как игра
-  хранит на них указатели. Текст из GXT передаётся ещё и ключом (хеш плюс таблица миссии), и напарник
-  показывает текст своей игры: у него может стоять другой перевод или язык, где чужая строка выйдет
-  кракозябрами. Сама строка остаётся запасным вариантом. Таблицу миссии хоста напарник загружает в свой
-  `TheText`, и по её ключам рисуются ещё и подписи таймеров и счётчиков. Свои «WASTED» и «BUSTED» хоста
-  (`CPlayerInfo::KillPlayer`, `CGameLogic`) не передаются: это не текст миссии, а интерфейс напарника держит
-  текст такого стиля, пока не воскреснет его собственный игрок (`CHud::ResetWastedText`). Мелодия пройденной
-  миссии (`PLAY_MISSION_PASSED_TUNE`) идёт тем же сообщением (`TXT_TUNE`), раньше она играла только у хоста.
-- Реплики людей вне катсцен (`MissionSpeech.cpp`, `G_MISSION_AUDIO`). Миссия загружает реплику в один из
-  четырёх слотов звука миссии, привязывает её к тому, кто говорит, или ставит в точку и проигрывает, а субтитр
-  приходит с текстами. Хост пересылает эти вызовы своих скриптов миссий (`CAudioEngine::PreloadMissionAudio`,
-  `AttachMissionAudioToPed` и соседние, `SetMissionAudioPosition`, `PlayLoadedMissionAudio`,
-  `ClearMissionAudio`), и напарник делает те же. Скрипт миссии здесь не только её поток, но и потоки, которые она
-  запустила (`START_NEW_SCRIPT`), с их потомками: «Cesar Vialpando» говорит реплики своих сцен в `AUDIOL`, потоке
-  из main.scm, и напарник видел в этих сценах субтитры без голосов. Мимика этих реплик (`START_CHAR_FACIAL_TALK`)
-  идёт по тому же правилу. Поток узнаётся по своему объекту и адресу начала кода: слот пула, занятый потом другим
-  потоком, уже не считается миссией. Реплика звучит из его копии говорящего, поэтому громкость
-  зависит от того, насколько тот близко. Реплику того, кого у напарника нет (человек далеко, звонок по
-  телефону), он слышит только в 50 м от хоста. Если у напарника реплика ещё грузится, она начнётся, когда
-  загрузится, а через 5 секунд ожидания пропускается. Сюжетные звонки между миссиями идут не в миссии, а в потоках
-  main.scm (`MOB_LA1`, `MOB_SF` и другие: флаг миссии поднят, миссии нет), и их реплики напарнику не шли
-  (28.10). Теперь пересылается и поток `mob_…`, пока миссия не идёт. Случайные звонки (`MOB_RAN`) по-прежнему свои
-  у каждого. Если напарник сам говорит по телефону (задача 1600), реплики хоста в его слоты не грузятся.
-
-  Игра не загружает реплику в слот, где ещё звучит прошлая (`PreloadMissionAudio` 0x4EC190 проверяет
-  `IsMissionAudioSampleFinished`), а напарник начинал реплику позже хоста. Следующую загрузку хоста его игра молча
-  пропускала, и по команде «играть» звучала прошлая реплика: в разговорах в машине фразы шли по кругу, а одно слово
-  могло повторяться всю дорогу (30.10). Теперь перед загрузкой слот, где ещё звучит прошлая реплика хоста, очищается
-  (`ClearMissionAudio`).
-
-  Телефон убирает только задача звонка, и только когда анимация `phone_out` проходит 1,57 с из 2
-  (`CTaskComplexUseMobilePhone`). Прерванная раньше (драка, кнопка), она оставляла телефон в руке без звонка и не
-  возвращала оружие, у самого игрока и у его копии. Теперь игра каждого игрока сама убирает телефон из руки своего
-  CJ, если задачи звонка нет (`CPed__removeCellphone` 0x6348F0: модель 330 снимается, оружие из `m_nSavedWeapon`
-  возвращается).
-- Метки радара, созданные после начала миссии. Они ставятся на те же машины, педов и объекты миссии (ящики «Home
-  Invasion»: со стрелкой над копией) по сетевым id. Если
-  сущности у напарника пока нет, метка ставится по координатам и обновляется, пока сущность не появится. Цвет,
-  размер и иконка совпадают. Меток у радара 175 (`CRadar::ms_RadarTrace`, дальше лежат `vec2DRadarOrigin`
-  и тексты подсказок `CHud`): раньше мод читал 250 и слал напарнику мусор из подсказок как метки с чужими
-  спрайтами. Метку машины или педа игра снимает вместе с ними, поэтому перед обновлением напарник проверяет, что
-  его метка жива (счётчик в номере метки), иначе ставит её заново. Метки аэродромов игра ставит сама, когда игрок
-  в самолёте, и они не передаются.
-  Метку внутри помещения, привязанную к входу (`SET_BLIP_ENTRY_EXIT`: прилавок пиццерии в «Ryder»), радар
-  рисует у уличной двери этого входа, пока игрок снаружи. С меткой теперь идёт номер входа в пуле входов (обе
-  игры загружают входы одинаково). Раньше напарник видел её на координатах интерьера, далеко в Red County.
-- Маркеры назначения у «locate»-команд (`CTheScripts::HighlightImportantArea`: три красных цилиндра через
-  `CShadows::RenderIndicatorShadow`). Уходят только маркеры скриптов миссий (`m_bIsMission`), а не те, что игра хоста
-  рисует для себя (у мастерских тюнинга, пока хост в машине). Напарник ставит их до `CGame::Process`: 3D-маркер
-  становится видимым в `CSpecialFX::Update` (`C3dMarkers::Update`) того же кадра, а поставленный после него
-  уничтожается при отрисовке, так и не показавшись (`Render3dMarkers`). Раньше мод ставил их после обработки кадра, и
-  напарник не видел ни одного красного цилиндра миссии хоста.
-- Гоночные чекпоинты (`CREATE_CHECKPOINT`, массив `CTheScripts::ScriptCheckpointArray`) и сферы скриптов
-  (`ADD_SPHERE`, `ScriptSphereArray`, `G_CHECKPOINTS`). Напарник ставит такие же, а в конце миссии убирает.
-  Чекпоинт хранит направление на следующую точку (`CCheckpoints::PlaceMarker` нормирует разность), поэтому
-  напарник передаёт команде точку на шаг вдоль него, а не само направление. Красный круг `DRAW_SPHERE`
-  скрипт рисует в каждом кадре, пока он нужен (у двери Фредди в «OG Loc»), через `C3dMarkers::PlaceMarkerSet`.
-  Хост шлёт его вместе с маркерами locate-команд (запись вида «сфера»: центр и радиус), и напарник рисует
-  такой же.
-- Оружие, которое миссия выдаёт своему CJ (баллончик в «Tagging Up Turf», стволы в некоторых миссиях) и забирает
-  обратно (`G_MISSION_WEAPON`). Хост видит это по слотам оружия CJ до и после команд скрипта миссии. У напарника
-  забирается только то, что выдала миссия. Патронов передаётся столько, сколько у CJ стало, а не сколько
-  добавлено: миссии и убавляют их (пистолет Эммета 30000 на время тренировки и 10 после неё, баллончик заново
-  с 1000 в конце), и напарник оставался с бесконечным запасом. Оружие стрелка машины не передаётся: его выдаёт
-  `ATTACH_CHAR_TO_CAR` (`CPed::AttachPedToEntity`) и забирает `DETACH_CHAR_FROM_CAR`, и после этих команд хост снова
-  снимает слоты CJ. Напарник ходил с миниганом вертолёта из «The Da Nang Thang» (28.10). Так же и турель на объекте
-  или мотоцикле (`ATTACH_CHAR_TO_OBJECT`, `ATTACH_CHAR_TO_BIKE`): после «Air Raid» у напарника оставался миниган с
-  бесконечными патронами (#102).
-- Когда сюжет отбирает у CJ всё оружие (`REMOVE_ALL_CHAR_WEAPONS`: Тенпенни перед ссылкой в «The Green Sabre», река в
-  «The Da Nang Thang»), напарник в 150 м от хоста теряет всё своё тоже (`WEAPON_TAKE_ALL`, выбор игроков 02.11). Ссылка
-  переносит CJ в Энджел-Пайн тем же кадром, поэтому расстояние меряется и от места, где CJ был в начале кадра.
-- `CLEAR_AREA` миссии хоста (вызов `CWorld::ClearExcitingStuffFromArea`). Обычные пустые машины с места, куда
-  миссия ставит свои, игра убирает сама, а машина напарника там оставалась, потому что её копия у хоста —
-  машина миссии. В «Райдере» на неё ставилась машина Райдера у пиццерии, она взрывалась, и миссия
-  проваливалась. Теперь хост рассылает копии в этой зоне (`G_VEH_CLEAR`), и владельцы удаляют свои пустые машины.
-  Чужие машины убираются только в 60 м от точки и не в гаражах убежищ (`CGarages::IsPointWithinHideOutGarage`):
-  миссии чистят и по 500, и по 1000 м, и у напарника пропадали машины, оставленные через полгорода и в его гараже.
-- Затемнения скриптов, широкий экран, экранные таймеры и счётчики (блок `COnscreenTimer` вместе со значениями
-  переменных). Затемнение считается скриптовым, если оно началось, пока выполнялись команды скрипта (перехват
-  `CRunningScript::Process` на его единственном вызове 0x46A21B, а не в начале функции: наш переход в начале
-  кончался на 0x469F04, куда плагин сборки ставил свой `call`, и игра прыгала на E8xxxxxx, issue #52). Видимость таймеров и счётчиков игра пересчитывает каждый кадр по их переменным
-  (`COnscreenTimer::ProcessForDisplay`), а свои счётчики миссия хоста снимает в последнем кадре, который уже не
-  передаётся, поэтому в конце миссии напарник сбрасывает весь блок (`COnscreenTimer::Init`). Свои затемнения хоста
-  (вход в дверь, возрождение) напарнику не передаются: раньше
-  его экран темнел у каждой двери, в которую входил хост, и свет пульсировал. Тёмным экран напарника остаётся,
-  только пока экран хоста действительно тёмный. Если после затемнения скрипта экран открыла катсцена или дверь,
-  экран напарника больше не гаснет заново при каждом обновлении.
-- Входы в здания. Миссии открывают и закрывают их на время (пролог закрывает парикмахерские, «Райдер» открывает
-  одну для стрижки), а игра напарника миссий не выполняет. Состояние входа хранится в его флагах
-  (`CEntryExit::m_nFlags`, их же пишет сохранение), и хост рассылает их при изменении (`Entrances.cpp`, `G_ENEX`),
-  кроме битов о том, куда заходил сам игрок, и бита удаления (`DELETE_ENEX`): его ставит подгрузка своей игры, когда
-  здание с дверью выгружается, пока игрок внутри, и при выходе этого игрока дверь удаляется. Бит хоста удалял у
-  напарника дверь дома, в котором был хост, и метка дома при ограблении пропадала (28.10). Вход находится по имени
-  и месту, а не по номеру: при других модах
-  (лишние интерьеры) и для входов, которые скрипт создал позже, номера в двух играх расходятся.
-- Катсцены. Когда хост вызывает `LoadCutsceneData`, каждый напарник загружает ту же катсцену с интерьером хоста
-  и `LOAD_SCENE` и запускает её, как только она загрузится. В конце напарник пропускает её и вызывает
-  `CLEAR_CUTSCENE`, после чего возвращаются управление и камера.
-- Пропуск катсцены. Кнопка пропуска (Enter, пробел, левая кнопка мыши, крестик геймпада) ничего не пропускает,
-  а только предлагает: её проверка в `CCutsceneMgr::Update_overlay` (вызов по адресу 0x5B1947) перехвачена.
-  Хост собирает ответы (`G_CUTSCENE` с `CS_SKIP_VOTE` и `CS_SKIP_STATE`) и вызывает `SkipCutscene`, когда
-  согласны все, у кого игра уже в мире хоста: напарник, который ждёт в меню конца пролога, пропуск не держит.
-  Esc означает «смотреть дальше», а без ответа предложение снимается через 15 секунд. Катсцена
-  напарника кончается вместе с катсценой хоста. Попутно катсцена больше не пропускается сама, когда окно теряет
-  фокус: оригинальная проверка считает фон нажатием.
-
-В катсцене напарник играет второстепенного персонажа. Где он и что делает, на каждой смене плана решает игра
-хоста (`ScenePartner.cpp`). Она отправляет место вместе со временем начала плана по часам камеры
-(`G_CUTSCENE` с `CS_SPOT`), и напарник ставит персонажа, когда его камера дойдёт до этого времени. Решает одна
-игра, потому что кадры двух игр не совпадают и выбор каждой по отдельности расходился. У хоста это удалённый
-пед, а у напарника — его собственный игрок. Выбранное место принадлежит первому напарнику, а места следующих считает
-каждая игра сама и одинаково (`ForRank`), поэтому в сети идёт одно сообщение. Маршрут по катсцене (`POSE_WAY`) у
-второго и третьего свой: `cspath.py --ranks 3` считает его по той же карте, ставя уже посчитанных напарников людьми сцены,
-а в `cutscene_ways.txt` он лежит под именем `NAME#1`, `NAME#2`. Если такого нет, берётся маршрут первого со сдвигом на
-0,9 м. В машине сцены `InCar` отдаёт следующим напарникам оставшиеся свободные сиденья (`Spot::seat`, идут вместе с
-местом), а кому сиденья нет, того в этом плане нет. Рядом с идущим CJ следующий берёт другую сторону, на полу встаёт на
-шаг вбок от первого, а если первый сидит, то стоит рядом. На экране напарника копии других напарников стоят там же,
-где их ставит их собственная игра. У напарника CJ в катсцене одет как хост, а пед хоста скрыт. CJ катсцены (модель 1) берёт текстуры по имени
-из словаря «player», общего с моделью 0, а там лежит тот, кого одевали последним, то есть удалённый игрок.
-Поэтому перед загрузкой катсцены модель 0 собирается из одежды хоста (`CClothes::ConstructPedModel`), а сам CJ
-катсцены у напарника собирается из педа хоста: вызов `RebuildCutscenePlayer` внутри `LoadCutsceneData`
-(0x4D5EA3) перенаправлен. Сам `RebuildCutscenePlayer` сначала записывает в описание одежды жир и мышцы из
-статистики своей игры, а сборщик модели берёт мышцы из статистики всегда (0x5A42B0). Поэтому CJ хоста
-собирается напрямую (`ConstructPedModel`), а на время сборки чужого тела статистика мышц временно его
-(`game::MuscleFrom`). Так же собирается и вид напарника у хоста.
-
-Если для украшения CJ катсцены (цепочка, часы, очки, шляпа, «extra1») в общем словаре нет текстуры, оно не собирается:
-без материала сборка падала (#72). Проверка была сдвинута на одну модель: без текстуры «extra1» (её почти никто не
-носит) снималась шляпа, а без «necklace» вместо ботинок оставались голые ступни, у хоста и у напарника, во всех
-катсценах (30.10). Украшения это модели 5–9, а модель 4 это обувь.
-
-- Что стоит вокруг CJ, берётся из того, что рисуется. Треугольники зданий, объектов и реквизита катсцены
-  укладываются в карту высот с шагом 10 см: самое высокое препятствие в клетке, сиденье, пол. Коллизии для
-  этого мало: у декораций катсцен стены и мебель часто без неё, а у реквизита (столы, стулья, диваны) её нет
-  совсем. Люди сцены в карту не попадают, это скелетные объекты катсцены.
-- Места: точки вокруг CJ и на полу, который видит камера; стулья, диваны и ступеньки (плоская поверхность на
-  высоте сиденья, спинка позади, место для ног впереди); стены за спиной, к которым можно прислониться.
-- Место подходит, если персонаж целиком в кадре, не заслоняет CJ и других людей, стоит на полу, ни во что не
-  упирается, а камера видит его голову и грудь. Стена, повёрнутая к камере обратной стороной, обзор не
-  закрывает: камеры катсцен часто стоят за такой стеной. Персонаж не крупнее людей сцены и не стоит между
-  двумя из них ближе к камере, чем они. В счёт идут только те, у кого середина фигуры в кадре: CJ у самой
-  камеры, от которого виден один локоть, иначе разрешал бы напарнику занять весь экран.
-- Всё это проверяется на весь план, а не на первый кадр: камеры катсцен панорамируют, а люди ходят. Путь
-  камеры до следующей склейки берётся из сплайна катсцены (`TheCamera.m_aPathArray`, кривые Безье между
-  ключами, как их читает `CCam::Process_FlyBy`; ключи ближе 32 мс друг к другу — это склейка). Куда пойдут
-  люди, говорят корневые треки их анимаций: объект катсцены движется ровно на смещение корня. Место
-  отбрасывается, если позже в плане в него кто-то войдёт, персонаж кого-то заслонит или почти всё время
-  будет вне кадра или обрезан его краем. Склейки тоже находятся по сплайну, даже если камера почти не
-  сдвинулась.
-- Машины катсцены — её собственные модели без коллизии, и анимируются они так же, как люди. Их контур берётся из
-  нарисованного, путь до склейки — из трека анимации, и напарник не стоит там, где машина проедет. Если CJ
-  сидит в машине, напарник прячется: снаружи ему делать нечего, а посадить его в машину катсцены нельзя.
-- Анимации прислонения и сидения сдвигают тело назад от точки педа (на 0,5 м у `leanIDLE` и `SEAT_idle`, на
-  0,24 м у `M_smklean_loop`), и точка ставится с этим запасом, иначе персонаж уходит в стену или в спинку
-  дивана.
-- Занятия: стоит и слушает, курит с сигаретой в руке, прислонился к стене, сидит.
-- Стоит персонаж так же, как CJ в катсценах. Модуль `SceneMocap.cpp` при входе в игру вырезает из анимаций
-  самих катсцен (`anim\cuts.img`) 28 пятисекундных отрезков, где CJ молча стоит и слушает, и персонаж играет
-  их подряд с переходом в 0,8 с (`kClipBlend`). Отрезки выбраны так: корень почти не сдвигается, а тело движется
-  не больше, чем у слушающего. Потом все они просмотрены в игре, и отброшены телефон у уха, рука у рта, нога
-  на подставке, опора на стойку, наклоны и поднятые руки. От отрезка остаются кости тела без лица. Корень
-  стоит на точке педа на высоте обычных поз, а в среднем смотрит туда же, куда пед. Разбор файлов идёт в
-  фоновом потоке. Готовые клипы собираются в файл ANPK в памяти, и игра сама делает из него блок `COOPCS`
-  (`CAnimManager::LoadAnimFile` из потока RenderWare в памяти). Блок создаётся до первой катсцены: когда
-  катсцена кончается, игра удаляет последний блок (`RemoveLastAnimFile`), и это должен быть блок самой
-  катсцены. Анимаций Rockstar мод с собой не везёт. Если клипы собрать не удалось, персонаж стоит в позах
-  ожидания игры.
-- Если CJ в плане идёт, персонаж идёт с ним: в 1,7 м позади по его пути и на 0,75 м в сторону. Путь — это
-  корневой трек анимации самого CJ, так что там есть пол и проход. Обе игры считают путь сами по своему CJ и
-  поэтому совпадают, а по сети уходит только поза «идёт» и сторона. Шаг тоже взят из катсцен: тот же модуль
-  вырезает восемь циклов ходьбы CJ по два шага, у которых последняя поза почти совпадает с первой. Корень в
-  них стоит на месте, а педа двигает мод каждый кадр. Пед заморожен, потому что в декорациях катсцен часто
-  нет коллизии. Скорость шага подгоняется под скорость пути (`SET_CHAR_ANIM_SPEED`), а когда CJ
-  останавливается, персонаж встаёт и переходит на клипы стойки. Ходьба проверяется на весь план, как и
-  место: он никого не заслоняет, ни на кого не натыкается, а камера не подходит к нему ближе 1,3 м. Камера
-  часто идёт за CJ как раз там, где шагал бы напарник, и проекция тела у самой камеры ничего не показывает.
-  Поэтому в таких планах он не идёт, а стоит.
-- Время ключей в клипе идёт от нуля по порядку. У зацикленной анимации отрицательная длительность кадра
-  навсегда зацикливает `CAnimBlendNode::NextKeyFrame` (0x4D04A0), и игра зависает. В файлах катсцен изредка
-  встречается ключ на 3 мс назад во времени: при нарезке он пропускается, а клип с нарушенным порядком в
-  блок не попадает.
-- Поверх позы персонаж живёт. В позах игры он время от времени играет вариацию той же позы: кивает, думает, качает головой,
-  переносит вес, разминает ногу или плечи, чешет затылок, смотрит на часы, затягивается сигаретой. Вариации
-  начинаются и кончаются в позе петли (корень сдвигается не больше чем на 6 см), поэтому переходы не дёргаются.
-- Голова и плечи поворачиваются к тому, кто говорит (`IKChainManager_c::LookAt`), а иногда на секунду к кому-то
-  другому. Говорящего выдаёт челюсть: у лиц катсцен это кость 5015, а у остальных людей 8. Её движение
-  относительно головы за последнюю треть секунды у говорящего в разы больше, чем у молчащих. Когда реплика
-  кончается, персонаж иногда кивает. На новый голос он поднимает брови, а время от времени жуёт жвачку (мимику
-  ведёт задача `CTaskComplexFacial` самого педа).
-- Вариации, взгляды и жвачка выбираются по часам камеры катсцены и месту персонажа, так что у хоста и напарника
-  они совпадают с разницей в несколько кадров. Пока идёт катсцена, модуль `Anims` не пересылает анимации
-  ожидания: напарника обе игры анимируют сами.
-- Люди не пропадают и не перескакивают между планами. Прежнее место персонажа сохраняется на всю сцену, видно его
-  в новом плане или нет (`Stays`): если оно никого не заслоняет, не мешает сцене, не стоит у кого-то на пути, камера
-  не упирается в него, а CJ рядом (от 1 до 9 м, на том же полу). Раньше место сохранялось, только если новый план
-  показывал его хотя бы половину времени, и персонаж переходил туда, где его видно: от стены к Свиту и дальше в
-  глубину комнаты на каждой смене плана (28.10). Игроки выбрали одно место на сцену. Новое место
-  ищется, только когда старое не годится или сцена ушла: на другой этаж или дальше 25 м (раньше хватало, чтобы CJ
-  отошёл на 9 м). Старое место держится и тогда, только если новый план показывает его хоть какую-то часть времени
-  (`SeenShare` больше нуля). В «Cleaning the Hood» напарник оставался там, где его не было видно, в 8 планах из 12
-  (29.10). Теперь для такого плана сначала ищется место в кадре, и напарник переходит туда, а не на месте, которое этот
-  план показывает. Почему старое место не подошло, пишет журнал хоста («not staying: …»). Место, выбранное вне кадра (ни одного места в кадре этому плану не нашлось), так не держится: следующий
-  план сначала ищет место в кадре, и только найдя его, напарник стоит там дальше. В «Cleaning the Hood» место
-  первого плана было вне кадра, и десять планов подряд его не было видно (28.10). Тогда место ищется в кадре, а если хорошего места в кадре нет, берётся место похуже, но в
-  кадре: на краю, наполовину за чем-то или позади людей. За человеком можно стоять, если тот ближе к камере хотя
-  бы на метр, а люди закрывают не больше 60% фигуры. Раньше место отбраковывал любой человек, с которым
-  напарник пересекался в кадре, и в средних планах компании ему места не находилось. Такое место должно быть
-  видно хотя бы треть плана, и из нескольких берётся то, что видно дольше. Только если нет и такого, персонаж
-  остаётся на прежнем месте вне кадра или встаёт рядом с CJ туда, куда этот план не смотрит, и следующий план,
-  повёрнутый в ту сторону, застаёт его там. Если же камера за план обходит всё вокруг CJ, он встаёт в кадр как
-  получится: его может обрезать край кадра или наполовину закрыть столб, но он по-прежнему никого не
-  заслоняет.
-
-  Если старое место в новом плане не видно, новое теперь выбирается ближайшим к нему: каждый метр от прежнего места
-  снимает с оценки (`Rate`) очко. Раньше бралось лучшее место в 6 м от CJ, и второй CJ почти в каждом плане переходил
-  через всю комнату (31.10). Игроки выбрали вариант «виден в каждом плане, но короткими шагами». Штраф
-  действует, только если прежнее место в этой же сцене: не дальше 25 м от CJ и на его полу.
-
-  В проверке 31.10 второй CJ всё равно пропадал: в 21 плане из 47 его не было видно совсем, в первой катсцене
-  «Nines and AKs» почти всё время. Строгие и свободные правила отбраковывали каждое место, и он оставался на прежнем
-  месте вне кадра или вставал туда, куда план не смотрит. Теперь перед этим идёт последняя попытка в кадре (`SEEN` в
-  `Rate`): место до 10 м от CJ, боком к кому-то, кроме CJ (до трети ширины), или на три четверти за спинами людей, на
-  мгновение у кого-то на пути. Такое место должно быть видно хотя бы пятую часть плана, и из нескольких берётся то,
-  что видно дольше. На прежнем месте он остаётся, только если новый план показывает его хотя бы пятую часть времени:
-  раньше хватало одного мгновения, и остаток плана его не было видно, а с половиной он менял место почти в каждом
-  плане, как будто телепортировался (вторая проверка 31.10). В последней попытке он не прислоняется к стене (у двери
-  магазина Зеро он стоял так, как охранник) и встаёт только туда, куда от CJ можно дойти: от CJ по карте препятствий
-  идёт заливка свободного пола с запасом 20 см (`BuildReach`), и место за прилавком или за стеной не подходит. В
-  магазине Зеро последняя попытка ставила его за прилавок к кассе. Запасное место рядом с CJ (`Beside`) теперь в 2,3
-  м, а не в 1,8 м: в тесном магазине он стоял у CJ вплотную.
-
-  После шестой проверки (01.11) игроки сказали, что в части сцен второй CJ стоит в стороне, будто не участвует. Теперь
-  каждый метр дальше 2 м от ближайшего человека сцены (CJ тоже) снимает с оценки 0,7 очка, а свободное место вокруг
-  него считается только до 1,5 м: раньше оценка росла с каждым метром пустоты вокруг.
-
-  После восьмой проверки (02.11): он перескакивал с места на место, а нужна живая ходьба. Теперь на новое место
-  недалеко он идёт пешком (`Spot::walk`, `StartGoing`, `Going`). Хост пускает его шагом, когда оба места «стоя» или
-  «прислонившись», на одном полу, не дальше 8 м, а на прямой между ними по карте кадра нет ничего, обо что
-  споткнуться, есть пол и нет людей сцены (`WalkWay`). Пометка уходит напарнику вместе с местом (`CS_SPOT`, протокол
-  36). Обе игры ведут его клипами ходьбы из катсцен со скоростью 1,3 м/с по часам катсцены, поэтому шаги совпадают. В
-  последние 0,4 с он поворачивается, как стоит место, и там начинается действие места. Дальние места и места сидя
-  по-прежнему без ходьбы.
-
-  После проверки 18 сборки (03.11) игроки попросили не случайные места, а рядом с хостом: в «Tagging Up Turf» второй
-  CJ стоял у Свита и Биг Смоука в 2-5 м от CJ, в ZERO_2 переходил от стены к стене и вне кадра. Выбор пользователя:
-  сбоку от CJ. Теперь сразу после поездки и ходьбы с CJ место ищется у его бока (`BesideCj`): вровень с CJ в 1,2 или
-  1,5 м справа или слева, лицом туда же, куда смотрит CJ, а если там занято, то в 1,1 м сбоку и на 0,8 м позади. Сторона
-  выбирается в первом плане сцены, та, что дальше от людей сцены (он не стоит между CJ и тем, с кем CJ говорит), и
-  держится всю сцену (`g_side`), другая берётся только на план, где первая занята. Место проверяется строго (есть
-  место для тела на полу CJ, никто там не стоит, не в камере, никого не заслоняет и никто не пройдёт через него за
-  план), а если в тесноте строго не подходит ни одно, то мягко: без двух последних условий. Только если не подошло и
-  так, работают прежние правила. Если он уже стоит не дальше 0,8 м от нового места у бока и не ближе 0,9 м к CJ, он
-  остаётся, где стоит, без лишних шагов. Стоя у бока CJ, он не уходит к людям сцены в планах, где CJ не виден
-  (`Elsewhere` для него не работает): он рядом с хостом, виден или нет. Когда CJ идёт, напарник идёт за ним на своей
-  стороне.
-
-  Проверка 04.11 (логи обеих сторон, 26 планов): в 14 планах его не было видно, а в разговоре он ходил от плана к плану. Теперь
-  он остаётся на месте, пока оно годится (`Stays`) и CJ не дальше 3,5 м, как бы CJ ни поворачивался. Раньше место у бока считалось
-  заново от взгляда CJ на каждом плане, и он шёл на него. Если план показывает CJ хотя бы треть времени, а напарника нет, ищется
-  место у бока или за спиной CJ, которое этот план показывает. Такой переход идёт скачком на смене плана, потому что старого
-  места новый план не показывает, и не чаще раза в 6 секунд. Пешком он теперь только идёт за CJ или уходит с дороги. Места у бока
-  ищутся по дуге вокруг CJ (1,5, 2 и 2,6 м, от бока до спины, спереди никогда), а не среди трёх точек: в гараже GARAG3A они
-  были заняты, и правила кадра водили его по комнате на 8 м. С CJ он идёт, только если CJ за план уходит хотя бы на 2 м, а не на 1 м.
-  Рывок в начале ходьбы шёл от направления: пока CJ не прошёл 1,7 м, напарник стоял позади него по случайному сдвигу в несколько
-  сантиметров или по взгляду CJ и обегал его со скоростью 5 м/с. Теперь это направление первых полуметра его пути (`WalkOff`).
-
-  План на остановку (выбор пользователя 04.11). Выбирая место план за планом, мод не знал, что покажут следующие. Но в файлах катсцены
-  (`anim/cuts.img`: `.cut`, `.ifp`, `.dat`) всё известно заранее: сплайн камеры и путь каждого человека идут до конца сцены. Пока CJ
-  стоит примерно на одном месте (не уходит дальше 3 м и не идёт 2 м за план), `BuildPlan` сразу просматривает все планы этой остановки.
-  Места берутся сбоку и чуть позади CJ (ниже) плюс то, где напарник уже стоит. Для каждого места и плана
-  считается, сколько план его показывает и не мешает ли он (`RateShot`: на месте никого нет, камера не в нём, в чьём-то кадре он не
-  дольше четверти плана, стену проверяет карта препятствий). Потом выбирается лучшая цепочка мест на всю остановку: больше всего
-  времени в кадре и меньше заметных переходов. Переход через смену плана стоит 4 с показа, если напарника не видно с одной из сторон
-  склейки, и ещё 8 с плюс секунду за метр, если видно с обеих. Такие переходы идут скачком на смене плана. Новая остановка считается заново,
-  когда CJ дошёл до неё, потому что стены и пол берутся из того, что нарисовано вокруг него. Если цепочки нет, работает выбор по планам.
-  Прогон без игры (`E:\GTA COOP Tests\scripts\analysis\csanim\csplan.py`, те же правила, но без стен), первая версия с местами по кругу: 143 катсцены, 1346 планов, 5785 с
-  на ногах. Напарника видно 51% времени, это 72% времени, когда виден CJ. У модели выбора по планам 31%. Переходов 1,7 на сцену вместо 3,2.
-
-  Место, где он уже стоит, идёт в план только на полу этой остановки и не дальше 3,5 м от неё. Раньше оно шло откуда угодно, да ещё с
-  прибавкой за то, что не надо переходить. В SWEET3A CJ ждёт своего выхода под полом, и напарник оставался там ещё 28 с, когда CJ уже
-  поднялся, а в INTRO1A стоял в 7 м через комнату (проверка 05.11, логи напарника против файлов катсцен). Тот же прогон: дальше 3,6 м от CJ
-  181 с вместо 578 с, на другом полу 2,5 с вместо 109 с, видно его столько же, переходов 231 вместо 243. Первое место сцены ждёт, пока CJ
-  приземлится: в 12 катсценах из 148 первые ключи его трека несут его издалека (INTRO1A: 17 м за четыре кадра), и место выбиралось у
-  лестницы, на 6 м выше комнаты.
-
-  Куда смотрит CJ, мод до сборки 31 не знал. `CCutsceneObject::ProcessControl` двигает только позицию (`SetTranslateOnly`), матрица объекта
-  катсцены всю сцену смотрит на север, а тело поворачивает корень анимации. Поэтому «сбоку от CJ» (`BesideCj`) было 1,5 м по оси X карты,
-  а «лицом туда же» значило лицом на север. Если CJ смотрел вдоль оси X, напарник стоял прямо перед ним или за спиной: 37 с в 1,2 м перед
-  лицом CJ в разговоре INTRO1A, 64 с из 343 с в пяти катсценах проверки 05.11. Настоящий курс берётся из ключей корня (`FacingAt`):
-  поворот корня переводит ось X туда, куда смотрит человек. На 883 участках ходьбы всех катсцен это совпадает с направлением шага (0,9 в
-  среднем). Игра хранит кватернион сопряжённым к файлу (`LoadAnimFile`), `FacingAt` читает его из памяти.
-
-  С верным курсом места плана лежат только сбоку и чуть позади (`BuildPlan`: 1,5, 2 и 2,6 м, от 60° до 150° от лица CJ, обе стороны).
-  Мгновение в 50° перед CJ ближе 4 м считается как мгновение на чужом пути (`InFrontOf`), а `Stays` не оставляет напарника перед ним.
-  Переход стоит 4 с показа вместо 0,5 с, а видимый с обеих сторон склейки 8 с вместо 4 с: при прежней цене он за 100 с INTRO1A сменил 9 мест
-  и ходил вокруг CJ. Прогон без игры, 143 катсцены: перед CJ 1% времени вместо 22%, сбоку 59% вместо 43%, за спиной 41% вместо 35%,
-  переходов 0,9 на сцену вместо 1,6, мест на остановку 1,5 вместо 2. Видно его 36% времени вместо 52%: раньше его было видно как раз потому,
-  что он стоял перед CJ, лицом к камере. Если рядом никого нет, он смотрит туда же, куда CJ, иначе на людей, с которыми стоит.
-
-  Маршрут на всю сцену (сборка 32). Выбирая место на смене плана, мод видел только то, что нарисовано вокруг CJ в этот кадр, и не знал карты:
-  за 2 с плана он шёл 8 м, три плана стоял в 8-10 м от CJ, а первое место INTRO1A висело на 0,4 м над полом (проверка 05.11). В файлах игры есть всё
-  заранее: карта места (что расставляют IPL, меши DFF), пути CJ и людей, камера. Скрипты в `E:\GTA COOP Tests\scripts\analysis\csanim` считают по ним маршрут
-  напарника на каждую катсцену: `csworld.py` читает карту, `cssite.py` строит сетку 10 см (высота пола, что стоит на нём, где поместится человек, ступени до 32 см),
-  `cspath.py` считает маршрут. Напарник стоит, пока CJ рядом. Когда CJ уходит дальше 2,6 м (сборка 34) или уже идёт туда, он идёт следом к месту у той точки, где CJ остановится,
-  кратчайшим путём в обход мебели и людей, со скоростью 1,05 м/с, разгоном и торможением 0,9 м/с². Если CJ обошёл его, он спокойно поворачивается. Перескакивает он только там,
-  где катсцена сама переносит CJ, или если пешком не дойти. Пока CJ под декорацией (SWEET3A, GROVE1A), он ждёт там, где CJ выйдет.
-  Итог лежит в `src/client/features/story/cutscene-partner/cutscene_ways.txt` и вшит в `coop.asi` (ресурс `CUTSCENE_WAYS` в `coop.rc`): время, место, курс. Все игры читают один текст по часам своего CJ, поза `POSE_WAY`, по сети идёт только её номер.
-  Если маршрута нет (CJ в машине всю сцену, CJ за столом на свидании), работает прежний выбор места. Посадка в машину важнее маршрута.
-  Без игры, 143 катсцены: маршрут есть у 119, дальше 4 м от CJ 3% времени, перед ним 4%, 1,3 прохода на сцену, 8 перескоков на всю игру, напарника видно 45% времени, когда виден CJ.
-
-  Выбор по всей сцене (сборка 33). Место выбиралось на следующие секунды и только из нескольких точек сбоку от CJ, поэтому в разговоре двоих напарник оставался за кадром.
-  Теперь `cspath.py` оценивает все места пола в 4 м от пути CJ (сетка 40 см) каждые 0,25 с и выбирает всю цепочку стоянок и переходов сразу (динамическое программирование, шаг 0,5 с).
-  Секунда, когда его видно рядом с CJ, стоит 2, секунда в чужом кадре -4, перед лицом CJ -3,5, дальше 3 м от CJ -1,2 и больше, переход в кадре -3,5, за кадром -3 (веса сборки 35). Человек, идущий прямо на него, стоит -30.
-  На виду он выходит, только если CJ ушёл (те же условия, что и раньше) или на него идут люди. За кадром может перейти в любой момент: так он успевает на место к следующему плану.
-  Частично закрытый другим человеком считается долей своей видимой части: через плечо он виден. Что между камерой и CJ, не считается стеной: снаружи стены декорации не рисуются.
-  Переходы с остановкой короче 2 с сливаются в один, шаг короче 1,5 м не делается. Пока CJ под декорацией, напарник ждёт вне кадра (-0,8 за секунду в кадре).
-  Каждый переход проверяется по всей длине: если он идёт сквозь CJ, сквозь человека или через чужой кадр, он сдвигается на 0-4 с или обходит путь CJ, а если мешает всё равно и CJ остаётся рядом, его нет.
-  Номер интерьера в IPL хранится вместе с флагами (256, 512, 1024), поэтому берётся младший байт: иначе земля многих улиц терялась. Интерьер сцены берётся из `main.scm` (`cs_areas.txt`).
-  На свиданиях маршрута нет, чтобы напарник не стоял над столом. В BCRAS1 и BCRAS2 в файлах карты нет земли под CJ, там прежний выбор места.
-  Без игры: маршрут есть у 129 катсцен, напарника видно рядом с CJ 55% времени, когда виден CJ (маршруты сборки 32 той же меркой 28%), дальше 4 м от CJ 1,4% времени, перед ним 1,9%, 2,2 прохода на сцену, перескоков 1.
-
-  Проверка сборки 33 (сборки 34 и 35, 06.11). По 25 замечаниям к первым 67 катсценам. Прогон без игры, лог хоста и лог напарника показали такие причины.
-
-  Поворот. Курс на стоянке считался от точки в 2 м перед CJ или между CJ и собеседником. С каждым шагом CJ эта точка уходила вокруг напарника: 8 рад в одну сторону в SWEET5A, 26 рад за сцену в BCESAR5.
-  Теперь у стоянки один курс (`mean_heading`): среднее направление на людей рядом с CJ, а если CJ один, туда же, куда смотрит он. Напарник поворачивается, только если сцена ушла больше чем на 63° надолго, и не чаще раза в 4 с. Разговор ведёт голова (`Attention`, курс берётся текущий, а не с последней смены плана).
-  Конец перехода сразу разворачивает его к новому курсу. Поворот на месте идёт шагами (`WayAt`), потому что без них он крутился на пятках. После прыжка на смене плана курс ставится сразу, иначе он крутился уже в кадре.
-
-  Близость. Штраф начинается с 2 м от CJ (`W_NEAR`), от 3 м он сильнее, с первого кадра напарник рядом с CJ (`W_START`). Отдельно штрафуется место у другого человека (`W_OTHER`: за Правдой в GARAG1B, у Пуласки в SCRASH2), стена между ним и CJ (`W_WALL`) и кадр без CJ (`W_ALONE`: чужие кадры в SYND_4B).
-  Если CJ стоит за декорацией, у её двери, напарник стоит рядом с ним там же и заходит следом (TRUTH_1). Переход на виду и за кадром стоит дороже: ради лучшего кадра он больше не ходит кругами (FARL_5A, BCESA5W).
-
-  Предметы катсцены. `CCutsceneMgr::SetupCutsceneToStart` поднимает сцену на 1 м. Для людей это высота корня, а столы, стулья и машины в расчёте лежали на метр ниже и под полом не мешали. Из-за этого он стоял в подставке «грузовика» в TRUTH_2 и шёл в машину в SYND_3A и BCESAR5. Теперь предметы стоят на своей высоте, включая место, куда они придут к концу сцены, а машины, которые не едут, входят в карту.
-  Переход сквозь CJ, человека или едущую машину и длинный обход не делаются: ищется другое время старта или соседнее место (`CONTACT`), свободное следующие 15 с и не дальше 3 м от CJ. Если другого нет, а на него идут, переход всё же делается: в SYND_4B CJ иначе стоял в нём 9 с.
-  Переходы одного плана идут вместе и могут привести его на место раньше времени. Если в первые 4 с после прихода на это место кто-то приходит, переход считается мешающим: в TRUTH_1 CJ иначе 3 с шёл сквозь него.
-
-  Камера (сборка 35). Место в камере считалось вне кадра и ничего не стоило: глубина меньше 0,5 м выпадала из проверки кадра. В сборке 33 он так стоял 328 с, а в SMOKE2A камера 24 с была в 30 см от него и закрывала весь кадр.
-  Теперь `at_camera` проверяет то же, что `AtCamera` в игре: камера ближе 1,3 м и на высоте его тела. Такое место считается помехой, и при выборе стоянки, и при проверке перехода. Если пешком не уйти (CESAR1A: вдоль машины, камера за спиной), он переносится на ближайшей смене плана.
-
-  Вместе с CJ (сборка 35). Раньше он трогался, только когда CJ уже ушёл дальше 2,6 м. Теперь, если CJ за 3 с уходит больше чем на 1,2 м (`going`), переход можно начать и на виду, а переход от 2 м почти ничего не стоит (`W_WITH`). Шаг или два CJ такого не дают, иначе он снова начинает бродить (BCESA5W). Просьба к WOOZI1A и FARL_4A.
-
-  Пол. Домик Каталины нарисован без пола: CJ в нём на 90 см выше земли, и сцены CAT_3 и CAT_2 считались как идущие под декорацией. CJ до 1,3 м над картой теперь стоит на полу, которого нет в файлах, и пол вокруг него поднимается до его уровня (`RAISED`), если над этим местом нет нарисованной поверхности на высоте CJ: на крыльце Свита пол не поднимается, иначе напарник висел бы над улицей. У CAT_3 маршрута не было ещё и потому, что `cat_3.dat` содержит «7\t,», и файл камеры не разбирался.
-
-  Стойка. Две ошибки. `HoldMoving` брал время до `Live`, клип в `Live` ставил `checkedAt` позже, разность выходила огромной, и только что запущенный клип считался не играющим и менялся через кадр.
-  Первый клип сцены, запущенный в кадр постановки, не брался ни в одной из 67 катсцен, и через полсекунды вместо него начинался другой (рывок в начале каждой катсцены). Причина не найдена. `Hold` запускает анимацию кадром позже, и у него этой ошибки нет, поэтому `HoldMoving` делает так же, очищает задачи в начале и проверяет первый клип через 150 мс.
-
-  Первый кадр. `Analyse` ждёт нарисованного кадра, а игра напарника ждёт слова хоста, поэтому он появлялся уже на виду. Теперь до этого момента место даёт сам маршрут (`EarlySpot`): обе игры ставят его в кадр начала катсцены. Если CJ при этом сидит в машине, напарник на первые кадры стоит у маршрута, под затемнением, и потом садится.
-
-  Машина. Выход CJ проверялся только на смене плана, и в BCRAS2 напарник 7 с сидел в пустой машине. Теперь `CjGotOut` смотрит таз CJ каждые 100 мс и через полсекунды вне салона считает это сменой плана. Выхода как анимации нет: напарник ставится рядом с машиной.
-
-  Анимации сцены (`kSceneActs`). Просьбы игроков к отдельным катсценам: CAT_3 (`handscower`, когда CJ отступает от двери) и W2_ALT (`Coplook_loop`, сложенные руки). Действует только на стоянке, идёт вместо клипов, блоки грузятся в `Prepare`.
-
-  Город в сценах ОГ Лока пропадал только в `/cs`: скрипт ставит `SET_AREA_VISIBLE 3` для STRP4B1, а таблица приписала интерьер 3 и STRAP4A, которая идёт на улице. Остальные сцены с такой записью после `LOAD_CUTSCENE` проверены по `main.scm`, они верны. Текстуры Burger Shot в STRAP1A причины не нашли.
-
-  Проверка сборки 36 вдвоём (сборка 37, 06.11). Игроки посмотрели все 147 катсцен и прислали 10 замечаний и просьбу о плавной ходьбе. Причины нашлись по логам и файлам игры. Что считать ошибкой, теперь считает `cscheck.py`: он сходится с замечаниями (перенос посреди плана ровно в 30 и 10, без пола в 39, 0% в кадре в 13).
-
-  Предметы по частям. Трек корня стола, дивана или стула лежит сильно ниже пола, настоящее место задают дочерние кости (`chair`, `bench`, `kb_couch04`). Расчёт ставил весь меш в корень, и стол SYND_2A оказался на 2,4 м под полом: напарник стоял в нём. Теперь `parts_at` собирает каждую часть по кости её кадра DFF (`World.parts`, имена кадров из расширения 0x0253F2FE), со сдвигом сцены и подъёмом на 1 м. У стола и стула это даёт ровно высоту пола. Предметы с номером (`CsChair-2`) на карту не попадали совсем, их модель без номера (`model_of`). У `csstuck.py` была та же ошибка, поэтому он показывал ноль: настоящая цифра сборки 36 была 93 с внутри предметов.
-
-  Щели. Обход пола шёл через любую щель шире тела, и напарник в RYDER1A начинал за забором двора и проходил сквозь щель в 87 см. Теперь щель уже 90 см (`WIDE`) закрыта, если через неё не идёт сам CJ, а места у стен по-прежнему можно занимать.
-
-  Перенос посреди плана. Трек CJ может скачком сменить место, когда его нет в кадре (STRAP2A: 80 с, в плане один ОГ Лок). Начало новой части маршрута было переносом, и напарник исчезал на виду. Теперь он стоит до следующей смены плана, а если её нет, до конца сцены (`plan_scene`). Перенос после перехода тоже ждал только конца перехода и мог уйти за смену плана (SWEET2B): теперь берётся следующая смена.
-
-  Пол домика Каталины. Пола комнаты нет в DFF, он есть только в коробках коллизии `ce_catshack` (верх 63,05 м при земле 62,2 м). Прежнее правило поднимало пол на уровень CJ в квадрате 6 на 6 м вокруг него, и напарник висел на 55 см над травой снаружи. Теперь верх таких коробок считается полом (`BOX_FLOORS`, `parse_col`), снаружи он стоит на земле, а на ступень поднимается путём CJ.
-
-  За CJ в конце сцены. Переход должен был закончиться до конца части маршрута, поэтому в последние секунды никто не трогался. Теперь переход за CJ может оборваться концом (`going`). Если CJ уходит из сцены, а напарник остался дальше 2,6 м, он идёт за ним без оглядки на кадр (`leaves`), а за дверью декорации, где карты нет, идёт по следам CJ (`walk_after`, BCESAR2).
-
-  Виден ли он. Вес кадра один на все сцены, и в тесных сценах выгоднее было стоять вне кадра: в SWEET4A 0%, в SWEET1C первая минута. Если сцена показывает его меньше трети времени с CJ или первый раз позже 15 с (`SEEN_WANTED`, `SEEN_BY`), `plan_seen` считает её ещё с весом кадра в 2, 3 и 4 раза больше и берёт лучший вариант, который не ставит его перед CJ (+8% времени), в чужой вид (+5%) и в камеру. SMOKE2A из-за этого условия остаётся как был: там игроки просили не закрывать вид. Есть сцены, где места нет вовсе: в FARL_3A крупные планы в тесной комнате.
-
-  Плавность. Курс шёл за ключами маршрута рывками до 5 рад/с. Теперь `EaseHeading` ведёт его критически задемпфированной пружиной: на месте 0,3 с, на ходу 0,15 с, не быстрее 2,5 рад/с, одинаково при любом числе кадров. Поворот на месте играл ходьбу на месте, теперь это игровые `PED/Turn_L` и `Turn_R` (корень в них не поворачивается, курс задаёт мод), они идут, пока курс не догонит маршрут. Вход в шаг и выход из него 0,4 с (`kStepBlend`). В маршрутах углы переходов скруглены (`round_path`, только по свободному полу), на ходу курс не быстрее 2 рад/с (`TURN_WALK`), поворот больше 45° делается на месте перед шагом (`turn_first`), а в конце перехода разворот больше 75° откладывается на стоянку, чтобы он не шёл боком.
-
-  Машина BCRAS1. Мешок для головы (`csheadsack`) скиннингован, как человек, и занимал место: 4 места, 4 человека, и напарник садился только с 15,5 с. Теперь человек это скелет от 20 костей (`HasBody`, `RpHAnimHierarchy::numNodes`).
-
-  Текстуры Burger Shot. Здание `burger01_law` в IDE стоит в разделе `anim`: ему нужен файл `LAw.ifp`. Пока идёт катсцена (`ms_cutsceneProcessing`), игра не читает IFP (`CStreaming::RequestModelStream`). В `/cs` игрок стоял далеко, файла в памяти не было, и всю сцену был виден LOD здания, на обоих экранах и только в 29: запрос файла проходит сразу после неё, и в 32 здание уже грузится. В настоящей игре так выйдет у напарника, если он далеко от хоста. Теперь `Prepare` загружает блок перед катсценой (`kMapBlocks`, сцены с анимированными объектами рядом).
-
-  Выбор маршрутов. Расчёт идёт по всем сценам, но в файл новый маршрут попадает, только если сцена в замечаниях, если стоянки те же, а изменилась только форма переходов, или если он исправляет ошибку из `cscheck.py` и ничего не ухудшает. Остальные сцены игроков устроили, и у них маршрут прежний.
-
-  Цифры на 130 сценах, сборка 36 и сборка 37, без игры: перенос посреди плана на виду 8 и 0, внутри предметов 93 с и 1,5 с, в воздухе 81 с и 2,4 с, стоит, пока CJ уходит, 125 с и 114 с, виден вместе с CJ 49% и 51%. Новый маршрут первого напарника взят в 73 сценах.
-
-  Второй и третий напарник посчитаны заново вокруг новых мест первого: со старыми маршрутами двое стояли бы ближе 0,7 м друг к другу 622 с. Что взять в каждой сцене, решает `cspick2.py`. Новый маршрут идёт в файл, если старый вместе с остальными двумя не даёт меньше поводов для жалоб. Старый остался в 23 сценах у второго и в 27 у третьего, среди них `CAT_3`, где новый 7,4 с висел в 80 см над землёй.
-
-  Те же цифры для второго и для третьего, сборка 36 и сборка 37: перенос на виду 7 и 0, 12 и 0, внутри предметов 25,5 с и 1,5 с, 39,5 с и 3,5 с, в воздухе 5,8 с и 3,2 с, 30 с и 2,4 с, виден вместе с CJ 32% и 38%, 29% и 39%. Двое ближе 0,7 м друг к другу: 162 с и 146 с.
-
-  Проверка сборки 37. Вес кадра в `plan_seen` покупал то, что покупать нельзя: соседнюю комнату, видную через открытую дверь (`SWEET1C`), и перенос на каждой смене плана (`SWEET4A`). Теперь вместе с ним растут штрафы за стену (вдвое быстрее), за перенос, за лицо CJ и чужой вид. В домике Каталины полом считаются только коробки коллизии: плоские торцы брёвен поленницы лежат в 33 см над землёй. CJ проходит здесь сквозь стену модели, поэтому на ступеньках высота берётся с его ног в обе стороны, а стоять на них и вплотную к стене нельзя (`s.steps`, `lattice`): напарник оставался там в 85 см над землёй, когда CJ уже вышел. `cscheck.py` считает переносы на виду (`tele`) и время за стеной от CJ (`wall`).
-
-  Цифры того же файла до и после этой проверки, без игры. Первый напарник: переносов на виду 15 и 10, за стеной 254 с и 213 с, виден 51% и 50%, стоит, пока CJ уходит, 114 с и 122 с. Второй и третий пересчитаны в 44 сценах: переносов на виду 24 и 7, 38 и 9, виден 38% и 37%, 39% и 34%, двое ближе 0,7 м друг к другу 146 с и 174 с.
-
-  Вторая проверка сборки 37. Чего расчёт не знает, написано руками: `cshand.py` правит маршруты отдельных сцен поверх расчёта и запускается после каждого пересчёта. В `SWEET1C` открытая дверь стоит в комнате с 21-й по 66-ю секунду, карта её не содержит, и место оказалось за створкой: теперь он стоит за спиной CJ, на плане через дверной проём на шаг в стороне и выходит раньше CJ, потому что дверь закрывается за CJ. В `CAT_2` под передней комнатой домика нарисована только земля, на 63,05 там одна коробка коллизии: пока CJ у двери, напарник стоит снаружи на траве и не может повиснуть. В `SWEET4A` он идёт с крыльца за всеми в их темпе, без переноса. В `TRUTH_2` край блюдца считался полом. В `INTRO1A` он идёт рядом с CJ справа, потому что позади CJ идёт камера. Мера кадра в `cscheck.py` не учитывает людей, которые закрывают напарника: `csspots.py` считает с ними, `csview.py` рисует кадр из камеры катсцены по моделям игры.
-
-  Третья проверка сборки 38. Правки только в файле маршрутов, `coop.asi` тот же. Из 1155 проходов напарников 514 кончались разворотом: `steer` оставлял всё больше 1,3 рад на потом, а `stand_keys` ждал секунду, и напарник стоял спиной к людям. Теперь `settle` в `cshand.py` проходит по всем маршрутам: последняя секунда шага идёт на поворот со скоростью идущего, 2 рад/с, скорость к этому времени падает, поэтому боком он не идёт, а остаток поворота следует сразу. Меняются только курсы, места прежние. После этого разворотов больше 1 рад осталось 52 из 491. Пока CJ нет на сцене, напарника тоже нет: в `SWEET6A` до 28,55 с и в `RYDER3A` с 17,1 до 45,88 с все ждут там же, где CJ, под полом. Показаться он может только на смене плана, поэтому `RIOT_4C` и `GROVE1A`, где CJ появляется посреди плана, не тронуты: `csearly.py` показывает такие сцены. В `TRUTH_2` дверь сарая приоткрыта на 54 см, и расчёт увёл напарника через неё переносом на 10 м: теперь он входит за CJ, стоит у него за спиной, идёт к фургону и ждёт между столбами. Фургон с 34-й секунды стоит на метр дальше, это тоже учтено. В `FINAL2A` маршрут идёт дальше конца сцены (`cut_at`), поэтому в конце он не тормозит. `csend.py` показывает, где CJ в конце ещё идёт, а напарник уже стоит.
-
-  Сборка 39, протокол 53. Всё, что менялось у первого напарника, сделано и для следующих: в 53 катсценах, где менялся первый, второй и третий посчитаны заново вокруг него (`cspar.py --ranks 3 --base`), а в сценах с ручными маршрутами написаны руками. Старый маршрут оставлен там, где новый стоял в другом напарнике или в человеке (`cspick2.py`). Переносы на виду в этих сценах заменены ходьбой или сдвинуты на соседнюю смену плана, где одна из сторон не видна (`move_jump` в `cshand.py`). Маршрут первого при этом не менялся. Оба текста вшиты в `coop.asi` (`RCDATA` в `coop.rc`, `Embedded`, `NextLine`), как иконка микрофона. Каждая игра читает маршрут по своим часам, и по сети он не идёт, поэтому у всех он должен быть один: файл можно потерять или оставить от старой версии, а ресурс нет. Новый маршрут это новая сборка и новый `kProtocolVersion`, иначе разные маршруты соединятся. Если ресурса нет, таблица пуста и работает прежний выбор места. Старый файл в папке `coop` игра не читает. `windows.h` в `ScenePartner.cpp` идёт с `#undef near`, `far`, `STRICT`: это имена в этом файле.
-
-  Сиденье (`Cabin::Holds`) не дальше метра от середины машины. Открытая дверь расширяет то, что нарисовано: CJ, прижатого к капоту в `PROLOG3`, мод считал сидящим и сажал напарника в воздух у другого крыла. Теперь мод считает, что CJ стоит рядом с машиной, и напарник идёт по маршруту.
-  Без игры, сравнение с маршрутами сборки 33 на тех же сценах: поворотов на месте 102 вместо 358 (82 рад вместо 636), в камере 11,5 с вместо 328 с, внутри предметов 0 с вместо 9,5 с, на людях 5,5 с вместо 11 с, дальше 4 м от CJ 2,1% времени вместо 2,5%, проходов 305 вместо 282, пройдено 915 м вместо 851 м (он чаще идёт вместе с CJ).
-  Напарника видно рядом с CJ 49% времени, когда виден CJ (было 53%), перед лицом CJ 2,2% времени (было 1,9%), заслоняет людей 0,8% времени (было 0,4%): он стоит ближе к CJ. Маршрут есть у 130 катсцен (добавилась CAT_3), у BCRAS1, BCRAS2 и свиданий прежний выбор места.
-
-  Руки и походка (сборка 33). В `Hold` у напарника и его копии руки пустеют на всю сцену (`SET_CURRENT_CHAR_WEAPON` и `CPed::SetCurrentWeapon`: команда у игрока только выбирает слот). У копии оружие снова приходит
-  из состояния владельца, пока его игра не начала сцену, поэтому проверка идёт каждый кадр. `ReleaseAll` возвращает оружие своему игроку, если оно у него осталось, копии его вернёт состояние владельца.
-  Походка одна на всех: клип `coopwk02` идёт сам по себе 1,06 м/с, это скорость маршрутов. Случайный выбор менял её внутри сцены, а три быстрых клипа (до 1,45 м/с) при шаге 1,05 выглядели замедленными.
-
-  Ходьба теперь обходит то, что стоит на прямой (стол, диван, человек сцены): если прямая занята, хост ищет один
-  поворот в стороне от середины пути (0,8, 1,4 или 2 м вбок, на трети, половине или двух третях пути), обе части которого
-  свободны, и берёт самый короткий путь. Точка поворота уходит напарнику вместе с местом (`CS_SPOT`, протокол 40), и обе
-  игры ведут его через неё (`GoingAt`, `GoingWay`). Если обхода нет (стена между комнатами, другой этаж, улица и
-  помещение), он переходит на новое место на смене плана, когда камера всё равно показывает другое.
-
-  Пока идёт сцена, второго CJ освещают как CJ катсцены (`CPhysical::m_fContactSurfaceBrightness`, +0x12C). Своё
-  освещение пешеход берёт от земли только при столкновении с ней (`CPed::ProcessEntityCollision`), а в машине от
-  машины. После ночных сцен «The Green Sabre» и переноса в Энджел-Пайн напарник стоял тёмным, как в помещении, пока не
-  сел в машину (02.11). Теперь в конце сцены ему возвращается его собственное освещение.
-
-  Если план показывает не CJ, а людей сцены на другом этаже или дальше 8 м от CJ, а рядом с CJ второго CJ не было бы
-  видно, место ищется рядом с ними (`Elsewhere`, `ChooseAmong`). В «Nines and AKs» CJ первые 10 секунд стоит под полом
-  дома Свита, пока камера показывает остальных наверху, и все места рядом с ним отбраковывались.
-
-  В четвёртой проверке 31.10 второго CJ в первой катсцене «Nines and AKs» было видно только в 2 планах из 11: в разговоре
-  у Свита все попытки отказывали пять планов подряд, и он полминуты стоял там, куда камера не смотрела. Теперь, если
-  его не было видно и в прошлом плане (`g_seenBefore`), после всех попыток идёт ещё одна (`g_lastChance`): та же
-  последняя, но заливка пола идёт с запасом 10 см вместо 20, а место должно быть видно хотя бы двадцатую часть
-  плана. Ищется она и рядом с людьми (`ChooseAmong`). Если CJ зажат мебелью и свободной клетки нет в 1,5 м от него,
-  заливка не ограничивает ничего: раньше в таком случае не подходило ни одно место последней попытки.
-
-- Если CJ сидит в машине катсцены, напарник садится в неё же на свободное место. Машины катсцен загружаются
-  отдельными моделями с приставкой «cs» к имени транспорта («csgreenwood» это Greenwood, «cscopcarla92»
-  полицейская машина), и точек сидений в них нет. Поэтому мод находит по имени настоящую модель транспорта
-  и берёт число мест по её дверям (`CVehicleModelInfo::GetMaximumNumberOfPassengersFromNumberOfDoors`). Двери
-  игра считает, когда модель загружается, так что модель загружается один раз и сразу отпускается. Крупный
-  объект сцены, который не транспорт (пальмы в CAS_3, двор в STEAL_5), машиной больше не считается: раньше CJ
-  рядом с ним «ехал», а напарник сидел в позе пассажира в воздухе. Мотоциклы, лодки и самолёты тоже не в счёт.
-- В машине CJ считается, только если его таз внутри салона: внутри нарисованного габарита машины с запасом
-  0,3 м по бокам и 0,6 м спереди и сзади. CJ у двери или за багажником (BCESA5W) пассажиром не считается.
-  Людей сцены в салоне мод считает так же. Если их столько, сколько мест (четверо в четырёхдверной машине
-  SWEET2B, двое в Bravura в FINAL2B), напарник не садится, а стоит у машины. Если машина за план уезжает, он
-  остаётся на прежнем месте или вне кадра. Раньше он садился пятым, в кого-то из сидящих.
-- Напарник садится на второе место ряда CJ, а если оно занято, в другой ряд. Модели машин катсцен повёрнуты
-  кто как, а капот длиннее багажника, поэтому другой ряд ищется по крыше: оба ряда стоят под ней, и другой
-  ряд лежит от CJ в сторону середины крыши (крыша здесь всё, что нарисовано в 15 см от самой верхней точки).
-  Ряд, взятый в метре не в ту сторону, оказывался на капоте. Место занято, если таз кого-то из сцены ближе
-  0,55 м вбок и 0,6 м вдоль. Место не годится, если за план камера окажется ближе 0,9 м к его телу или если
-  с него он закроет от камеры больше трети CJ или актёра: в SYND_3A камера снимает CJ через окно пустого
-  переднего сиденья, и напарник там закрывал CJ. Если свободны только такие места, на этот план напарник
-  прячется, а потом возвращается на своё место, а не пересаживается.
-- Лицом напарник садится к передку машины. Модели машин катсцен повёрнуты кто как, и по оси модели он в SYND_3A
-  сидел спиной вперёд. Передок мод берёт по плечам CJ (кости 21 и 31: CJ в машине смотрит вперёд), а если
-  скелет устарел, по капоту: от крыши до края машины в сторону капота дальше, чем в сторону багажника. В обзоре
-  15 катсцен с машинами оба способа совпали везде.
-- В машине он каждый кадр стоит в её системе координат с анимацией пассажира `CAR_sitp` и поворачивает голову
-  к тому, кто говорит (поза `POSE_CAR`, номер объекта катсцены в поле `act`). Место считается по тазу CJ
-  и актёров (кость `BONE_PELVIS`), а не по их корню: корень CJ гуляет, когда он поворачивается в кресле
-  к собеседнику. Скелет обновляется, только пока его рисуют, поэтому кость дальше 1,5 м от корня считается
-  устаревшей, и тогда берётся корень. Свой скелет напарника для посадки не читается: старый скелет уносил его
-  из машины всё дальше с каждым кадром, до тысяч километров. Выбранное место держится до конца катсцены, пока
-  на него не сядет кто-то из сцены. В обзоре 15 катсцен с машинами напарник едет в 36 планах (BCRAS1, BCRAS2,
-  SMOKE1B, SMOKE2B, SYND_3A, RIOT_4B и пролог), в полных машинах SWEET2B и FINAL2B стоит снаружи, а в воздухе
-  и на капоте его больше нет.
-- Если не подошло ни одно место, напарник встаёт рядом с CJ на уровне его пола, где никто не стоит, со стенами в
-  расчёте, если геометрия уже есть. В первые секунды интерьеров пола ещё нет, и раньше напарника на эти планы
-  тоже прятали. Нестрогие места ищутся до 8 м от CJ, строгие до 6 м: в толпе вокруг CJ свободное место в кадре
-  бывает только за ней.
-- Прячется напарник теперь, только когда катсцена помечена вручную (DATE6A: свидание на площадке без комнаты,
-  где он висел бы в пустоте) или на план, где камера стоит на единственном свободном месте в машине CJ. В полном
-  обзоре всех 145 катсцен с CJ (1359 планов, 8754 с) он был спрятан 14 с, только в DATE6A. Раньше в одних
-  38 катсценах Лос-Сантоса это было 274 с.
-- Сколько напарника видно, обзор считает по каждому плану: середина тела в кадре, и между ним и камерой нет
-  стены (`SeenShare`, «seen N%» в логе). Из 8225 с, когда он стоит на ногах, его видно 35% (обзор до правил
-  о местах в машине). Прежний подсчёт давал «вне кадра 35%», но учитывал только планы, где для напарника не
-  нашлось места в кадре. Он не замечал, что выбранное место закрыто стеной или что камера за план от него
-  уходит. На 13 трудных катсценах честный подсчёт дал 8% по старым правилам и 37% по нынешним. Остальное время
-  приходится в основном на разговоры крупным планом и тесные комнаты, где любое место в кадре заслоняет
-  говорящего. На площадке в SWEET1A камера стоит в метре-двух от актёров, а они за 18 с плана проходят через
-  каждое свободное место.
-- Стены между камерой и персонажем проверяются по столкновениям мира. Карта препятствий хранит в клетке лишь самую
-  высокую точку, и навес крыльца для неё закрывает всё, что под ним (домик в CAT_2, дверь Свита).
-- Места, заданные вручную, лежат в `cutscenes.txt` рядом с маршрутами и тоже вшиты (`CUTSCENE_PLACES`): строка «КАТСЦЕНА x y z курс поза [анимация]» или
-  «КАТСЦЕНА hidden». У такой катсцены мод берёт только эти места и так же проверяет их на каждом плане.
-
-Загрузка катсцены сама высаживает игрока из машины (`CCutsceneMgr::LoadCutsceneData_preload`), а обратно CJ
-сажает скрипт миссии. У напарника этого скрипта нет, поэтому мод перед загрузкой запоминает его машину и место
-и после катсцены сажает его обратно, если место свободно. Пед, который ещё сидит в машине, сцена сначала
-высаживает и только потом ставит на место: перенос сидящего педа двигает всю машину.
-
-Персонаж заморожен. Чтобы игра не считала его падающим (падение прерывает анимацию), он каждый кадр помечается
-стоящим, а освещение берёт у CJ: замороженный пед хранит свет того места, где стоял раньше. Анимация
-запускается заново после каждого переноса и если её что-то прервало. Пока экран полностью затемнён, игра не
-обновляет матрицу вида, поэтому анализ ждёт первого нарисованного кадра. Напарник в начале катсцены сразу
-переносится на её место, чтобы коллизия загрузилась вокруг него. После катсцены он возвращается к себе, а вне
-миссии ещё и снимает затемнение, которое катсцена оставляет в конце. Если конец одной катсцены и начало
-следующей пришли в одном кадре, первая всё равно убирается до загрузки второй.
-
-Для проверки мест есть стенд (тестовый бот, вне репозитория) и `tools/cs_map.py`. Номера интерьеров для
-стенда даёт `tools/cs_areas.py`: интерьеры лежат в двоичных IPL внутри `gta3.img`, и номер берётся у ближайших
-объектов вокруг точки катсцены (интерьеры стоят вплотную: закусочные DATE3A и DATE4A в 21 м друг от друга).
-Стенд включает интерьер до `LOAD_SCENE`, как скрипты миссий, иначе его здания не подгружаются. Игра сохраняет
-первый и последний кадр каждого плана, всё, что видел анализ, путь камеры и треки людей до склейки и геометрию
-вокруг CJ, а скрипт рисует рядом с кадрами план сверху. Вдобавок стенд записывает камеру каждого кадра, и
-скрипт проверки рисует тот же план в редакторе карт Ariane с силуэтом на месте напарника: так места сверяются
-с картой, собранной независимо от игры (там видно сам интерьер без людей и реквизита катсцены).
-
-Деньги, которые хост заработал за миссию, получает и напарник (`G_MISSION_REWARD`).
-
-Напарник, подключившийся посреди миссии, получает её состояние заново (`G_RESYNC`).
-
-Враги, которые ненавидят игрока, нападают и на напарника (тип педа PLAYER1). Его смерть миссию не проваливает.
-
-Миссия хоста часто переносит его CJ скриптом в помещение или из него и сразу закрывает дверь («Reuniting the
-Families»: в мотель, потом на крышу; дворец Биг Смоука, дом Мэдд Догга, плотина). Напарник, стоявший рядом,
-оставался снаружи и войти не мог. Теперь, если во время миссии хост оказался в другой области, а напарник стоит
-не дальше 40 м от места, где хост был, через 3 секунды напарник переносится к нему. Через дверь, которую напарник
-проходит сам, он успевает раньше. Возрождение хоста в больнице миссией не считается (20 секунд после его смерти).
-
-Сюжетный прогресс напарник получает свежим снимком мира хоста. Хост замечает, что миссия пройдена
-(`CStats::LastMissionPassedName`), и отправляет мир через 30 секунд или сразу после следующего за ней скрипта:
-звонок после миссии часто что-то открывает, например качалку после третьей миссии Свита. Раньше мир уходил дважды,
-после миссии и после звонка, и напарник загружался два раза. Игра хоста в спокойный момент (не в миссии и не
-в машине) снимает мир с меткой «progress», и сервер рассылает такой снимок напарникам, которые уже в игре.
-Загрузка держит кадр секунду-другую. После каждой пройденной миссии она приходилась на случайный момент, и игроки
-принимали её за лаг, а когда перед ней появилось затемнение, за чёрный экран ни с того ни с сего. Теперь напарник
-загружает мир хоста в точке начала следующей миссии, где экран и так темнеет перед миссией. Если за 10 минут миссии
-не было, он загружает мир в первый спокойный момент, как раньше. В обоих случаях это должно быть безопасно: пешком,
-живым, не в катсцене, не в своей миссии и не раньше чем через 5 секунд после миссии хоста. Ещё он должен управлять
-собой сам, ничем не быть занят (задача пешехода 0) и не иметь розыска. Стол казино, кресло парикмахера, еда,
-тренажёры, баскетбол и танцы флага миссии не поднимают, и мир загружался прямо под ними, а звёзды погони мир хоста
-стирал. Между бросками баскетбола задача тоже 0, и 01.11 мир загрузился посреди соревнования: мяч и испытание у
-напарника пропали. Поэтому загрузку держат и занятия, из которых бывает соревнование (испытание баскетбола, танцы,
-столы казино, гонки), и само соревнование, пока вызов ждёт ответа или идёт (`ContestActivity`). Пока мир ждёт загрузки или грузится, игра напарника сообщает это хосту (флаги `PW_WORLD` и `PW_LOADING`
-в `G_MISSION_WAIT`), и триггер хоста ждёт тоже. Напарника, который стоит в маркере с незагруженным миром, он ждёт до
-10 секунд, а идущую загрузку до 15. Миссия, начатая во время загрузки, шла в мире, который загрузка заменяла. Перед
-загрузкой напарник сохраняет профиль, место, здоровье, броню, оружие и машину, на которой ездил последней, если она
-стоит не дальше 60 м. Экран за 0,3 секунды уходит в чёрное. После загрузки напарник возвращается на своё место,
-машина снова стоит рядом, а экран плавно открывается. Игра хоста, получив его `G_RESYNC`, забывает его прежних педов
-и машины.
-
-Мир, который сервер хранит, может оказаться не тем, в котором хост играет сейчас. Сервер, созданный из игры,
-пока хост сидит в машине, берёт `world.b` прошлого сеанса, а хост может загрузить другое сохранение. Пока хост
-в меню, сервер держит напарника в ожидании (`S_WORLD_NONE`) и отдаёт ему мир, только когда хост загрузит игру.
-Напарнику, которому достался хранимый мир, и тем, кто играл, когда хост загрузил другое сохранение, сервер
-отправляет следующую выгрузку хоста, а не только снимок «progress».
-
-Побочные занятия запускают свои потоки `main.scm`, а не сюжетные миссии: качалки (`GYM`), турнир гонок и автошкола
-(`TRACE`), хотринг (`HOTR`), Kick Start (`KICKS`), Blood Bowl (`BLOODR`), триатлон (`TRI`), школы полётов, байков
-и лодок (`PSCH`, `BIKES`, `BSCHOO`), тир Ammu-Nation (`SHOOT`), грузоперевозки (`TRUCKS`) и карьер (`QUARRYS`).
-Этим потокам `CanPlayerStartMission` отвечает как в одиночной игре: у хоста всегда, у напарника, пока у хоста не
-идёт миссия. Хост не ждёт напарника у их маркеров. Подработки в машинах (поток `R3`: такси, скорая, пожарные,
-полиция, сутенёр, поезд), скрытые гонки (`ODDVEH`: BMX, NRG-500, Chiliad) и покупку домов игра этим вопросом не
-проверяет, так что они работали у обоих и раньше. Гонки Сезара запускают те же потоки, что и его сюжетные миссии
-(`CESAR`, `BCESAR`), поэтому они остаются за хостом. Поток поездок по стране (`TRAINSL`) тоже побочный.
-Побочный и поток свиданий (`GFAGNT`): раньше хост ждал напарника у двери подруги, а напарник на свидания не ходил.
-Подруга у каждой игры своя и другому игроку не показывается, в машине тоже. Метка свидания
-(`LOCATE_STOPPED_CHAR_ANY_MEANS_3D`) срабатывает и на пассажира, поэтому у двоих, приехавших вместе, свидание шло в обеих играх.
-Общее правило показывает другой игре человека скрипта, как только он сел в машину. Подруга садилась в машину в каждой игре, и
-у каждого игрока их становилось две (05.11). Теперь люди потоков `GF*` помечаются `MarkLocal(..., inCarToo)`. Напарник без
-своего свидания девушку хоста не видит и наоборот.
-
-**Курьер Смоука** (`Courier.cpp`, 29.10). Занятие «Big Smoke's Cash» ведут два потоковых скрипта. `BCESAR2` идёт
-днём по понедельникам и пятницам: Патриот с шестью мешками денег, мешок слетает с машины при каждом её повреждении,
-за мешок $300. `BCESAR3` идёт ночью по средам и субботам: мотоциклист с посылкой, после его смерти посылка лежит
-пикапом (до $2000). Оба запускает поток `MAIN`, а их `GOSUB` в код `main.scm` спрашивает `CanPlayerStartMission`,
-поэтому у напарника они сразу заканчиваются, и курьер бывает только у хоста. Напарнику он показан как миссия хоста:
-тексты курьера (без подсказки ответа на звонок), его метки на радаре от меток, бывших до его начала
-(`g_courierBlips`), упавшие мешки как предметы миссии (`Objects.cpp`, хэндлы в `$33264..$33284`, на машине мешки не
-показываются) и посылка как пикап миссии (`Pickups.cpp`). Когда скрипт убирает посылку (`CPickups::RemovePickUp`),
-копия у напарника тоже исчезает. Проверки «игрок рядом» в скриптах курьера (`LOCATE_CHAR_ANY_MEANS_*` с
-`$PLAYER_ACTOR`) хост засчитывает и за напарника: напарник подбирает мешки и не даёт курьеру уйти. Каждую выплату
-курьера (`ADD_SCORE`) получают и напарники в 300 м от хоста (`G_MONEY`). Машины курьера ранит только игрок
-(`SET_CAR_ONLY_DAMAGED_BY_PLAYER`), и таран машиной напарника засчитывается как таран игрока
-(`CVehicle::CanVehicleBeDamaged`, 0x6D1280), так же как попадания напарника из оружия (`AsPlayersHit`). Людей
-курьера мод отдаёт напарнику, как остальных людей хоста. Людей других побочных скриптов каждая игра держит у себя
-(`Peds.cpp`), потому что эти скрипты идут у обоих, а курьер идёт только у хоста.
-
-Миссию гонок, автошколы и школы полётов запускает побочный поток (`LOAD_AND_LAUNCH_MISSION`), и мод запоминает,
-кто её запустил (команда кладёт миссию в буфер миссий, 0xA7A6A0). Флаг «на задании» тоже поднимают не только
-миссии: TRACE и PSCH сначала держат его на затемнении, PSAVE1 на меню сохранения, а парковщик и случайные звонки
-по телефону всё время, пока идут. Мод запоминает, кто поднял флаг. Такие миссии и флаги для напарника не миссия
-хоста: раньше он получал таймеры и приз гонки хоста, чёрный экран и подсказку звонка, которого у него не было,
-и не мог начать ничего своего.
-
-Сами миссии этих занятий (миссии `main.scm` 3–10 и 113–133: игры на приставке и бильярд, тир, спортзалы, школы,
-гонки, подработки, грузоперевозки, карьер) мод узнаёт по имени скрипта и миссиями хоста для напарника не считает.
-Раньше напарнику повторялись их тексты и награды (плата за такси хоста), а его собственные занятия, пока они
-шли, были запрещены.
-
-Занятие напарника идёт только в его игре, второй игрок не видит его маркеров и таймеров, если его не позвали
-(ниже). Деньги и навыки за него остаются в профиле напарника. То, что занятие меняет в мире (пройденная школа, грузоперевозки и карьер как
-имущество), пропадёт при следующей загрузке мира хоста.
-
-Двое могут быть в одной школе разом: `DSKOOL`, `BSKOOL`, `BOAT` и `DESERT5` идут у каждого свои и ставят машину урока в
-одну точку. Машину скрипта с чужим игроком мод передаёт как обычно, и копия вставала внутри нашей машины урока: их
-разбрасывало, они горели и взрывались, а урок проваливался (04.11). `ClearSpaceForMissionEntity` такую копию
-не убирает (`bIsLocked`). Теперь, пока у нашего игрока идёт школа (`OwnSchool`), копии машин, которые держит скрипт другой
-игры, для него нет (`Vehicles::SetApart`, столкновения копии см. ниже `F_NO_COLLISION`): сняты `m_bIsVisible` и `m_bUsesCollision`, поэтому она не бьёт нашу машину и не
-сбивает конусы нашего урока. Без коллизии на неё не действует тяжесть (`CPhysical::ApplyGravity`), и она по-прежнему идёт по
-состояниям владельца. Не показаны и те, кто в ней сидит: копия игрока (`KeepApart`, без подписи над головой) и водитель
-показательного заезда (`NetPed::apart`). Отметка на радаре остаётся. Всё возвращается с концом школы, с уходом игрока и когда
-копия становится нашей (`Release`). Кто в школу не ходил, видит машину и ученика как раньше. Признак только наш: сюжетная
-машина хоста у школы тоже не видна тому, кто там учится. Звук мотора у такой копии остаётся. В соревнованиях на стадионах и
-в гонках (U) обе игры тоже идут в одном месте, это не менялось и в игре не проверялось.
-
-Столкновения копии машины идут за машиной владельца (`F_NO_COLLISION` в состоянии, `SET_CAR_COLLISION`). В «Robbing Uncle Sam»,
-пока CJ на погрузчике, скрипт замораживает фургон, снимает ему столкновения и ставит на его место полую коробку `FAKE_MULE_COL`,
-в которую заезжают ящики. У напарника копия коробки стояла твёрдой внутри копии фургона, которая ещё сталкивалась. Коробка
-выталкивала фургон, а ящики на нём оставались в воздухе там, где фургон на самом деле (04.11).
-
-**Совместные подработки и гонки** (`G_SIDE`). Подработку в машине или гонку (миссии `TAXIODD`, `AMBULAN`,
-`FIRETRU`, `COPCAR`, `PIMP`, `FREIGHT`, `BCOUR`, `MTBIKER`, `STUNT`, `CPRACE`, `BURGJB`, `TRUCK`, `TRIA`, с 29.10 ещё
-`KICKSTA`, `BLOOD`, `QUARRY`, `SHRANGE` и смену парковщика) можно пройти вдвоём. Она по-прежнему
-идёт в игре того, кто её начал, будь то хост или напарник. В первые 20 секунд он видит окно «Позвать ... на
-совместное задание в такси?» и может нажать Y, а второму игроку приходит окно «... зовёт вас на совместное
-задание в такси» с ответом Y или N. Уведомления в чате называют задание так же и не ставят глагол в прошедшем
-времени после имени игрока: ник не говорит, кто за ним играет («Ник принимает приглашение»). Без ответа
-приглашение через 20 секунд отклоняется, и отклоняет его сразу тот, кто занят своей миссией или миссией хоста.
-Согласившемуся игра владельца шлёт то же, что хост шлёт напарнику во время сюжетной миссии: тексты и подсказки,
-метки радара (метки, которые были до начала занятия, не идут), маркеры назначения, чекпоинты и сферы, таймеры
-и счётчики (`MissionSource` принимает их от владельца). Её люди и машины видны второму игроку и так, огонь на её
-машинах и урон по её людям тоже передаются, так что помогать можно сразу. Когда занятие кончается, владелец
-отправляет `SIDE_END` с деньгами, которые оно ему принесло, второй игрок убирает его метки и получает столько же.
-Уровни подработки получает только владелец: их выдаёт скрипт в его игре. Награду за полное прохождение
-получают оба (см. «Своя прокачка»). Своя миссия или своё занятие у второго игрока выводят его из чужого
-(`SIDE_LEAVE`), кроме своего такси в чужом (ниже). Проверено двумя играми в обе стороны (тесты c05a и c05b): такси
-хоста у напарника и такси напарника у хоста с наградой.
-
-Согласившийся сразу оказывается у владельца (`BoardSide`: 15 секунд, попытка дважды в секунду). Раньше он
-добирался сам (27.10). Дальше 30 м его переносит на 3 м справа от владельца. В такси, скорой, пожарной и
-полицейской машине, в гонке, трюках, на Чилиаде, у курьера и у сутенёра (единственное место в его машине для
-девушки) он получает такую же машину рядом и садится за руль (`Players::VehicleBeside`: тот же поиск места, что у
-велосипеда напарника в сюжете). Пассажира в машине владельца сначала высаживает рядом. В фургоне ограбления и в
-грузовике он садится на свободное пассажирское место, к которому не идут люди задания (`Peds::SeatClaimed`). Если
-владелец пешком, второй просто стоит рядом. Грузовой поезд пассажира не берёт, и в нём никого не переносит.
-
-Арены стадионов — интерьеры, и туда согласившегося переносит так же (`StadiumJob`: Kickstart, Blood Ring и гонки).
-Машина, которую ему ставят рядом, получает его интерьер (`SET_VEHICLE_AREA_VISIBLE`), иначе в арене её не было бы
-видно. Kickstart начинается пешком, а гонка на стадионе сажает игрока в машину только после маркера, поэтому второго
-пробуют посадить, пока владелец не сядет (до 60 секунд). В карьере второй получает машину, только когда владелец
-сядет в бульдозер или самосвал, и такую же (до 120 секунд). Пока второй на своей машине в 300 м от владельца, его не
-переносят. В конце совместного заезда второго выводит из арены у выхода её скрипта (`LeaveArena`, в 2 м от него):
-дверей у арены нет, а скрипт стадиона выводит только своего игрока. Маркер стадиона стоит в нескольких метрах от
-выхода, и встать прямо на него значило бы начать свой заезд.
-
-**Работают оба** (`Jobs.cpp`, 27.10: «раз хост зовёт напарника совместно выполнять миссию, то они оба должны это
-делать»). Скрипт подработки идёт в игре владельца, и там копия второго игрока на своей машине считается вторым
-игроком задания. Перехват команд владельца делает это двумя способами. Условие `LOCATE_*` своего игрока
-(`$PLAYER_ACTOR`) после команды получает ответ «да» и тогда, когда рядом второй (`jobs::Answer`, как у бильярда). А
-перед командой, которая берёт машину или игрока из переменной, эта переменная на одну команду получает машину или
-копию второго (`jobs::BeforeCommand`). Задача, выданная заново после команды скрипта, была бы вторым событием скрипта
-у педа в том же кадре, и какое из них победит, не определено.
-- `AMBULAN`. Больной, к которому подъехала скорая второго (ближе 10 м, модель 416), запоминается за ней. Если рядом
-  и скорая владельца, он идёт к ней, как раньше. Проверка мест (`GET_NUMBER_OF_PASSENGERS`/`GET_MAXIMUM_NUMBER_OF_PASSENGERS 34@`) и
-  `TASK_ENTER_CAR_AS_PASSENGER 77@ 34@` идут с её номером в `34@`. «Отъехал от больного» (`NOT
-  LOCATE_CHAR_IN_CAR_CHAR_2D $PLAYER 77@ 20`) и «стоит у больницы» (`LOCATE_STOPPED_CHAR_IN_CAR_3D` без короны)
-  меряются по ней, пока больной в ней сидит. Скрипт держит больных дальше 50 м от игрока замороженными без
-  коллизии (`FREEZE_CHAR_POSITION_AND_DONT_LOAD_COLLISION`), и эта проверка отвечает «рядом» и для второго.
-  Доставку, время и деньги дальше считает сам скрипт.
-- `FIRETRU`. Горящие машины так же заморожены дальше 50 м от игрока (`LOCATE_CHAR_ANY_MEANS_CAR_3D`), теперь и от
-  второго. Огонь, который второй тушит у своей копии, гаснет и у владельца (`Fire.cpp`, `FIRE_OUT`), и
-  `IS_SCRIPT_FIRE_EXTINGUISHED` его засчитывает.
-- `COPCAR`. Преступник выходит драться, когда рядом любой из двоих (`LOCATE_CHAR_ANY_MEANS_CHAR_2D`), и
-  `TASK_KILL_CHAR_ON_FOOT` получает того, кто к нему ближе (`$PLAYER_ACTOR` на одну команду). Застрявшую машину
-  преступников скрипт переставляет на дорогу, только когда оба дальше 90 м. Убитые вторым преступники засчитываются
-  сами: скрипт смотрит только `IS_CHAR_DEAD`, а урон второго по ним передаётся. Каждому из 12 преступников скрипт
-  велит умирать сидя (`SET_CHAR_FORCE_DIE_IN_CAR`, 0x2CDB55). С этим флагом `CTaskComplexDieInCar` не тормозит машину и
-  не выпускает тело, а ИИ машины не смотрит, жив ли водитель: машина убитого водителя ехала дальше, так и в одиночной
-  игре (жалоба игроков 08.11, решение пользователя: как с любым убитым водителем). В сети команда пропускается
-  (`CriminalsDieSeated` в `Missions.cpp`): машина тормозит, тело водителя через 2 с выпадает, пассажиры остаются сидеть.
-  Копия убитого у второго игрока делает то же сама: `TASK_DIE` педа в машине даёт ту же `CTaskComplexDieInCar`, а копия
-  тоже пед скрипта. Флаг «умирать сидя» копия не получает, поэтому у педов, которым его ставят другие миссии (`MUSIC3`
-  двое, `CASINO5` один), тело у владельца сидит, а копия выпадает.
-- `BURGJB` (27.10: «двое людей обчищают дома и кладут вещи в 1 грузовик»). Вещи в домах поднимает сама игра
-  (`CPlayerInfo::FindObjectToSteal`, флаг `bIsLiftable` 0x2000 в `CObject` +0x140), и с вещью в руках игрок
-  выходит через дверь дома (`CEntryExit::ProcessStealableObjects` переносит её в зону улицы). Скрипт лишь находит
-  ближайшую вещь (`GET_CLOSEST_STEALABLE_OBJECT` ничего в ней не меняет) и, когда игрок кладёт её кнопкой входа в 6 м
-  позади фургона (`GET_OFFSET_FROM_CAR_IN_WORLD_COORDS 50@ 0 -6 0`, в квадрате 3,5 м), прибавляет `48@` и удаляет
-  вещь. Оплата у гаража считается по `48@`: 20 × N². У второго игрока его игра открывает дома
-  (`ENABLE_BURGLARY_HOUSES`, как сам `BURGJB`), с вещью у задних дверей фургона (`BOXBURG` 609 ближе 20 м) показывает
-  окно «Положить вещь в фургон?», после кнопки входа удаляет положенную вещь и шлёт `SIDE_LOOT`. Игра владельца
-  прибавляет `48@` (`jobs::Stashed`), играет тот же звук и пишет в чат, сколько вещей в фургоне.
-
-  Дом обставляется из зерна его места (`srand` в `Interior_c::Init`), поэтому мебель и вещи в обеих играх
-  одинаковые. У каждой вещи для кражи есть запись в `g_interiorMan` (`m_Objects[32]` по 0x1C: объект, модель,
-  интерьер, место, «украдена»), и дом при новой обстановке украденную не ставит (`Interior_c::PlaceObject`). Вещь,
-  которую поднял один игрок (держит, и она сдвинулась с места больше чем на 0,3 м), уходит и из дома другого
-  (`SIDE_TAKEN` с моделью и местом): та становится невидимой, без столкновений, её нельзя поднять, а запись помечается
-  украденной. Удалять её нельзя: дом удаляет свою мебель, когда игрок уходит (`Interior_c::Unfurnish`), и второе
-  удаление роняло игру.
-
-  Половина домов для краж закрыта на всю игру: у входа с флагами `BURGLARY_ACCESS` (0x1000) и 0x400 конструктор
-  `CEntryExit` при загрузке с вероятностью 50% ставит часы работы 0–0 (никогда), а `CEntryExit::TransitionStarted` и
-  метка у двери (`CEntryExitManager::Update`) смотрят на часы. Выпадает это в каждой игре по-своему, и дом, куда вошёл
-  владелец, у второго был без метки и не пускал (28.10). Пока ограбление совместное, у таких входов в обеих играх
-  часы 0–24 (`OpenAllHouses`), после конца — снова 0–0. Выходы изнутри связаны с входом (`LinkEntryExit`) и всегда
-  0–24. После загрузки мира входы созданы заново, и возвращать нечего (`jobs::WorldLoaded`).
-
-  Двери домов появляются и исчезают вместе со зданием (`CEntity::CreateEffects`, `RemoveEffects`), и при каждом
-  появлении часы выпадают заново. Открытые один раз в начале, двери соседней улицы и улицы после ограбленного дома
-  снова оказывались без меток (30.10). Теперь, пока ограбление совместное, двери осматриваются дважды в секунду, а
-  открытые запоминаются вместе с серединой двери: ячейка ушедшей двери позже достаётся другой, и закрываются только
-  свои.
-
-  `BURGJB` надевает своему игроку балаклаву (`GIVE_PLAYER_CLOTHES_OUTSIDE_SHOP … "BALACLAVA" 17`), а второму её никто не
-  надевал (28.10). Теперь игра присоединившегося надевает её тем же способом, поверх своего облика, как одежду миссии
-  хоста (`BurglaryLook`: свой облик сохраняется в `g_ownKeys`, в профиль идёт он), и снимает после ограбления сразу,
-  даже в фургоне, как `BURGJB` снимает её своему игроку (`BUILD_PLAYER_MODEL` в машине тоже работает). Раньше снятие
-  ждало, пока второй выйдет из машины, и после отмены ограбления балаклава оставалась на нём (29.10). Проверка
-  «у хоста нет миссии, своя одежда назад» (`RestoreOwnLook` в `PartnerUpdate`) снимала балаклаву через 8 мс после
-  надевания, пока надета балаклава ограбления, она молчит (28.10). Гараж-тайник `BURGJB` открывает, когда его игрок в
-  20 м от гаража и фургон там же (`LOCATE_CHAR_ANY_MEANS_3D`), и принимает фургон с этим игроком за рулём
-  (`LOCATE_CHAR_IN_CAR_3D`). Обе проверки в скрипте по одному разу, и игра владельца отвечает «да», когда там второй
-  игрок, во втором случае в машине (`jobs::Burglary`): второй довёз фургон и стоял у закрытых ворот (28.10). Метки и
-  входа у двери дома второй не получил и с открытыми часами (28.10): у такой двери его игра раз в секунду пишет в журнал
-  всё, что проверяет игра перед меткой и входом (флаги, часы, связь, область, `ms_exitEnterState`, `ms_bDisabled`,
-  отнятое управление, `CanPlayerStartMission`), строкой «Joint burglary, a house's door by us».
-
-  Жильцы дома (`InteriorGroup_c::SetupHousePeds`: у каждого мозг `BURGLAR`, создан как `PED_MISSION` без скрипта)
-  появлялись в обеих играх, и копия чужого вставала в ту же кровать: хозяин был задвоен, один висел в воздухе.
-  Теперь вне сюжетной миссии хоста каждая игра оставляет своих себе (`Peds::MarkLocal` в перехвате
-  `CPed::SetCharCreatedBy`, если пед из группы интерьера: `GetPedsInteriorGroup`). В «Home Invasion» семья
-  полковника передаётся, как раньше.
-
-  Мозги жильцов просыпаются при полной шкале шума (`$21172` = 100) или от выстрела и раны, а проснувшийся звонит в
-  полицию или берёт оружие (`$7172` = 1). Шкалу своего игрока `BURGJB` ведёт только у владельца. У второго игрока его
-  игра ведёт свою так же (`jobs::Noise`): громкость звука на месте игрока × 1,6, сверх 20 копится, 1% за кадр
-  уходит. Это своя полоска `BURG25` (`ShowOwnCounter`, шкала владельца из его блока счётчиков не берётся). Полная
-  0,2 с или проснувшийся жилец: «хозяева проснулись», 10 секунд выйти из дома, потом 3 звезды, а вышел вовремя —
-  ничего. Проснувшиеся у одного будят жильцов того же дома у другого (`SIDE_ALARM` с местом, дом сверяется по
-  расстоянию до 50 м: интерьер каждого дома висит над ним самим). У владельца для этого заполняется куча шума
-  `41@`, у второго своя.
-- `STUNT` (кольца на велосипеде у скейт-парка): кольцо берёт `LOCATE_CHAR_IN_CAR_3D $PLAYER кольцо 2.5`, только своим
-  игроком, и у второго кольца не засчитывались (28.10). Теперь игра владельца отвечает «да» и тогда, когда сквозь
-  кольцо проезжает на велосипеде копия второго игрока (`jobs::Stunt`): кольцо засчитывается, время прибавляется. Своё
-  задание с кольцами игры присоединившегося, которое его `ODDVEH` запускает, пока он на BMX, гасится на первой команде
-  (`HookStartNewScript`). До неё оно кадр висит среди скриптов, и `SideUpdate` выводил из общего задания в тот же кадр.
-  Скрипт, который стоит на `TERMINATE_THIS_SCRIPT`, теперь своим занятием не считается (28.10). Кольца `STUNT` крутит
-  сам, на 10° каждый кадр (`SET_CHECKPOINT_HEADING`, другие скрипты так не делают). У хоста в каждом обновлении было
-  новое направление, и игра второго ставила кольцо заново четыре раза в секунду, поэтому оно крутилось рывками (29.10).
-  Теперь кольцо, у которого изменилось только направление, не пересоздаётся, а крутится у второго так же, на 10° за
-  кадр (`TurnMarked`).
-- `PIMP` (сутенёр). Девушку забирает машина игрока, в которой он начал работу (`40@`): игрок в машине ближе 7 м к ней
-  (`LOCATE_CHAR_IN_CAR_CHAR_2D`), машина стоит, и девушка садится в неё (`TASK_ENTER_CAR_AS_PASSENGER … 40@`). Дальше
-  поездка к клиенту идёт с этой машиной и игроком в ней (`IS_CHAR_IN_CAR $PLAYER 40@`, выйти можно на 20 секунд), и
-  второй игрок девушку забрать не мог (29.10). Теперь машина второго, первой подъехавшая к девушке, становится для этой
-  поездки машиной работы: `40@` — её копия у владельца, а проверки «игрок в машине» и «игрок рядом с девушкой или
-  клиентом» отвечаются по второму игроку (`jobs::Pimp`). Следующую девушку, которую забирает машина владельца, `40@`
-  снова его. Проверки района (где появляются клиенты) остаются за владельцем.
-- `TAXIODD`. Пассажир у такси один, и выбирается он в 88 м от игрока, поэтому общих пассажиров не сделать: каждый
-  возит своих. Свой `TAXIODD` второго игрока, начатый клавишей 2 в чужом такси, перехват запуска (`HookStartNewScript`)
-  больше не гасит (`Side::parallel`). Второй, которого посадили за руль своего такси, клавишу 2 не нажимал, ехал к
-  пассажиру владельца, а тот садился только к владельцу (28.10). Теперь через 1,5 с после посадки за руль такси
-  (`TAXI` или `CABBIE`) своя подработка начинается сама, как её запускает поток `R3`: `$728` = 1, `PRINT_BIG 'TAXI_M'`
-  и `LOAD_AND_LAUNCH_MISSION_INTERNAL 121` (`StartOwnTaxi`). Пока он идёт, тексты, метки и таймеры такси владельца у второго не
-  показываются, а деньги идут в обе стороны (`SIDE_PAY`). Полученное от другого (`Side::received`) из своего
-  заработка вычитается, иначе деньги ходили бы по кругу. Когда своё такси кончается, второй шлёт `SIDE_RESYNC`, и
-  владелец присылает ему всё своё заново (`ForgetSent`). Рядом с владельцем (ближе 60 м) прохожих создаёт только его
-  игра, поэтому свои пассажиры у второго появляются, когда он отъедет.
-- `KICKSTA` (Kickstart, 29.10). Корона берётся проверкой `LOCATE_CHAR_ANY_MEANS_3D $PLAYER корона 1.5` и следующей за
-  ней `IS_CHAR_IN_MODEL $PLAYER 468`. Игра владельца отвечает «да» и тогда, когда сквозь корону проезжает Sanchez
-  второго игрока после старта (`257@` = 10, `jobs::Kickstart`), и очки за неё идут в общий счёт. Остальные проверки
-  модели (отсчёт, когда игрок слез с мотоцикла) остаются за владельцем. Короны скрипт рисует каждый кадр
-  (`DRAW_CORONA`), и второму их не было видно. Теперь игра владельца шлёт их вместе с маркерами задания (`G_MARKER`,
-  вид `AREA_CORONA`: место, размер и цвет; номер берётся по месту, потому что у команды он один на все короны), а игра
-  второго рисует их сама (`CCoronas::RegisterCorona`). Маркеров в сообщении теперь до 40, корон 33. Соревнование
-  владельца по Kickstart и Blood Ring снимается, когда второй принимает приглашение: счёт теперь общий.
-- `BLOOD` (Blood Ring). Контрольная точка (+15 секунд и +300 к здоровью машины владельца) берётся одной проверкой
-  `LOCATE_CHAR_ANY_MEANS_3D $PLAYER`, и на неё игра владельца отвечает «да», когда через точку проезжает машина
-  второго (`jobs::BloodRing`). Ключ на арене и разбитая машина владельца остаются за владельцем.
-- Гонки на стадионах (8-Track и Dirt Track, `CPRACE` в аренах 7 и 4) идут вдвоём, как остальные гонки: второй едет
-  рядом на своей машине, а результат остаётся за владельцем.
-
-  Гонка вдвоём (0.3.3, `features/story/race`). Раньше второй ехал рядом, но не соревновался. Теперь игра владельца
-  считает его ещё одним гонщиком. Она ведёт копию второго по маршруту `CPRACE` (массивы `454@`, `536@`, `618@`, на
-  круг `250@` точек, кругов `224@`, радиусы взятия `322@`–`324@`) и ставит её по правилу самого скрипта: сначала
-  финишировавшие, потом больше кругов, потом дальше по маршруту, потом ближе к следующей точке. Четыре раза в секунду
-  второй получает своё место, место владельца и свою следующую точку (`G_RACE`). Его игра ставит там свой чекпоинт и
-  метку и рисует место справа. Чекпоинт и метки маршрута владельца ему больше не отправляются: они показывали, куда
-  едет владелец. На финише второй узнаёт своё место в чате. Если гонка кончилась раньше (владелец финишировал, и
-  `CPRACE` закрылся), место считается по тому, кто где был.
-
-  Тот, кто в гонку не вступил, но едет с гонщиком или рядом с ним (не дальше 150 м, в той же области), видит место
-  гонщика справа (31.10, просьба Silent X). Игра гонщика дважды в секунду рассылает место, которое показывает её экран
-  (`229@` + 1 из `256@`, `G_RACE` 3).
-
-- `QUARRY` (карьер). Копия бульдозера второго в мире владельца — настоящая машина: она толкает камни и бомбы владельца,
-  и скрипт засчитывает их там, где они лежат. Две проверки расстояния своего игрока игра владельца пересчитывает и для
-  второго (`jobs::Quarry`). В «Обвале» (`34@` = 5) камень в яме засчитывается, только если игрок от него ближе 30 м
-  (для двух камней 50 м), теперь и второй. В «Саботаже» (`34@` = 7) бомба, отвезённая в безопасное место, взрывается,
-  когда и игрок, и бульдозер дальше 21 м от неё, а рядом со вторым она не взрывается. Таран самосвала подрывников
-  («Уничтожение», `34@` = 16, `91@`) машиной второго засчитывается как таран игрока (`QuarryTarget` в перехвате
-  `CVehicle::CanVehicleBeDamaged`). Перевозка груза и кран остаются за владельцем. Свой `QUARRYS` у второго, пока он в
-  чужом карьере, не начинается (`CanPlayerStartMission` для побочных потоков). На маркере у конторы он забирал
-  управление и гасил экран, запуск миссии тут же кончался, и экран оставался чёрным.
-- Парковщик (`valet.scm`, потоковый скрипт). Смена — тоже совместное занятие: её узнают по потоку `VALET` и флагу
-  `$7480` (`jobs::ValetShift`). Её тексты, метки и маркер парковочного места идут второму, как у других занятий.
-  Скрипт ведёт одну машину гостя за раз (`$43736`), и отогнать её может любой из двоих. Когда за рулём копия второго,
-  `GET_DRIVER_OF_CAR` этой машины в игре владельца отдаёт его игрока, иначе машина считалась угнанной и бросалась.
-  `GET_CAR_CHAR_IS_USING $PLAYER` отдаёт машину второго, и парковщики скрипта её не забирают (`jobs::ValetAfter`).
-  Машина засчитывается сама: проверка `LOCATE_STOPPED_CAR_3D` идёт по копии машины, которая встала там, где её
-  поставил второй. Чистка машин на пути и в конце смены машину второго не трогает (`IS_CHAR_IN_CAR` и
-  `LOCATE_CHAR_ANY_MEANS_CAR_3D`, `jobs::ValetAnswer`). Свой `VALET` у второго, пока он в чужой смене, выключен: его
-  проверка «игрок у отеля» (`IS_CHAR_IN_AREA_2D`) отвечает «нет», иначе гости и парковщики у отеля были бы в двух
-  экземплярах.
-- `SHRANGE` (тир Ammu-Nation). Скрипт тира запускается, как только игрок входит в комнату, и ждёт его в маркере
-  (стадия `$32280` = 0). Совместным занятием тир становится с началом захода и остаётся им до проигрыша, выхода по
-  кнопке или конца всех уровней (`jobs::RangeWaits`: ждущий тир за занятие не считается). Скрипт ставит игрока в
-  среднюю кабинку (дорожка 1), по бокам стреляют двое соперников, у каждой дорожки свои мишени по 8 частей (`$32388`).
-  В первых двух раундах выигрывает дорожка, которая первой разобьёт 3 мишени, кто бы их ни разбил. В третьем все трое
-  стреляют по одной мишени средней дорожки, и каждая разбитая часть достаётся тому, о ком `IS_CHAR_SHOOTING` скажет,
-  что он стрелял (первым спрашивается соперник). Согласившегося ставит в кабинку владельца, на шаг позади слева
-  (`BoardSide`), и даёт ему оружие владельца: пистолет, дробовик, Uzi или АК по уровню. Его своё оружие из той же ячейки
-  возвращается после. Его копии мишеней (`Props`) становятся твёрдыми, и выстрел по копии уходит игре владельца
-  (`G_PROP`, `OP_HIT`: номер вещи, урон, оружие). Та бьёт свою часть мишени как выстрел своего игрока (`RangeHit`,
-  `CObject::ObjectDamage`). Часть ломается, только если у неё сейчас есть столкновения, как и от выстрела самого
-  владельца. Сломанная часть становится невидимой, и копия у второго прячется вместе с ней. Если третий раунд в
-  течение 250 мс после такой поломки спрашивает `IS_CHAR_SHOOTING`, игрок владельца «стрелял», а соперники нет.
-  Повторённые выстрелы копии второго в игре владельца мишени не ломают, иначе попадания считались бы дважды. Свой тир
-  у второго, пока он в чужом, не начинается: `$7452` = 1 (продавец не отвечает огнём на выстрелы), `$104` = 1 (защёлка
-  потока `SHOOT`, которую тот сам снимает на улице), а свой ждущий тир заканчивается (`$32296` = -1, как при выходе из
-  комнаты). После совместного захода свой тир второй начнёт, только выйдя на улицу и вернувшись. Соперники остаются
-  людьми игры владельца, второй их не видит, а его попадания по мишеням соседних дорожек не считаются. Запуск своего
-  тира, пока игрок участвует в чужом занятии, гасится на первой команде (`HookStartNewScript`). Флаг миссии `$1636`,
-  который `SHOOT` поднял перед запуском, теперь опускается: раньше игра считала, что идёт миссия, до перезагрузки.
-
-  Мишени тира скрипт создаёт без области (у объекта она 13, «видно везде»), а `Props` считал такие объекты уличными и
-  не отправлял их другому игроку в комнате тира: второй стрелял по пустой кабинке (#92). Теперь мишени совместного
-  раунда (`RangeTarget`) меряются по области своего игрока. Согласившегося, перенесённого в кабинку издалека, игра
-  держит на месте, пока под ним не появится пол комнаты (не дольше 5 секунд): пол загружается на несколько кадров
-  позже, и второй игрок проваливался под первого (30.10).
-
-**Метка доставки в грузоперевозках.** Скрипт `TRUCK` ставит метку места доставки в `76@` в начале второго этапа,
-когда игрок сел в тягач, и снова, когда отцепленный прицеп подцеплен. Если в момент посадки прицеп не на сцепке,
-второй этап начинается с «потерянного» прицепа, и подцепка ставит метку ещё раз поверх живой. Первая метка
-остаётся на карте навсегда, попадает в сохранение и с миром хоста уходит к напарникам. В одиночной игре так
-бывает редко, а вдвоём прицеп сбивают машины второго игрока и его грузовик: его игра ставит свой в то же место.
-Мод перед `ADD_BLIP_FOR_COORD` скрипта `TRUCK` убирает живую метку из `76@` (`ScriptCommand`). В загруженном мире
-без миссии он снимает такие метки, оставшиеся с прошлых игр: метку по координатам без значка, с размером 4 от
-`CHANGE_BLIP_SCALE` скрипта, в одной из 75 точек доставки (`102@`, `103@`, `ClearTruckLeftovers`).
-
-**Соревнования** (`Contest.cpp`, `G_CONTEST`). Баскетбол (испытание на очки), бильярд, блэкджек, рулетку, колесо
-фортуны, танцы в клубе, конкурс на встрече лоурайдеров, Kickstart, Blood Ring, гонки (с 8-Track и Dirt Track) и
-триатлон можно сыграть наперегонки. Каждый играет у себя, мод только читает результат. Занятие видно по потоку или
-побочной миссии: `BBCHAL`, `DANCE` вне миссий, `LOWGAME` внутри `LOWR`, `POOL2`, `KICKSTA`, `BLOOD`, `CPRACE`
-(номер гонки в `$1408`), `TRIA` (`$7248`). Скрипты столов казино работают рядом со столом (мозги объектов), поэтому
-игра за столом видна по их собственным флагам: `$36868` у блэкджека, `$37760` у колеса, `$13956` у рулетки.
-Результат: очки (`$7696`, `$21184`, `$4072`, `$33048`), деньги, выигранные или проигранные за столом (игра без
-ставки не считается), время до финиша и место. В `CPRACE` финиш — стадия `49@` от 13, место `450@`, время от старта
-в `$27840` (в заезде против часов там само время). В `TRIA` финиш — его мелодия победы или «Loser!» (`RACES_8`) на
-линии, время от `767@`, место `942@`. В `BLOOD` победа — `91@` = 1, время от показа его таймера. Локальные
-переменные миссии читаются из `CTheScripts::LocalVariablesForCurrentMission`, их обнуляет запуск миссии. Вызов
-делается в первые 20 секунд (U), в окне совместной гонки или триатлона рядом с Y. Согласие привязывает к
-соревнованию текущую игру второго игрока или следующую, начатую в течение 3 минут. Обе игры шлют состояние своей
-игры, а когда обе закончили, каждая сама объявляет победителя. Сюжетные танец и лоурайдеры (`MUSIC1`, `SWEET6`)
-не считаются: их ведёт `Minigames.cpp`.
-
-Табло соревнования (`contest::Board`, рисует `Overlay.cpp`) стоит вверху экрана: занятие, счёт обоих (кто впереди,
-тот зелёный), а пока своя игра не началась, сколько осталось из 3 минут и как её начать. После итога 10 секунд там
-крупно ПОБЕДА, ПОРАЖЕНИЕ или НИЧЬЯ и счёт обоих. Раньше была одна строка, а время и подсказка были только в чате
-(29.10). Табло всегда по центру и не шире 40% экрана, длинные подсказка и название переносятся. Сначала длинное
-табло сдвигалось вправо от колонки чата и стояло не по центру, а потом, зажатое между колонкой чата и таким же
-отступом справа, выглядело сжатым. Теперь оверлей рисуется после чата, и табло закрывает концы самых длинных строк
-чата, пока стоит. Окно по центру экрана (вызов, ожидание) стоит под табло. Для кадров теста табло в любом состоянии
-показывает `contest::Preview`.
-
-Принявший вызов на танцы или баскетбол переносится к вызвавшему (`Players::GoTo`, дверью помещения, как `/tp`):
-на его место на танцполе, где клуб (`BAR_AMBIENCE`) сам запускает танец, когда игрок стоит в маркере, или на
-полтора метра в сторону на площадке. Раньше каждый играл там, где был, и второго рядом не было (27.10). Двое на
-одном маркере танцуют в одной точке, и копия была внутри своего игрока. Пока у нас идёт `DANCE`, а копия ближе
-метра, она показана на 1,2 м справа от нашего игрока (`DanceSide`), и каждая игра видит другого справа от себя.
-Того, кто уже стоит в 25 м от вызвавшего, никуда не переносят: перенос с мячом в руках выбивал напарника из скрипта
-площадки (01.11). Испытание на очки `BBALL` начинает только по кнопке «Оглянуться назад» с мячом в руках (`BB_09`,
-кнопка скрипта 19). Напарник три минуты бросал мяч, испытание так и не началось, и соревнование отменилось (01.11), а
-03.11 принявший вызов опять не знал про эту кнопку. Теперь у принявшего вызов на баскетбол испытание начинается само,
-как только мяч у него в руках: на вопрос `BBALL` о кнопке 19 (`IS_BUTTON_PRESSED 0 19`) его игра отвечает «нажата»,
-пока испытание не началось (`contest::Answer`, ответ после команды, как у бильярда). Камере эта кнопка не достаётся.
-Ещё `BBALL` создаёт мяч только тогда, когда его место не видно на экране (`NOT IS_POINT_ON_SCREEN`, чтобы мяч не
-возникал на глазах). Второй игрок смотрел, как играет первый у того же кольца, и мяча у него не было, пока он не
-отвернулся (03.11: «мяча нету» 20 секунд). В сессии место мяча для `BBALL` считается не на экране.
-
-**Бильярд вдвоём** (`Pool.cpp`, `G_POOL`, протокол 23). В `POOL2` (миссия 8) есть режим на двоих из игры с
-разделённым экраном: на экране ставки START второго пада (`IS_BUTTON_PRESSED 1 12`) ставит `178@` = 1, удары идут
-по очереди по паду из `180@`, а соперник из бара (`214@`) становится вторым игроком. Вызов на бильярд (U на экране
-ставки) теперь значит партию за этим столом. Когда второй игрок принимает, игра владельца стола 3 секунды
-отвечает «да» на эту проверку (`pool::Answer` в перехвате команд), и партия идёт вдвоём без ставки, а соревнование
-снимается: победителя называет сама игра (`PL_08`/`PL_09`). Если ставка уже сделана или владелец ушёл от стола,
-второй получает `OP_FAIL` и играет своё по-старому.
-
-Игра владельца прячет соперника из бара и ставит на его место копию второго игрока (`RemotePlayer::avatar`: копия
-берёт место, поворот и анимацию этого педа). Анимацию выбирает `anim::Main`: сначала анимация скрипта, потом самая
-сильная на всё тело. `TASK_PLAY_ANIM` запускает анимации стола (блок `POOL`) по имени, без группы, и все они частичные
-(флаг 0x10). Раньше бралась только анимация на всё тело, и копия стояла прямо с кием, пока соперник целился и бил
-(28.10). 20 раз в секунду игра владельца шлёт второму свою камеру, место и анимацию соперника и предметы партии: объекты из `MissionCleanUp` (шары, кий соперника, прицельный кий), кроме
-своего кия, который виден в руке копии владельца. Игра второго переносит его в бар, ставит его CJ на место
-соперника с той же анимацией, создаёт копии шаров без столкновений и держит камеру владельца
-(`SET_FIXED_CAMERA_POSITION`, затем каждый кадр `m_vecMoveLinear`, `m_vecTrackLinear`, `m_fFOVNew`). Каждый кадр
-она шлёт свои кнопки, признак геймпада и движение мыши. Поворот предмета читается командой
-`GET_OBJECT_QUATERNION` только у объекта с моделью в мире (`m_pRwObject`): команда берёт матрицу модели
-(`CEntity::GetModellingMatrix`), без модели это ноль, и `CQuaternion::Set` ронял игру владельца в начале партии
-(0x0059C3E4). Без модели поворот берётся из направления, а предмет у второго не показывается, как и у владельца.
-`SET_OBJECT_QUATERNION` у второго безопасна: она ставит матрицу через `CPlaceable::SetMatrix`, которая создаёт её
-сама. Вид приходит раз в 50 мс, и шар за это время прокатывается до полуметра: у второго каждый шар плавно едет от
-показанного места к новому за 60 мс (`MoveMirrors`, поворот тоже, с нормировкой), а новый или перенесённый дальше
-метра ставится сразу. Копии стоят в той области, где сейчас сам второй игрок (`CGame::currArea`): область из вида
-владельца — это область его соперника, а человек скрипта может держать область улицы, и созданные и «видимые» шары
-в баре не рисовались (28.10, дважды). Свой соперник второго игрока из бара (его держит скрипт стола `POOL` в `1@`)
-прячется, где бы он ни ждал: на снимках он стоял в кадре на месте соперника. Модели шаров второй запрашивает с приоритетом: запрос без флагов живёт одно обновление
-стриминга (`CStreaming::PurgeRequestList` в конце `CStreaming::Update` снимает всё, что не нужно игре, миссии и не
-приоритетно), и шаров не было по 20 секунд (28.10).
-
-Кий соперника (`107@`) переходит в руку копии второго игрока. У спрятанного соперника пропадал и кий:
-`CTaskSimpleHoldEntity::SetPedPosition` каждый кадр делает предмет в руке таким же видимым, как его владелец, а у
-невидимого педа (`PreRender` не вызывается, кости не обновлены) ставит предмет не в руку, а в точку педа. У обоих
-второй игрок целился и бил пустыми руками (28.10). Теперь игра владельца отнимает кий у соперника (`DROP_OBJECT`) и
-даёт его копии (`TASK_PICK_UP_OBJECT`: правая рука, без анимации, как это делает `POOL2`). На вопрос `POOL2`, держит ли
-соперник свой кий (`IS_CHAR_HOLDING_OBJECT 214@ 107@`), она отвечает «да», и скрипт не забирает кий обратно, а свою
-анимацию кия (`POOL_*_O`) по-прежнему ставит по времени анимации соперника. В конце партии кий возвращается: копия его
-роняет, и `POOL2` снова даёт его сопернику. В списке предметов этот кий помечен, и игра второго держит его копию в руке
-своего CJ, проигрывая анимацию кия из вида стола (время идёт дальше с той же скоростью, что у анимации соперника).
-Копии шаров ставятся, как остальные копии предметов (`Props`, `Objects`): предмет вынимается из мира, получает матрицу
-из кватерниона (`Quat::ToMatrix`) и возвращается (`CWorld::Remove`/`Add`). Владелец шлёт кватернион своей матрицы
-(`Quat::FromMatrix`). С `SET_OBJECT_QUATERNION` и переносом без нового места в списках мира шары у второго были
-созданы и «видимы», но на столе их не было (28.10, три проверки). Копия второго у владельца и CJ второго у себя
-заморожены, и угол поворота сам в матрицу не попадал: CJ бил поперёк стола. Поворот теперь ставится и в матрицу
-(`CPlaceable::SetHeading`).
-
-`Props.cpp` такую копию не передаёт (`PoolTableCopy`): у владельца уже есть сам кий. Оружие копии и самого второго
-игрока на время партии спрятано (`HIDE_CHAR_WEAPON_FOR_SCRIPTED_CUTSCENE`), как `POOL2` прячет его у обоих игроков.
-Протокол 28.
-
-Второй игрок стоит на месте соперника, то есть рядом с соперником из своего бара. Скрипт стола его игры (`POOL`, мозг
-объекта) по F запускал у него свой `POOL2` поверх партии владельца: свои шары, своя камера, свои анимации у копии
-(«кривенько по анимациям», «шары не бьются», 28.10). Пока второй за чужим столом, игра отвечает этому скрипту «не
-рядом» на `LOCATE_CHAR_ON_FOOT_CHAR_3D` (`pool::Answer` теперь видит команды всех скриптов, не только миссий), и
-подсказка и запуск своей партии у второго не появляются. В ход второго (`180@` = 1) игра владельца отвечает на
-проверки кнопок второго пада (`IS_BUTTON_PRESSED 1 …`) и `IS_PC_USING_JOYPAD` по его паду, а после
-`GET_POSITION_OF_ANALOGUE_STICKS 1` и `GET_PC_MOUSE_MOVEMENT` пишет в выходные переменные его стики и накопленную
-мышь. Если второй уходит посреди партии, его удары переходят к паду владельца, и соперник из бара снова виден. Без
-вида стола 10 секунд второй выходит из партии сам.
-
-На время партии `POOL2` опускает свой стол на 10 см (`SET_OBJECT_COORDINATES` стола `163@`, в конце поднимает
-обратно) и кладёт шары уже на него. У второго стол стоял на высоте карты, и копии шаров владельца (и партии вдвоём,
-и партии в одиночку из `Props.cpp`) лежали внутри стола: созданные, видимые и на экране, они не были видны
-(28–30.10). Теперь игра, где идёт свой `POOL2`, при каждом сдвиге стола и раз в секунду шлёт всем его позу
-(`OP_TABLE`). Другие ставят так свой стол той же модели в пределах метра, а через 3 секунды без вестей возвращают его
-на прежнее место. Пока у игрока идёт свой `POOL2`, его стол не трогается. `WorldObjects.cpp` столы для бильярда
-больше не передаёт: подъём стола в конце партии для него не изменение (предмет снова там, где его ставит карта), и
-опущенный стол мог так и остаться опущенным.
-
-Из партии второй игрок выходит так же, как `POOL2` отпускает своих двоих в конце: его CJ ставится на пол на месте
-ожидания соперника (смещение от стола 0, −1,8, как `225@`), и заморозка снимается, только когда под этим местом
-найден пол (`CWorld::FindGroundZFor3DCoord`, не ниже 2,5 м, ждём не дольше 5 секунд). Раньше его отпускали там, где
-соперник стоял в последнем виде стола, и напарник проваливался сквозь пол бара и падал на землю под интерьером
-(29–30.10, дважды). Если своя область CJ не совпадает с видимой, она выравнивается: столкновения интерьера
-грузятся по области самого игрока (`CColStore::LoadCollision`), а не по видимой.
-
-Партия вдвоём идёт на деньги (0.3.3). В режиме для двоих `POOL2` возвращает ставку, когда второй пад нажимает START, и
-в конце никому не платит. Раньше мод отвечал за второй пад START сразу после согласия второго игрока, и ставку выбрать
-было нельзя. Теперь владелец выбирает ставку на своём экране ставок и подтверждает её (`0 16`). Мод отвечает на это
-нажатие «нет», а на следующий в том же цикле START второго пада «да», и партия вдвоём начинается со ставкой `155@`.
-Ставка уходит второму (`G_POOL` 9). Если у второго денег меньше, ставкой становится всё, что у него есть, и об этом
-узнаёт владелец. В конце каждая игра снимает или добавляет ставку своему игроку.
-
-Пока владелец выбирает ставку, у второго игрока его собственный стол партии не предлагает: согласившись на вызов, он
-ждёт (`pool::Expect`), и проверка места у стола (`LOCATE_CHAR_ON_FOOT_CHAR_3D` сценария `POOL`) получает «нет», как и
-во время партии. В первой проверке ставок второй игрок за эти секунды начал свою партию за своим столом. Партия вдвоём
-потом дала его CJ кий владельца поверх кия его собственного `POOL2`, и тот кий исчез из мира: задача «держать
-предмет», закончившись с предметом в руке, ставит ему `m_bRemoveFromWorld`
-(`CTaskSimpleHoldEntity::~CTaskSimpleHoldEntity`). Его `POOL2` упал на следующем обращении к кию (31.10). Если своя
-партия у второго всё же идёт, он не встаёт к чужому столу (`G_POOL` 10), и удары второго игрока делает владелец. Перед
-тем как дать кий в руку, мод отпускает то, что в ней было (`CPed::DropEntityThatThisPedIsHolding` 0x5E0360 без
-удаления).
-
-Линия прицела в `POOL2` состоит из десяти маленьких битков (`347@`, `SET_OBJECT_SCALE 0.3`), которые создаются заново
-каждый кадр. Когда игра владельца отправляет предметы, модели у них ещё нет, и с проверкой «есть модель» они уходили
-невидимыми: второй целился без линии (30.10). Теперь видимость берётся только из флага объекта, а размер идёт в битах
-2–7 поля вида в 32-х долях (старые игры читают только биты 0–1) и ставится копии в `CObject::m_fScale`. Свою прошлую
-партию `POOL2` оставляет на столе временными объектами, если выйти на экране ставки, и убирает их только своя
-следующая партия. Когда стол опускался под чужую партию, над ним висел второй треугольник шаров. Теперь перед
-переносом стола временные объекты в 2 м от него удаляются (`CObject::DeleteAllTempObjectsInArea`), как это делает
-`CLEAR_AREA` в начале `POOL2`.
-
-Экран миссии хоста (затемнение, таймеры и счётчики) не ложится поверх занятия самого напарника: раньше таймер
-его занятия заменялся таймером хоста, а пассажиры его такси уезжали в темноте. Погоду, которую ставит его
-занятие (школа полётов, школа лодок), не перезаписывает погода хоста. Предметы в руках его занятия (кий в
-бильярде) показывает `Props.cpp`, а предметы сюжетной миссии хоста — `Objects.cpp`. Побочная миссия хоста,
-которая проходит шаг сюжета (школа полётов — это DESERT5, автошкола — DSKOOL), тоже отправляет напарникам мир,
-который она открыла.
-
-Купленный дом общий (`Property.cpp`). Когда игрок покупает пикап «продаётся», потоки `BUY_PRO` и `BUY1`–`BUY3`
-запускают BUYPRO1 с номером дома в `$6940`, и тот показывает дом камерой и применяет покупку. Игра покупателя
-замечает запуск BUYPRO1 и шлёт `G_PROPERTY` с номером. Обычный дом (3–31) другая игра применяет тихо, как BUYPRO1,
-но без камеры: флаг покупки `$2912`, удаление пикапа, значок сохранения на радаре, дверь
-(`SET_CLOSEST_ENTRY_EXIT_FLAG`) и гараж. Три сюжетные покупки (Wang Cars, магазин Зеро, Verdant Meadows) запускают
-цепочки миссий. Покупку напарника хост повторяет самим BUYPRO1, когда он пешком, не в помещении и у него нет
-миссии, а свою покупку хост отдаёт напарнику с миром. После каждой загрузки мира напарник применяет свои покупки
-ещё раз, потому что покупка перед самым снимком мира в него не попала бы. BUYPRO1 хоста для напарника не миссия:
-его тексты и широкий экран не повторяются.
-Флаг «на задании» (`$ONMISSION`) может прийти из сохранения поднятым, когда опускать его некому. Сохранение в
-доме тоже хранит его поднятым, но PSAVE1 опускает его через секунду после загрузки. Быстрое сохранение сборки или
-сохранение в момент смерти оставляют его навсегда: пропадают значки миссий и дискеты сохранения, сюжет не
-запускается, а напарник видит хоста «на миссии» без конца. Если через минуту после загрузки флаг поднят, а
-миссии нет, мод его опускает. По той же причине при старте игры мод снимает удержание скриптов, если загрузка
-прошла мимо `CGame::InitialiseWhenRestarting` (её мог перехватить другой плагин): иначе не шёл ни один скрипт.
-
-Затемнение хоста и следующее за ним открытие экрана, пришедшие напарнику в одной пачке, теряли открытие: альфа
-затемнения сдвигается только в `CGame::Process`, после сообщений, и проверка «экран тёмный» его ещё не видела.
-Экран напарника оставался чёрным до следующей загрузки мира (хост пропускал сцену на вокзале в «Wrong Side of the
-Tracks»). Теперь тёмным считается и экран, затемнение которого только запрошено. Состояние затемнения хост шлёт
-при изменении и раз в 2 секунды, а не каждые 200 мс.
-
-Напарнику уходят только катсцены сюжетных миссий хоста. Своя катсцена хоста (свидание: `DATE6A` в баре, покупка дома)
-проигрывалась и у напарника там, где он стоял: CJ в воздухе на белом фоне, без девушки (#100).
-
-Напарнику, который подключился в середине катсцены, уходит и загруженная, но ещё не начатая катсцена (её начало
-раньше приходило одно и терялось), и начало с интерьером, в котором она идёт. Голосование за пропуск не ждёт
-напарника, у которого катсцена так и не пошла: через 3 секунды голосования его игра соглашается сама. Напарник в
-самолёте, вертолёте или лодке, на парашюте или с ранцем катсцену хоста не загружает: загрузка высаживает игрока
-из машины (`CCutsceneMgr::LoadCutsceneData_preload`), и после катсцены он оказывался в воздухе или в воде без неё.
-
-`DELETE_CHAR` удаляет любого, кого ему дали (`CTheScripts::RemoveThisPed`). Миссия, которая освобождает места
-в машине игрока для своих людей, удаляет её пассажиров. В «Sweet's Girl» хост ехал пассажиром у напарника, его CJ
-удалялся, и игра хоста падала. Игрока, своего или копию, эта команда теперь только высаживает. Если хост ушёл
-посреди миссии, а сервер остался (выделенный сервер), напарник снимает затемнение, катсцену и метки хоста.
-
-Высаженный хост оказывался вне машины, а Свит и девушка (группа хоста, `SET_GROUP_MEMBER $44`), которых миссия
-сажает на места 0 и 1, выходили вслед за лидером. Хост садился снова, мод сажал группу, и всё повторялось: «нпс
-не садились, а выходили» (28.10). Теперь своего игрока, который сидит пассажиром, команда пересаживает на свободное
-место с конца (`HookDeleteChar`: заднее место, которое миссия не трогает), и высаживает, только если свободных мест
-нет. Кроме того, игрок, который едет пассажиром у другого игрока, уступает место, которое занимает человек миссии
-(`Players::YieldClaimedSeat`, раз в 0,5 с): копия человека другой игры уже сидит или садится на это место
-(`Peds::SeatClaimed`), или человек своей игры идёт к нему (задача `TASK_ENTER_CAR_AS_PASSENGER` с этой дверью). Игрок
-пересаживается на место, которое никто не занял, или выходит. Так миссии, где хост ведёт свою машину с людьми
-миссии, работают, когда машину ведёт напарник, а хост едет с ним. Если людей миссии столько, сколько мест (трое в
-«Drive-Thru»), хосту места нет, и за руль ему надо сесть самому.
-
-Оружие, которое миссия хоста выдаёт напарнику, раньше затирало его собственное того же типа, а когда миссия его
-забирала, пропадало и оно. Теперь своё оружие напарника возвращается, а если миссия оставила ему меньше патронов,
-остаётся больше. Сюжетная покупка хоста (BUYPRO1 для Wang Cars, магазина Зеро, Verdant Meadows) отправляет
-напарникам новый мир, как пройденная миссия. Дома-сохранения и продающиеся дома на радаре тоже контактные точки,
-но маркерами миссий мод их больше не считает: хост, стоящий у такого дома, никого не ждёт.
-
-Миссия часто переносит CJ сразу после катсцены, иногда на километры («Smoke1B», «Synd_2B»), а напарника после
-сцены возвращали на его прежнее место. Теперь хост сообщает о таком переносе (`CS_FOLLOW` в `G_CUTSCENE`), и
-напарник встаёт рядом с ним, а в интерьер входит через ту же дверь. Расстояние до хоста не важно: в 0.3.0 переносило
-только напарника в 60 м от хоста (при смене помещения) или в 300 м, и он оставался за городом после «The Green
-Sabre», в мотеле «Reuniting the Families» и снаружи самолёта в «Stowaway». Трюм там помещение 9, куда скрипт переносит
-мотоцикл хоста командой `SET_CAR_COORDINATES`: она двигает только машину, матрица CJ догоняет её при обработке, и
-`HookScriptProcess` переноса не видел, так что слезший напарник оставался на полосе (#106, разобрано 04.11). В помещении
-теперь считается и перенос машины, в которой сидит CJ. Напарника, который сидит с хостом, такой перенос с мотоцикла не
-снимает: пока хост за рулём, его везёт машина (`Players::ApplyState` меняет area вместе с ней). Парашют в самолёте один, а
-миссия спрашивает только, есть ли он у хоста: в миссии хоста взявший его даёт по парашюту обоим (Pickups.cpp). Не переносит напарника только его собственное занятие, магазин или мини-игра
-(`CTheScripts::bMiniGameInProgress`) и смерть, и каждый такой отказ пишется в лог. Во время миссии хоста `/tp` пускает
-и в помещение хоста. Если миссия перенесла хоста в машину или самолёт (в конце «Freefall» CJ уже в Shamal в
-воздухе), напарник садится к нему пассажиром, как только у него появится копия этой машины (до 3 секунд). Раньше его
-ставили рядом с хостом, и в воздухе он падал.
-
-Обычно `CS_FOLLOW` уходит, когда хосту вернули управление. Если же на новом месте сразу идёт сцена на движке, а CJ
-хоста стоит на земле или сидит в наземной машине, сообщение уходит в начале сцены. Иначе напарник, оставшийся на
-прежнем месте, сцену не видел. В INTRO1 миссия переносит хоста на 1,6 км, и после катсцены INTRO1B там 19 секунд
-идёт сцена («Ah shit, here we go again»), а напарник всё это время стоял на Гроув-стрит со своей камерой.
-
-Перенос короче 150 м (но длиннее 30 м) тоже уходит в `CS_FOLLOW`, если напарник был в 60 м от прежнего места хоста
-или если до переноса CJ был прикреплён к машине (`m_pAttachedTo`). В «The Da Nang Thang» скрипт ставит CJ из воды на
-палубу корабля (около 50 м вверх и вбок), а после крушения вертолёта бросает его в воду у корабля. Напарник оставался
-в воде или в городе (28.10).
-
-Сцену на движке, которая началась сразу после переноса напарника к хосту, хост может закончить в другом месте, уехав
-на машине: в «Fender Ketchup» он выезжает из гаража и закрывает его, а напарник оставался внутри (30.10). Поездка не
-перенос скриптом, и второго `CS_FOLLOW` нет. Теперь, если сцена началась не позже 2 секунд после переноса, а хост к её
-концу дальше 10 м, напарник встаёт рядом с ним: у машины справа в 2,5 м, у пешего в 1,5 м.
-
-Миссии с машинками на радиоуправлении держат CJ в замороженном транспорте вне мира: в «New Model Army» (`ZERO4`) это
-BMX в воздухе в области 10, в `ZERO2` фургон под магазином Зеро. `FREEZE_CAR_POSITION` ставит `bDontApplySpeed`
-(+0x40, 0x2000), сама игра машины так не замораживает. Перенос туда ронял напарника в залив с 4 звёздами закрытого
-города (30-31.10). Пока CJ хоста сидит в таком транспорте, `CS_FOLLOW` ждёт, просьба /tp получает отказ, а /tphere не
-выполняется.
-
-Ограничения миссии на розыск (`SET_MAX_WANTED_LEVEL`, полиция не вмешивается, `SET_WANTED_MULTIPLIER`) действуют
-и у напарника, пока миссия идёт (`G_MISSION_POLICY`), но только рядом с хостом. Около 30 миссий ставят множитель или максимум 0,
-а многие снимают звёзды (`CLEAR_WANTED_LEVEL`), и напарник на другом конце карты не получал розыска, пока шла миссия хоста (04.11).
-Дальше 150 м от хоста или на улице, когда хост в помещении, у него свои правила розыска, и снятие звёзд миссией его не задевает
-(`KeepOwnRulesFar`, `FarFromHost`). Военные зоны остаются по хосту. После миссии у него снова свои. С ними идут плотность людей и машин
-(`SET_PED_DENSITY_MULTIPLIER`, `SET_CAR_DENSITY_MULTIPLIER`: «Home Invasion» ставит 0 в доме, а игра напарника
-заполняла дом своими людьми, пока хост выносил ящик), уровень открытых городов (стат 181, `STAT_CITY_UNLOCKED`) и
-сброс розыска миссией (`CLEAR_WANTED_LEVEL`), и военные зоны (`SET_DISABLE_MILITARY_ZONES`,
-`CCullZones::bMilitaryZonesDisabled`): «Black Project» выключает их своему игроку, а напарнику в Зоне 69
-`CCullZones::Update` давал 5 звёзд, и пройти миссию вдвоём тихо было нельзя (#106). Звёзды, которые миссия даёт CJ (`ALTER_WANTED_LEVEL`,
-`ALTER_WANTED_LEVEL_NO_DROP`), получает и напарник в 150 м от хоста: раньше их получал только хост (#100). Такое же значение
-уходит не чаще раза в секунду: «The Da Nang Thang» повторяет команду каждый кадр всю миссию, и это было 190 надёжных сообщений в секунду. Мир напарника старше конца «The Green Sabre»: без открытого
-пригорода он получал 4 звезды за запретную территорию (`CGameLogic::SetPlayerWantedLevelForForbiddenTerritories`), а
-с ними новый мир хоста не загружался никогда. Мир хоста, который ждёт только из-за звёзд, теперь загружается через
-минуту всё равно, а что мешает загрузке, лог пишет раз в 30 с. Во время войны банд игра не даёт
-звёзд ни за какие преступления (`CWanted::ReportCrimeNow` спрашивает `CGangWars::GangWarFightingGoingOn`). Война
-хоста идёт только у хоста. Хост сообщает о ней (`G_GANG_WAR`, при смене и каждые 3 с), и игра напарника в 300 м от
-хоста считает войну своей для розыска. Раньше напарник получал звёзды за каждое убийство в войне хоста (#56). Своя
-война напарника (см. «Территории банд») идёт в его игре, и звёзд за неё он не получает и так. Нападающих в войне хоста
-игра хоста отмечает на радаре (`CGangWars::StartOffensiveGangWar`, `CPed::bPartOfAttackWave`, +0x474 бит 12), а у
-напарника меток не было (#100). Этот признак идёт в состоянии педа (`X_WAVE`), и копия нападающего получает такую же
-метку, пока жива и пока признак стоит.
-
-Свою плотность людей и машин напарник запоминает при первом правиле миссии хоста, а оно приходит, пока у напарника
-идёт первая катсцена миссии. Катсцена держит обе плотности на нуле, а настоящие хранит в
-`CCutsceneMgr::m_fPrevPedDensity` и `m_fPrevCarDensity`. Запомненный ноль возвращался в конце миссии хоста, и у
-напарника не было ни людей, ни машин до перезагрузки мира (30.10). Теперь при загруженной катсцене берутся сохранённые
-ею значения, а своё правило возвращается уже после снятия катсцены в конце миссии.
-
-Большинство сюжетных миссий ставит плотности на 0 ради места своих сцен, некоторые на большую часть миссии. Плотность одна на
-всю карту, и напарник вдали от хоста ездил по пустым улицам, пока не возвращался к нему (04.11). Теперь на улице
-дальше 150 м от хоста или когда хост в помещении у напарника стоят свои плотности (`KeepOwnRulesFar`). 150 м это чуть дальше
-того, на сколько расходятся копии людей (120 м): его население не попадает в сцены хоста. В помещении правило хоста остаётся
-всегда («Home Invasion»). Плотности пишутся только при смене места, поэтому свои занятия напарника свои значения не теряют.
-Пока здесь загружена катсцена, они не трогаются.
-
-Субтитры катсцены берутся из таблицы текста миссии: с `CS_LOAD` идёт имя таблицы хоста, и напарник загружает её
-(`CText::LoadMissionText`). Копия катсцены у напарника печатает свои строки сама, а строка хоста приходит ещё
-и по сети вместе с её моментом в катсцене (`G_TEXT`, вид `TXT_CS_LINE`). Напарник показывает строку хоста, только
-когда его копия прошла этот момент на 0,3 с и такую строку не напечатала: его копия может идти на секунды позже
-(в тесте на 6 с). В 0.2.7 хост строки катсцен не пересылал, чтобы они не шли дважды, и напарник, у которого игра
-не нашла ключ (другой перевод), оставался без субтитров (#55).
-Затемнения скриптов хоста, которые не миссия, напарнику больше не отправляются.
-
-Команды миссии хост видит там, где `CRunningScript::Process` вызывает обработчик команды из таблицы (0x469FF2:
-`push ecx; mov ecx, esi; call edx`, вызов идёт через заглушку `CoopScriptCommandStub`). До 0.3.1 мод перехватывал
-`ProcessOneCommand` (0x469EB0), но в 1.0 US её никто не вызывает: её код встроен в `Process`. Тот перехват видел
-только команды самого мода (`Cmd` исполняет их через неё), и всё, что держалось на командах миссии, молчало: правки
-карты, заморозка машины напарника, сброс розыска, одежда и ящики «Home Invasion». CLEO меняет в этом месте только
-адрес таблицы (0x469FEE).
-
-Люди сцены двигаются как у хоста. Файлы анимаций, которые грузит миссия (`REQUEST_ANIMATION`), напарник держит в
-памяти тоже (`G_MISSION_IFP`): раньше жест длиной в секунду кончался прежде, чем файл успевал загрузиться. Разговор
-лица (`START_CHAR_FACIAL_TALK`, `STOP_CHAR_FACIAL_TALK`) повторяется на копии говорящего (`G_MISSION_FACE`). Посадку и
-высадку своего игрока мод ищет во всём дереве задач: в сцене это шаг последовательности скрипта, и копия раньше
-оказывалась на сиденье без анимации двери. По той же причине ходьбу по задаче (копия идёт от джойстика, который мод
-подставляет) мод узнаёт и по самой простой активной задаче, а не только по верхней: в сцене копия хоста скользила
-к фургону стоя. Повороты головы сцены (`TASK_LOOK_AT_CHAR`) повторяются на копиях (`G_MISSION_LOOK_AT`). Анимации человека, который
-садится в машину или выходит из неё, копии не идут: копия делает это своей задачей, и анимации двери шли дважды
-(Райдер из фургона). Человека, которого сцена переставила дальше 2 м, пока у него идёт анимация всем телом, копия
-переносит сразу, а не тянет за ним.
-
-Копия садилась в машину раньше своего владельца: миссии заставляют своих людей идти шагом
-(`SET_NEXT_DESIRED_MOVE_STATE 4` перед `TASK_ENTER_CAR_AS_PASSENGER`), а задача копии бежит. Сидящую копию при
-состоянии владельца «садится» мод считал выброшенным из машины и выносил наружу, а когда владелец садился, переносил
-обратно на сиденье: «они сначала садятся, потом телепортируются» (скорая, Drive-Thru, 28.10). Теперь копия, которая
-уже сидит в машине, куда садится её владелец, так и сидит. Пассажиру на любое место (`TASK_ENTER_CAR_AS_PASSENGER
-… -1`: больные скорой) игра выбирает дверь только у машины, а мод слал место 0, и копия шла к передней двери, а потом
-переносилась назад. Теперь посадка такого пассажира не передаётся, пока у владельца нет двери (`m_TargetDoor` или
-дверь задачи подхода): копия идёт за ним, а садится уже на его место.
-
-Модели копий запрашиваются с `KEEP_IN_MEMORY` (`RequestCopyModel`), как свои машины и людей стримит сама игра. Обычный запрос
-здесь не держится: каждый кадр `CStreaming::StreamVehiclesAndPeds` отпускает модели полиции, ФБР и армии, которых не требует
-наш розыск, а для незагруженной модели это снятие запроса, и `PRIORITY_REQUEST` от него не спасает. Солдат «Robbing Uncle Sam»
-напарник не видел совсем, их Patriot ехали без водителей (разобрано 04.11). Флаг `MISSION_REQUIRED` тут не годится: его
-пришлось бы снимать, а снять можно и у скрипта, который запросил ту же модель. `KEEP_IN_MEMORY` снимать не нужно, загруженная
-модель становится обычной.
-
-Модель человека миссии хоста напарник запрашивает с приоритетом (`PRIORITY_REQUEST`): запрос без флагов живёт одно
-обновление стриминга (`CStreaming::PurgeRequestList`), и модели, которой у напарника нет нигде, приходилось ждать
-удачи. Наркоторговца в «Cleaning the Hood» (`BMYDRUG`) напарник не видел почти минуту (28.10). Так же теперь
-запрашиваются модель машины скрипта (`VehicleSpawn::script`) и оружие человека миссии: в «Running Dog» у напарника
-не было вагоса, а в «Mike Toreno» фургона с Майком и байкеров (люди в машине ждут, пока появится их машина).
-Прохожие и обычные машины идут без приоритета.
-
-Если миссия разрешает человеку проходить сквозь ближайший объект модели
-(`SET_CHAR_USES_COLLISION_CLOSEST_OBJECT_OF_TYPE`: полковник «Home Invasion» лежит в своей кровати), копия получает то
-же самое (`G_PED_NO_COLLIDE`), как только появится: кровать выталкивала её, и копия висела над кроватью.
-Человека, которого миссия прикрепила к машине (`ATTACH_CHAR_TO_CAR`: девушка на встрече лоурайдеров сидит рядом с CJ),
-копия прикрепляет к копии машины так же (`G_PED_ATTACH`), когда обе на месте и копия уже вышла из сиденья. Пока она
-прикреплена, свою позицию у неё ставит машина, а анимации идут как обычно. Раньше копия стояла внутри машины, её
-выталкивало и подбрасывало в воздух. Копию игрока (CJ хоста стрелком на вертолёте или в машине) игра прикрепляет на
-время команды как обычного человека (`m_nPedType` 4). Для игрока `CPed::AttachPedToEntity` переключает камеру своей
-игры в режим стрелка (`CCamera::SetNewPlayerWeaponMode`), и у напарника появлялся прицел хоста («The Da Nang Thang»,
-«Reuniting the Families», 28.10).
-
-Когда стрелком миссия делает CJ хоста (у команды есть оружие: миниган в двери вертолёта «The Da Nang Thang», автомат
-в «Reuniting the Families»), напарник становится вторым стрелком (`GunnerUpdate` в `Missions.cpp`, 0.3.3). Его CJ
-прикрепляется к копии той же машины с тем же оружием, с другой стороны: стороны 1 и 3 меняются местами, смещение по x
-меняет знак, а место посередине (x около 0) сдвигается на 0,7 м вправо. Камера у него своя, стрелка. Крепление уходит
-хосту тем же `G_PED_ATTACH`, и игра хоста прикрепляет копию напарника. Когда хоста снимают, напарника снимают сразу, до
-переноса `CS_FOLLOW`, который идёт следом. Оружие машины забирается, своё оружие того же слота и оружие в руках
-возвращаются, а в профиль на это время пишется его собственное. Клавиша посадки снимает напарника до конца этой части
-и возвращает туда, где он стоял, как пулемёт Зеро. Пока CJ хоста стрелок, его машина остаётся в сети на любом расстоянии
-(`ScanTraffic`): «The Da Nang Thang» в один кадр уносит вертолёт на 840 м, копия у напарника удалялась прямо под ним, а новая
-получала другой номер, и второй стрелок на неё уже не садился (04.11). Если машина всё же исчезла под ним, игра обнуляет
-`m_pAttachedTo` без отцепления: столкновения остаются выключены, значит нет и силы тяжести, а состояние стрелка не снимается.
-Он висел в воздухе и не мог идти. `GunnerOff` теперь сам вызывает `CPed::DettachPedFromEntity`, которая и возвращает столкновения.
-`CPed::AttachPedToEntity` даёт оружие машины, есть его модель в памяти или нет, а блок анимаций оружия (у пулемёта `flame`, `default.ide`)
-приходит только вместе с моделью. Стрельба без него роняла игру напарника в `CAnimManager::BlendAnimation` через 25 мс после посадки
-(05.11, вывод по коду и логу, `crash.log` нет). Поэтому посадка своего CJ и копии хоста ждёт модель (`GunModelReady`), как турель Зеро.
-После сцены напарника больше не ставят рядом с хостом, если тот на пулемёте или летит.
-
-Если человек ещё не общий (создан и прикреплён в одном кадре вдали от напарника: Джонни на капоте в «Fender Ketchup»),
-отправить нечего, и раньше это терялось: копия у напарника бежала за машиной, шла в неё или стояла на крыше (30.10).
-Теперь хост помнит таких людей, пока они на машине, и отправляет крепление, как только человек станет общим. Если
-человек слезает без `DETACH_CHAR_FROM_CAR` (в конце той миссии его снимает `TASK_DIVE_FROM_ATTACHMENT_AND_GET_UP`),
-уходит открепление.
-
-Миссия хоста меняет карту в своей игре: открывает ворота Чайнатауна («Mountain Cloud Boys»), сейф банка
-(«Small Town Bank»), меняет стройку («Deconstruction») и фабрику («Yay Ka-Boom-Boom»). Те же команды
-(`SET_USES_COLLISION_OF_CLOSEST_OBJECT_OF_TYPE`, `SET_VISIBILITY_OF_CLOSEST_OBJECT_OF_TYPE`,
-`SWAP_NEAREST_BUILDING_MODEL`) выполняются у напарника (`G_MAP_EDIT`), когда он ближе 150 м. Ушедший дальше
-300 м исполняет их снова: карта вдали выгружается и возвращается такой, какой её построили.
-
-Ворота аэропортов (`WS_APGATE`) ставит поток main.scm `APCHECK`, и в каждой игре они свои. Пока игрок этой игры ближе 65 м
-к воротам, створками управляет `APGATE`. Створка открывается, когда игрок в 10 м от неё (снаружи только с лётным
-навыком от 180) или подошёл изнутри, и закрывается, когда он отошёл на 20 м. Каждая игра открывала ворота только своему
-игроку, поэтому у хоста они бывали открыты, а у напарника закрыты, и наоборот (29.10). Теперь эти проверки считают и
-другого игрока (`AirportGateAnswer`), а подсказка о лицензии у ворот снаружи осталась только своему. Миссия хоста
-«Mike Toreno» (`DRIV3`) поднимает `$7200`, и `APCHECK` сразу открывает главные ворота аэропорта Сан-Фиерро, а охранник
-лежит мёртвым. У напарника этот флаг не поднимался, теперь его игра держит `$7200` поднятым, пока у хоста идёт `DRIV3`.
-Ворота, до которых свой игрок дальше 65 м, по-прежнему закрыты, и копия другого игрока проезжает сквозь них.
-
-Части карты, которые миссия подгружает или убирает (`REQUEST_IPL`, `REMOVE_IPL`, `REMOVE_IPL_DISCREETLY`: поле
-конопли в «Are You Going To San Fierro?», `TRUTHSFARM`), подгружаются и убираются и у напарника (`G_IPL`). Раньше
-поле у него было пустым, и его огонь ничего не жёг. Перехвачены три вызова `CIplStore` из скрипта (0x46B6ED,
-0x46B715, 0x46B73D), игра напарника ищет ту же часть по имени (`CIplStore::FindIplSlot`). После пересинхронизации
-хост шлёт их снова.
-
-Миссия двигает, поворачивает или замораживает машину CJ, а ведёт её напарник. У хоста она копия, и состояния
-владельца сразу отменяли команду («Home Invasion» замораживает фургон у склада). Теперь `SET_CAR_COORDINATES`,
-`SET_CAR_HEADING` и `FREEZE_CAR_POSITION` для такой машины уходят в игру её водителя (`G_VEH_SCRIPT`).
-
-Миссия спрашивает только о своём игроке: кто ударил её людей, кто стреляет, кто целится, кто подошёл к вещи. Разбор скриптов всех
-миссий 04.11 показал, что напарник во всём этом не считался (`features/story/mission-rules`, список по миссиям в разборе `missions.md`).
-Теперь такая строка спрашивается ещё раз для копии каждого другого игрока: обработчик той же команды запускается снова, а
-`$PLAYER_ACTOR` на это время равен копии, поэтому решают правила самой игры. Игроков может быть сколько угодно. Для всех миссий
-так работают `HAS_CHAR_BEEN_DAMAGED_BY_CHAR`, `HAS_CAR_BEEN_DAMAGED_BY_CHAR`, `IS_CHAR_SHOOTING` и `IS_CHAR_SHOOTING_IN_AREA` с игроком
-миссии. `IS_PLAYER_TARGETTING_CHAR` смотрит на цель, о которой сообщает игра напарника (`G_PLAYER_AIM`): `m_pTargetedObject` или цель
-под прицелом мыши. Отдельные строки лежат в таблице `kSpots` с адресом в `main.scm` и номером команды: в изменённой миссии адрес не
-совпадёт, и она останется как есть. В таблицу входят только строки, после которых скрипт не двигает CJ и не отнимает управление:
-такая строка сделала бы это с хостом, где бы он ни стоял. Телефон «Ice Cold Killa», контрабанду «Interdiction», банку «Green Goo» и
-ворота «Black Project» берёт и напарник. Охрана авианосца в «Vertical Bird» замечает и напарника (`HAS_CHAR_SPOTTED_CHAR_IN_FRONT`, четыре
-строки: дальше скрипт меняет только состояния охранников). Пакет в «T-Bone Mendez» и бытовки «Deconstruction» устроены сложнее, там весь кусок скрипта
-идёт за того игрока (`Stretch`): на время этих команд `$PLAYER_ACTOR` равен его копии. В «Deconstruction» игроки в машинах проверяются
-по очереди, по одному проходу на каждого.
-
-Команда `DONT_REMOVE_OBJECT` снимает предмет со списка миссии (`CTheScripts::MissionCleanUp`), а `HostScan` читает этот список. Предметы,
-созданные и снятые в одном кадре (бытовки «Deconstruction», двери «Small Town Bank»), до напарника не доходили. Теперь такой предмет
-объявляется сразу (`AnnounceKeptObject`). Свои предметы `main.scm` объявляются и перед `ROTATE_OBJECT`, `SET_OBJECT_HEADING`,
-`SET_OBJECT_ROTATION`: дверь корабля в «The Da Nang Thang» открывалась только у хоста.
-
-Заряды «Dam and Blast», жучок «Amphibious Assault», панели «Black Project» и мотоциклы «Cop Wheels» устроены так же: кусок скрипта идёт за
-напарника, а `SET_PLAYER_CONTROL` внутри него пропускается, чтобы хост не терял управление. Клавишу посадки игра напарника сообщает
-хосту (`G_PLAYER_AIM`). `ATTACH_CAR_TO_CAR` машины, которую ведёт напарник, уходит в его игру. В «Catalyst» напарник стоит на поезде: вагон
-у каждой игры свой, поэтому `G_PED_ATTACH` говорит только «на поезде», и игра напарника ищет свой вагон рядом с копией хоста. Огонь копит силу
-броска, а ящик создаёт игра хоста (`HostThrow`) в следующем свободном месте массива миссии, так что миссия ловит и считает его как свой.
-
-Эффекты скрипта (`CREATE_FX_SYSTEM` и его варианты на человеке, машине, предмете) повторяются у напарника теми же командами (`G_MISSION_FX`):
-имя эффекта, место и то, на чём он сидит. Эффектов одновременно не больше 24, в массиве игры их 32. В конце миссии они гасятся.
-
-Что миссия делает со своей игрой, идёт напарнику сообщением `G_MISSION_ENV` и возвращается в конце миссии: SAM-установки Area 69 и
-авианосца (иначе они стреляли по напарнику), темнота `SET_DARKNESS_EFFECT` и сирена авианосца (события 1161 и 1162 команды
-`REPORT_MISSION_AUDIO_EVENT_AT_POSITION`, банк звуков приходит с речью миссии; то и другое только если напарник рядом с хостом и в том же
-интерьере) и множитель урона от огня CJ. Разовый пикап оружия в сюжетной миссии (огнетушитель, винтовка, ракетница, очки, парашют) взявший даёт и
-другому: миссия потом спрашивает, есть ли оружие у хоста. Свой самолёт или вертолёт напарник получает в любой сюжетной миссии, если в
-машине хоста нет места. Второй стрелок на турели неуязвим, как CJ хоста.
-
-Снимки напарника засчитываются миссии хоста («Badlands», «Photo Opportunity», «Architectural Espionage»). Его
-камера отмечает только копии, поэтому после снимка его игра сообщает хосту, каких людей и предметы хоста он
-снял (`G_PHOTO`), и хост ставит им флаг «сфотографирован».
-
-Музыкальные мини-игры сюжета играются вдвоём (`Minigames.cpp`, `G_BEAT`, `G_BEAT_SCORE`). Ноты и их кнопки лежат
-в самом музыкальном файле, поэтому две игры с одной дорожкой получают одни и те же ноты. Танец судится по своему
-воспроизведению, лоурайдеры по воспроизведению хоста (ниже). Задержка сети сдвигает только то, когда очки дойдут до
-хоста.
-
-- Лоурайдеры («Cesar Vialpando»). Когда миссия хоста готовит дорожку (`PRELOAD_BEAT_TRACK`, хост в машине),
-  напарник в 60 м ставит рядом, в 4,5 м справа, свою машину с гидравликой или, если у него такой нет, Savanna с
-  гидравликой и сам садится в неё. По `PLAY_BEAT_TRACK` хоста он запускает ту же дорожку и стрелки (`BDISPLY`), а
-  его движения судит мод по правилам `LOWGAME`: окно 35/50/100 мс, слово после каждых четырёх нот (комбо даёт
-  десятикратные очки), вибрация. Очки каждой ноты один раз прибавляются к счёту хоста (`$4072`) против того же
-  соперника.
-  Стрелки и судья напарника идут по позиции дорожки хоста: хост 10 раз в секунду шлёт её (`BEAT_TIME`, позиция из
-  `CAEStreamThread::GetTrackPlayTime`), а напарник подставляет её в `CAEAudioHardware::GetBeatInfo` (вызов по
-  0x4D8FEF), сглаживая скачки сети. Своя дорожка напарника стартует с той же задержкой, с какой приходит позиция
-  хоста, поэтому стрелки совпадают с его музыкой. Раньше каждая игра шла по своему воспроизведению: стрелки двух
-  игроков расходились, а у той игры, чей поток музыки подвисал, замирали.
-  Как у CJ хоста, в машине напарника сидит своя девушка (HFYPRO): на дверце Savanna, в другой машине пассажиром.
-  Её копия у хоста так же прикреплена к копии машины (`G_PED_ATTACH` работает в обе стороны). Двигается она по
-  правилам `LOWGAME`: настроение растёт на уровень за шесть хороших нот и падает за две плохих, на каждое новое
-  движение она подпрыгивает, после пропущенной ноты спотыкается. На месте встречи у напарника те же камеры, что
-  у хоста, сдвинутые к его машине: первый кадр, потом пять точек по кругу раз в 5 секунд или по кнопке камеры.
-  HUD и радар на это время скрыты, как у хоста.
-- Танец («Life's a Beach»). Когда миссия хоста запускает `DANCE` без соперника, напарник в 40 м запускает тот же
-  скрипт у себя в 1,8 м справа от хоста, с той же дорожкой и с пятью неподвижными камерами хоста, сдвинутыми к
-  его месту (их ставит миссия, а у напарника её нет). Его текущий счёт уходит хосту, и прирост добавляется к счёту
-  хоста (`$21184`, для прохождения нужно 2500). Новый поток хост узнаёт сразу после команды: в начале списка, с
-  именем «noname» (`CRunningScript::Init`), пока не выполнилась его `SCRIPT_NAME 'DANCE'`. Раньше мод ждал имя
-  «dance». Номер скрипта (35) хост берёт из байтов самой команды: аргументы нового потока игра читает через тот же
-  `CTheScripts::ScriptParams`, и после команды там был последний аргумент танца (-1), а не номер. Из-за этих двух
-  ошибок напарник не танцевал. Расстояние до места танца считается по плоскости: у этой точки z равен -100 (землю
-  находит сам скрипт).
-- Конец мини-игры хост держит до 3 секунд, пока не придут последние очки напарника (`$4068` у лоурайдеров, бит 31
-  `$21180` у танца). Если миссия хоста кончилась, танец напарника заканчивается сам (`$21192`). Без напарника всё
-  идёт как в одиночной игре.
-
-Ящики в «Home Invasion» носит и напарник (`Objects.cpp`, `G_OBJ_HOLD`). Хост сообщает о каждом объекте миссии,
-можно ли его поднять (`bIsLiftable`) и не в руках ли он у самого хоста. Напарник поднимает копию ящика обычной
-кнопкой входа в машину. Анимации подъёма, переноски и укладки (блок CARRY) у обоих игроков идут другому как обычные
-действия игрока (`Anims.cpp`). У хоста копия напарника берёт настоящий ящик той же задачей, что и игрок
-(`CTaskComplexGoPickUpEntity` с группой CARRY, как в `CPlayerInfo::Process`), а копия, которая за 2 секунды его не
-взяла, держит его перед собой (`ATTACH_OBJECT_TO_CHAR`). У напарника ящик в руках хоста висит на груди копии хоста.
-Положенный ящик хост ставит туда, где его положил напарник, а копия, которая ещё держит его, отпускает его на месте
-(`DROP_OBJECT`). Объект миссии видно только в его интерьере, поэтому вместе с положением передаётся и интерьер: ящик,
-вынесенный из дома, у напарника пропадал в руках хоста. У хоста ящик в руках напарника переходит в интерьер копии
-напарника. Если ящик оба взяли одновременно, он остаётся у хоста, а
-напарник роняет копию. Миссия хоста считает ящик напарника ящиком своего игрока: ответы `IS_CHAR_HOLDING_OBJECT` и
-`LOCATE_CHAR_ON_FOOT_OBJECT_3D` для `$PLAYER_ACTOR` подменяются через `CRunningScript::UpdateCompareFlag`, так что
-`NOT` и цепочки `AND`/`OR` работают как обычно. У грузовика в GUNS1 ящик грузит тот, кто его несёт: проверка места
-(`LOCATE_CHAR_ON_FOOT_3D` по сигнатуре команды) смотрит на копию напарника, а следом кнопка проверяется по нажатию
-напарника за последнюю секунду.
-
-Подсказки и шум у каждого игрока свои. Подсказку (`CHud::SetHelpMessage`) сюжетной миссии хоста напарник больше не
-получает: она о том, что делает игрок хоста («нажмите ..., чтобы взять ящик» у его ящика). Исключения — мини-игры, где
-правила общие, и сцены на движке: подсказка во время сцены относится к тому, что напарник смотрит вместе с хостом
-(советы парикмахера после стрижки). Напарник видит свои подсказки: у ящика, который можно взять, его игра один раз показывает GUNS118, а
-когда он несёт ящик к задним дверям фургона, хост присылает ему RYD1_30 (`G_MISSION_HINT`). Шум «Home Invasion»
-(`$26820`, полоска GUNS1_5) у напарника — свой счётчик (`COnscreenTimer::AddCounter`), который виден, пока напарник
-в доме, а не пока там хост: полоску хоста из его блока счётчиков напарник не берёт. Блок хоста приходит 4 раза в
-секунду и затирает счётчики, поэтому запись своего счётчика переносится через него как есть, в тот же слот. Добавленный
-заново счётчик игра показывает с миганием первого появления, и полоска мигала постоянно. Значение напарник считает сам, как GUNS1 считает для своего игрока: уровень звука там, где он стоит
-(`GET_SOUND_LEVEL_AT_COORDS`), умноженный на 1,6. Всё, что выше 20, копится, и каждый кадр гаснет 1 %. Значение хоста
-для этой полоски напарнику не пишется. Если полоска напарника заполнилась, он сообщает хосту (`G_NOISE`), и игра хоста
-сразу после того, как миссия посчитала свою полоску (`CSET_VAR_INT_TO_LVAR_FLOAT $26820`), делает её полной для
-следующей проверки: полковник просыпается и от шума напарника.
-
-Двери машин миссии (задние двери фургона в «Home Invasion») в состоянии машины не передаются. Поэтому команды миссии
-`OPEN_CAR_DOOR`, `CLOSE_ALL_CAR_DOORS`, `POP_CAR_DOOR`, `FIX_CAR_DOOR` и `OPEN_CAR_DOOR_A_BIT` повторяются на копии
-машины (`G_CAR_DOOR`). Хост помнит последние команды для каждой двери до конца миссии и раз в секунду проверяет сетевой
-id машины: машина, которая оказалась ни в чьём интерьере, перестаёт быть сетевой и потом появляется у напарника заново,
-под новым id и с закрытыми дверями (фургон, пока хост был в доме). Новой копии команды уходят ещё раз.
-
-Пока у хоста идёт сюжетная миссия, игра напарника своих людей в интерьеры не добавляет: интерьеры миссии содержат тех,
-кого поставил её скрипт. Ни людей двери (`PopulateInterior`), ни людей у мебели: телевизор и кресла дома игра
-заполняет по плотности населения (`CPopulation::Update`), а «Home Invasion» возвращает плотность 1, пока хост на улице.
-Напарник один в доме видел там людей, которых у хоста нет. Людей дома (`InteriorGroup_c::SetupPeds`, его семью у
-мебели) игра создаёт, и когда игрок стоит под домом на улице. Во время миссии хоста игра напарника их не создаёт (вызов
-0x59690F), а хост не отдаёт напарнику таких людей интерьера, в котором его самого нет (зона 0 и высота больше 500):
-у хоста они появлялись, пока он грузил фургон под домом, и напарник в доме видел их копии.
-
-Одежду, которую миссия надевает на CJ хоста, носит и напарник (`G_MISSION_LOOK`). В «Home Invasion» это балаклава,
-и вместе с ней игра сама включает походку крадучись (`CPlayerPed::ProcessAnimGroups` выбирает группу 69, если
-`CPedClothesDesc::GetIsWearingBalaclava`). Перед первой командой одежды миссии (`GIVE_PLAYER_CLOTHES_OUTSIDE_SHOP`,
-`GIVE_PLAYER_CLOTHES`) хост запоминает одежду своего CJ, а после каждой `BUILD_PLAYER_MODEL` шлёт ключи, которые
-отличаются от запомненных. Напарник надевает их поверх своего облика и пересобирает модель (в машине позже, уже
-пешком). Когда миссия снимает вещь или кончается, напарник возвращает свой облик. В профиль напарника идёт его
-собственная одежда, а не вещи миссии.
-
-## Общий мир: предметы, объекты, огонь, территории, читы
-
-**Пикапы** (`Pickups.cpp`). Оба мира загружены из одного сохранения, поэтому пикапы совпадают по модели и месту
-(позиция хранится в восьмых долях метра). Сбор своим игроком ловит перехват `CPickup::Update`, и другая игра
-повторяет его так, как это делает сама игра:
-- пикап, который возвращается (оружие, аптечка, броня на улице), исчезает на то же время;
-- остальные удаляются (`CPickup::Remove`) и записываются как собранные (`AddToCollectedPickupsArray`), чтобы
-  скрипт, который их ждёт, например миссия хоста, пошёл дальше;
-- подковы и устрицы засчитываются там в статистику, как это делают `PickedUpHorseShoe` и `PickedUpOyster` (счётчик,
-  а подкова ещё и удачу), но без $100 и сообщения: деньги получает тот, кто нашёл;
-- снимок, сделанный камерой (`CPickups::PictureTaken`), засчитывается там как снимок, а выручка актива, забранная
-  здесь, обнуляется там;
-- граффити, закрашенное здесь (вызов `CTagManager::SetAlpha` из `CWorld::SprayPaintWorld`), закрашивается там.
-
-Перезапущенной игре напарника хост отправляет мир как он есть: закрашенные граффити и подковы, устрицы и снимки,
-которые ещё лежат (`EV_STATE`). Его сохранение могло быть старше (во время миссии и в машине снимок мира не делается),
-и после перезахода у напарника граффити снова были чистыми, а собранное лежало на месте. Граффити напарник
-закрашивает молча, без «tags x of 100», а собранное хостом убирает без статистики: её засчитал нашедший.
-`SET_TAG_STATUS_IN_AREA` миссии хоста (`CTagManager::SetAlphaInArea`: «Tagging Up Turf» стирает свои граффити)
-выполняется и у напарника (`EV_TAG_AREA`).
-
-Миссия стирает граффити каждой пары, когда до неё доходит, и стирала то, что напарник уже закрасил. Один игрок
-закрашивал следующие граффити, пока миссия хоста была ещё на первом, и граффити снова становилось чистым, а счёт
-«tags x of 100» становился на один меньше (комментарий игрока, 02.11). Теперь граффити, закрашенное напарником, пока
-идёт сюжетная миссия хоста, после стирания закрашивается обратно молча, в обеих играх (`g_partnerTags`). Миссия видит
-его закрашенным и идёт дальше. Список очищается, когда миссия хоста кончилась, поэтому при повторе её начальное
-стирание чистит всё. После провала граффити напарника остаются закрашенными до повтора.
-
-Пикапы, которые появились только в одной игре, объявляются (`CPickups::GenerateNewOne`): выпавшее из убитого,
-сброшенный ранец, пикапы миссии хоста. Пикапы скриптов, которые идут в обеих играх, не объявляются: они там уже
-есть. Не участвуют дискеты сохранения, значки «i» и дома на продажу: на них в каждой игре реагируют свои скрипты.
-Точки сохранения обслуживает поток `PSAVE1`. Мод считает его побочным занятием, как спортзалы: каждый сохраняет
-свою игру, никто никого не ждёт в маркере. Флаг «на задании», который он поднимает на время меню, миссией для
-напарника не считается, поэтому у напарника больше не гаснет экран, пока хост сохраняется. Сохранение напарника на
-такой точке заодно отправляет его профиль хосту.
-
-**Объекты миссий** (`Objects.cpp`). Игра хоста знает, что создал скрипт её миссии: `CTheScripts::MissionCleanUp`
-перечисляет это, объекты с типом 3. Их она объявляет напарнику, шлёт их перемещения и конец. Если такой объект
-уже стоит на этом месте у напарника (он пришёл с миром хоста), копией становится он, а второй не создаётся. Копии у напарника
-заморожены, и ничто в его игре их не повреждает: удар его игрока уходит хосту (`G_OBJ_DAMAGE`), и хост применяет
-`CObject::ObjectDamage` к своему объекту от имени своего игрока, потому что миссия считает попадания игрока.
-Когда объект хоста разбился (без видимости и без столкновений), копия разбивается тем же путём урона. Так
-бутылки для стрельбы видны обоим, и разбить их может любой.
-Предмет миссии, прикреплённый у хоста к машине (ящик в фургоне, брезент на поезде), этой машины там не касается.
-У напарника его твёрдая копия лежала внутри копии машины и поднимала её (в «Robbing Uncle Sam» фургон парил).
-Теперь, пока предмет прикреплён у хоста, у копии нет столкновений, а размер предмета (`SET_OBJECT_SCALE`) идёт
-вместе с ним.
-
-Объекты самого main.scm, которые он создаёт при старте игры (`DONT_REMOVE_OBJECT`), в список миссии не входят: ворота
-гаража в «Fender Ketchup» (`$10632`), ставня склада в «You've Had Your Chips» (`$10656`), ворота Зоны 69. Миссия хоста
-сдвигала их у себя, а у напарника они оставались закрытыми (30.10). Теперь, когда сюжетная миссия хоста двигает такой
-объект (`SLIDE_OBJECT`, `SET_OBJECT_COORDINATES` с глобальной переменной), он объявляется сразу, ещё до сдвига, на
-месте, где стоит такой же у напарника, и игра напарника берёт свой (`FindTwin`). Дальше его движение идёт так же, как
-у объектов миссии. Свой такой объект игра напарника ищет в 15 м (флаг `OBJ_SCM`), а не в 25 см: её мир мог быть ещё не
-миром хоста. Ставня в «You've Had Your Chips» у напарника открылась копией, а его собственная осталась на месте, и он
-упёрся в невидимую стену (31.10). В лог пишется, на каком расстоянии нашёлся свой.
-
-Флаги объекта идут вместе с ним (`G_OBJ_CREATE`, `G_OBJ_SYNC`): нет столкновений (`OBJ_NO_COLLISION`,
-`CEntity::bUsesCollision`) и на него наводится прицел (`OBJ_TARGET`, `CObject::bIsTargetable`, 0x200 в +0x140). «Small
-Town Bank» выключает столкновения у банкоматов (`SET_OBJECT_COLLISION 72@ 0`), чтобы пули проходили к объекту перед
-ними (`MAKE_OBJECT_TARGETTABLE`, здоровье 1000): по его здоровью миссия и ломает банкомат. У копий столкновения
-оставались, пули напарника застревали в копии банкомата, и он не мог их сломать (31.10).
-
-**Предметы на улицах** (`WorldObjects.cpp`). Фонари, знаки, заборы, урны, гидранты, деревья, ящики и стёкла каждая
-игра создаёт из одних и тех же записей карты (`CDummyObject`), поэтому предмет узнаётся по модели и месту своей
-записи. Игра каждые 100 мс смотрит на такие предметы в 150 м от своего игрока (`m_nObjectType` 1, с записью карты)
-и сообщает (`G_WORLD_OBJ`), когда предмет:
-- сломан: другая модель (`m_bRenderDamaged`), треснувшее стекло, разбит на куски (без видимости и столкновений).
-  Другая игра ломает свой тем же путём (`CObject::ObjectDamage` с тем же оружием, стекло — `CGlass`);
-- сбит и движется: пока он не замер, его поза и скорости идут по ненадёжному каналу, и копия в другой игре
-  движется своей физикой между ними, а на месте, где он лёг, замирает.
-  Предмет, который почти не движется (качается на склоне, покачивается на воде, а статичным игра его уже не
-  делает), уходил в сеть десять раз в секунду всё время, пока лежал. Такой теперь уходит раз в секунду.
-
-Предмет, созданный снова (ушёл из зоны и вернулся) больше чем через 2 секунды после записи о поломке, просто остаётся
-сломанным: невидимым и без столкновений. Раньше запись повторяла `ObjectDamage`, и фонари, сломанные несколько минут
-назад, снова рассыпались перед едущей машиной (30.10). Поломка, только что пришедшая от другой игры, показывается
-полностью, как раньше.
-
-Запись живёт, пока её предмет в 150 м от своего игрока (`seenMs`), и только потом ещё 5 минут. Раньше она кончалась
-через 5 минут после поломки, даже если сломанный фонарь так и лежал рядом с игроком. Тогда игра считала его новой
-поломкой и снова слала её, и фонарь другой игры, уже целый, рассыпался сам: в логе хоста один фонарь «ломался» ровно
-раз в 5 минут (31.10, четвёртая проверка).
-
-Фонари в SA рассыпаются на куски (эффект 200 в object.dat), урны и паркоматы отлетают целыми. Толкают предмет
-обычно обе игры: у каждой есть копия второго игрока, а копия машины едет чуть впереди настоящей и задевает
-предмет раньше. Поэтому движение считает игра того игрока, который ближе к предмету, а если оба примерно
-одинаково близко — игра хоста; движение от другой игры тогда не принимается. Записи живут 5 минут: игра, которая
-создаст такой предмет позже (он был далеко или ушёл из памяти и вернулся), получит его таким, каким его оставили.
-Не участвуют предметы, которые двигает сама игра (`m_pControlCodeList`: ворота гаражей, переезды, краны), двери
-и взрывоопасные: взрыв `CObject::Explode` записывает на игрока этой игры. Проверено ботом: фонарь, сбитый машиной
-хоста, разбит и у напарника, а паркомат лежит у обоих в одной точке (его полёт считала игра хоста, 33 сообщения).
-
-Ломает предмет только игра той машины или того человека, кто по нему действительно ударил. Урон от копии чужой
-машины или чужого педа (`CObject::ObjectDamage` с такой копией в роли виновника) предмет карты не принимает.
-Копия машины едет чуть в стороне от настоящей и задевала столбы, мимо которых настоящая проехала. Её игра
-рассылала поломку, и у водителя столбы падали сами по себе. Толчок без урона (столб или светофор опрокинут, а
-`ObjectDamage` не вызывался или вызван без виновника) этим не отсекался, и столбы падали снова (28.10). Теперь
-предмет, который в этой игре изменился впервые, когда ближе всех к нему (машина в 8 м, пешеход в 2 м) была копия
-чужой машины или чужого человека (`CopyNear`: машина, которую сейчас ведёт другая игра, копия другого игрока,
-человек из другой игры), не рассылается вовсе (`Thing::byCopy`) и остаётся здесь как есть. Если удар был и в той игре, она сообщит о
-нём сама.
-
-**Ворота гаража у дома** открываются только для игрока своей игры (`CGarage::Update` смотрит на
-`FindPlayerCoors` и `FindPlayerVehicle`), а ворота, которые поднимаются вверх, становятся стеной, как только начинают
-закрываться (`m_bDoorClosed`, `CObject::ProcessGarageDoorBehaviour`). У смотрящего ворота были закрыты, копию машины
-другого игрока ворота выталкивали, а синхронизация тянула обратно, и её трясло (29.10). Теперь, пока другой игрок у
-ворот так, как игра требует от своего (в машине ближе 10 м, пешком ближе 4 м), они открыты и здесь: закрывающиеся
-идут обратно, открытые не закрываются, а закрытые только поднимаются, без выдачи и уборки машин хранилища.
-
-**Гаражи у домов** (`Garages.cpp`). Гараж-укрытие убирает машины, оставленные внутри, когда закрывается за
-игроком (`CGarage::StoreAndRemoveCarsForThisHideOut`), и выставляет их, когда игрок подходит снова
-(`RestoreCarsForThisHideOut`). Хранилище (`CGarages::aCarsInSafeHouse`, по четыре машины на дом) — часть мира хоста
-и его сохранения. Мир напарника раз за разом загружается заново, поэтому игра напарника машины не убирает и не
-выставляет сама: раньше обе игры выставляли одни и те же машины (дубли), а машина, которую убрал напарник,
-пропадала со следующей загрузкой мира. Когда гараж закрывается у напарника, его игра просит хоста забрать свои
-машины, которые остались внутри (`G_GARAGE`). Игра хоста кладёт их в хранилище (`CStoredCar::StoreCar` с копии),
-а игра напарника их удаляет. Когда гараж открывается у напарника, игра хоста отдаёт ему записи хранилища и
-очищает свои места, а игра напарника выставляет машины у себя: там, где стоит напарник, земля загружена. Модели
-она перед этим загружает (`RestoreCar` без модели ничего не создаёт), а то, что выставить не удалось, возвращает
-хосту. Снимок мира для напарника хоста тоже сохранение, а `CGarages::Save` перед сохранением закрывает открытые
-гаражи и убирает машины. Для снимка это отключено, иначе ворота захлопывались перед хостом. Проверено ботом: машина
-из хранилища тестового мира выставилась у напарника, вместе с машиной бота ушла к хосту, вернулась, и в обеих
-играх по одному экземпляру в одной точке.
-
-Гаражи общие (выбор игроков 02.11). Раньше машины хоста выходили только у хоста, а машины напарника
-только у напарника, и машину, оставленную другим, забрать было нельзя. Теперь, когда гараж открывается у напарника,
-игра хоста отдаёт ему все записи хранилища, и свои тоже. Когда гараж открывается у хоста, выходят и машины напарника:
-перехват `RestoreCarsForThisHideOut` больше не убирает их записи из мест. Список записей напарника (`g_partnerCars`)
-нужен теперь только для уборки хоста: она очищает все четыре места и заполняет их машинами, которые стоят внутри, и
-запись, положенную напарником, пока ворота хоста были открыты, стирала. Выставленная запись уходит из списка, иначе
-следующая уборка вернула бы её в хранилище, пока машина стоит в гараже, и машина вышла бы дважды.
-
-Подъехав на машине к закрытому гаражу, игра напарника считает занятые места по своей копии хранилища
-(`CGarages::CountCarsInHideoutGarage`), а это мир хоста на момент загрузки. По копии гараж был полон, и ворота не
-открывались с надписью «You cannot store any more vehicles in this garage!!», хотя у хоста места были (01.11:
-«напарник не может сохранять машины в гараже»). С общими гаражами так было бы почти всегда: напарник забирает машины
-хоста, а копия их ещё считает. Теперь игра хоста сообщает, сколько машин в хранилище каждого дома (`GARAGE_COUNT` при
-каждом изменении), и игра напарника берёт это число.
-
-Пока гараж открыт у напарника, его машины стоят в игре напарника, а в хранилище хоста их нет. Если хост в это время
-сохранялся и выходил из игры, они пропадали, а с общими гаражами среди них и машины хоста. Теперь при сохранении
-хоста копии этих машин тоже записываются в хранилище, а сразу после записи гаражей (вызов `CGarages::Save` в
-`GenericSave`) убираются оттуда. Если запись такой машины уже пришла от напарника, а копия ещё не удалена, второй
-раз она не пишется (та же модель ближе 2 м).
-
-**Двери мастерских** (`Garages.cpp`). `CGarage::Update` двигает дверь Pay 'n' Spray, мастерской бомб или
-тюнинг-ателье только для игрока своей игры: Pay 'n' Spray другой игры стоял открытым, пока игрок внутри был
-закрыт, а тюнинг-ателье не открывалось перед машиной второго игрока. Теперь дверью в обеих играх управляет игра
-того, кто пользуется гаражом: чья машина внутри, а если внутри никого, то кто ближе в пределах 30 м (сначала
-в машине, потом пешком, при равенстве хост). Обе игры приходят к одному ответу. Другая игра двигает свою дверь
-как гараж скрипта (тип 19): со звуком и коллизией, но без покраски, бомбы, платы, сброса розыска и отнятого
-управления (`G_GARAGE_DOOR`).
-
-Двери, которые открывает и закрывает скрипт (гаражи миссий, склад краж `BURG_LK`, гаражи под управлением
-скрипта), во время сюжетной миссии хоста принадлежат его миссии и двигаются у напарника так же. «Home Invasion»
-открывает склад для фургона: у напарника склад стоял закрытым, копию фургона загоняли в ворота, и напарник
-проваливался. Вне миссии каждая игра двигает их своими скриптами, а во время общей подработки они двигаются за
-игрой того, кто её ведёт (`SideLeader`): в краже вдвоём ворота склада не открывались, когда фургон вёл напарник (01.11).
-
-Машина внутри мастерской принадлежит игроку, только если он за рулём: `FindPlayerVehicle` считает и пассажира.
-Pay 'n' Spray пассажира перекрашивал копию и брал с него $100, мастерская бомб ставила бомбу за $500. Меню
-тюнинг-ателье тоже принадлежит водителю: пассажир машины другого игрока получал своё, платили оба, а детали копии
-через мгновение снова становились такими, как у владельца. Скрипт ателье у такого пассажира не идёт. Без него у
-пассажира оставалась камера машины, и в тесной комнате ателье стены вдавливали её внутрь машины (02.11). Пока
-водитель-другой игрок стоит в ателье (его камера `MODE_FIXED`, машина в своей области), пассажир видит то же, что он:
-камеру по месту и направлению из его состояния (`PassengerShopCamera`).
-
-**Огонь** (`Fire.cpp`). Огонь на земле от взрывов и коктейлей Молотова загорается в каждой игре сам: эти события
-передаются. Передаются только огонь на игроке, педе или машине, которыми владеет эта игра, и огонь миссии хоста
-(`START_SCRIPT_FIRE`). Другая игра зажигает такой же огонь на своей копии или в той же точке, той же силы
-(`CFireManager::StartFire` по точке зажигает любой с силой 1, поэтому сила и пламя ставятся после:
-`CFire::CreateFxSysForStrength`). Он не
-распространяется, не ранит копию (копии огнеупорны, защита снимается только на время поджога) и гаснет, когда
-гаснет огонь владельца. Копию, которую потушил игрок этой игры (из пожарной машины или огнетушителем, не дальше
-30 м), игра владельца тоже тушит (`FIRE_OUT`). Так напарник помогает хосту на подработке пожарного.
-
-Машину подработки пожарного поджигает `START_CAR_FIRE`: это огонь скрипта (`CFire` бит 1), он не гаснет сам. Копия
-огня на машине зажигалась обычным (`CFireManager::StartFire` по цели снимает этот бит), а у обычного огня на машине
-игра не смотрит на срок и даёт ему 3–4 секунды, а дальше 60 м от камеры гасит сразу (`CFire::ProcessFire`). Машина
-подработки огнеупорна и с полным здоровьем, сама не загорается, и у напарника она стояла целой (28.10). Теперь
-`FIRE_START` несёт признак огня скрипта на машине (протокол 27). С одним битом копия всё равно не была видна
-(28.10), и теперь такую копию игра зажигает той же функцией, что игра владельца (`CFireManager::StartScriptFire(pos,
-машина, 0.8, 1, 0, 1)`). Копия огня подработки, погасшая сама, без `FIRE_STOP` и без воды нашего игрока, зажигается
-снова (до 20 раз), а журнал пишет, сколько она прожила и что стало со слотом. Погасшая копия бит скрипта сохраняет, а
-такой слот игра новому огню не отдаёт, поэтому бит снимается, когда копия уходит (`Drop`), и при конце сессии: копии
-машин остаются в мире обычными машинами.
-
-**Взрывы, снаряды и водомёты** (`Fire.cpp`). Взрыв (граната, ракета, снаряд Rhino, бомба, взрыв миссии)
-происходит в игре того, кто его устроил, и другая игра устраивает такой же от имени своей копии создателя
-(`CExplosion::AddExplosion`, `G_EXPLOSION`). Свой взрыв той же породы от копии чужого создателя (ракета, которую
-выпустила у нас копия напарника) игра пропускает: настоящий придёт. Машины, лодки, самолёты и предметы
-взрываются в каждой игре по своей синхронизации, а вспышка коктейля зажигает свой огонь. Снаряды (гранаты,
-коктейли, газ, ракеты, самонаводящиеся ракеты, бомбы, ракеты-ловушки) видны в полёте: другая игра выпускает такой
-же из той же точки с той же скоростью (`CProjectileInfo::AddProjectile`, `G_PROJECTILE`), а его взрыв пропускается,
-как и всякий чужой. Ракета зенитной установки идёт от имени игрока, по которому стреляли, чтобы и её взрыв
-пропустился. Заряд взрывчатки летит так же и лежит у другого игрока там, где упал, пока копия бросившего не взорвёт его
-детонатором (этот взрыв пропускается) или не придёт настоящий взрыв. Раньше другой игрок видел заряд только
-в руке. Струя водомёта пожарной машины и фургона
-SWAT (`CWaterCannons::UpdateOne`, `G_WATER_CANNON`) бьёт и из копии машины, тушит огонь и сбивает с ног там.
-Пулемёт полицейского вертолёта стрелял только в игре вертолёта (`CHeli::ProcessControl`, вызов
-`FireOneInstantHitRound` в 0x6C7773), и другой игрок не видел ни трассеров, ни попаданий. Теперь каждая очередь идёт
-по сети (`G_HELI_SHOT`: точка пулемёта относительно вертолёта и цель) и повторяется из копии со вспышкой, трассером
-и звуком. Выстрел не записан ни на кого, поэтому у каждой игры он ранит только её собственное: копии людей и машин
-другой игры такие попадания пропускают, и каждая пуля попадает один раз.
-
-**Поезда** (`Trains.cpp`). Поезд принадлежит игре, где появился (случайный или миссионный), и она шлёт его вид,
-путь, направление, расстояние по рельсам и скорость. Другая игра держит такой же поезд миссии
-(`CTrain::CreateMissionTrain`) и каждый кадр ставит ему расстояние и скорость. Вид поезда в нём не хранится,
-поэтому мод запоминает его при создании: `CreateMissionTrain` делает и случайные поезда. Вагоны копий заперты,
-а кабина открыта, пока поездом не управляет игрок и у хоста не идёт сюжетная миссия. Раньше были заперты все копии,
-и напарник не мог сесть в поезд вовсе (29.10). Севший в кабину копии ведёт её в своей игре своими кнопками, а игра
-владельца ставит своему поезду его расстояние по рельсам и скорость (`TRAIN_DRIVE`) и держит поезд как миссионный,
-чтобы `CTrain::DoTrainGenerationAndRemoval` не убрала его вдали от своей камеры. Случайные
-поезда рядом с хостом даёт игра хоста: игра напарника свои делает, только пока он дальше 600 м от хоста
-(`CTrain::DisableRandomTrains`).
-Копия поезда встаёт на ближайший узел того же пути, что у владельца. `CreateMissionTrain` без узла брала
-ближайший узел всех четырёх путей, а путь 3 идёт в нескольких метрах от главной линии через Лос-Сантос: копия
-уходила на другой путь, где то же расстояние по рельсам — другое место («Catalyst»: напарник видел только
-брезент). Модели вагонов загружаются в фоне, и копия появляется с одним из следующих состояний. Раньше шесть
-блокирующих загрузок подряд (с полной очисткой очереди стриминга) давали фриз каждый раз, когда поезд подходил
-ближе 300 м.
-
-Скрип тормозов поезда игра делает только для своего игрока за рулём: `CAEVehicleAudioEntity::ProcessVehicle` вызывает
-`ProcessPlayerTrainBrakes` (по тормозу пада 0) лишь при `m_IsPlayerDriver`, а для чужого поезда только
-`ProcessDummyTrainEngine`. Напарник не слышал, как тормозит хост (30.10). Теперь для головного вагона, которым правит
-копия другого игрока, после `ProcessDummyTrainEngine` игра считает тот же скрип своей формулой с кнопками того игрока:
-пад и статус поезда подменяются на один вызов. Звуки лежат в слоте двигателя игрока (40), поэтому, пока свой игрок сам
-за рулём, этого не делается.
-
-**Территории банд** (`Zones.cpp`). Карта территорий следует за хостом. Когда в его игре у территории меняются
-банды, цвет или режим на радаре (мигание во время нападения), её `CZoneInfo` меняется и у напарника, кроме
-счётчика наркоторговцев, который каждая игра крутит сама. Рядом с хостом войны ведёт игра хоста, и убийства
-напарника идут в её провокацию (см. «Урон»). Защиты (`StartDefensiveGangWar`) напарник у себя не начинает. Своё
-нападение он начинает сам (`G_TURF_WAR`), если хост дальше 100 м, у хоста нет войны и миссии, а сюжет войны
-разрешает: перехват `CGangWars::StartOffensiveGangWar` в игре напарника спрашивает об этом то, что хост сообщает в
-`G_GANG_WAR` (флаги «войны разрешены», «сюжет держит войны», «идёт миссия»). Хост в это время обнуляет у себя
-провокацию, чтобы вторая война не началась у него. Войну ведёт игра напарника: волны, победа, захват района. Хост
-получает начало, район во время боя (байты `CZoneInfo`, которые проверяются: менять можно только банды и цвет этого
-района) и конец, а в чат пишет, кто начал войну и отбил ли район. Если хост начинает миссию, война напарника
-заканчивается (`CGangWars::EndGangWar`), а если напарник выходит, хост возвращает району цвета банд
-(`FillZonesWithGangColours`). Напарник при входе в мир хоста сбрасывает унаследованные из сохранения состояния
-войны.
-
-**Чит-коды** (`Cheats.cpp`). Читы, которые меняют общий мир (погода, скорость игры, трафик, прохожие, темы,
-поведение машин), действуют в обеих играх. Игра, где чит ввели, находит его так же, как `CCheat::AddToCheatString`:
-хеш набранных клавиш, от самой длинной цепочки новых к короткой (`CKeyGen::GetKey(str, len)`), в момент, когда
-она считает совпавший чит (вызов `CStats::IncrementStat` внутри этой функции), и шлёт номер и новое состояние. Начало самой функции не перехватывается: GInput при запуске
-читает из её первой команды адрес флага катсцены и падал, получив вместо него прыжок перехвата. Другая игра применяет его (`CCheat::ApplyCheat`), а переключатель —
-только если её состояние отличается. Личные читы (оружие, деньги, здоровье, розыск, машины, тело, навыки)
-остаются там, где их ввели. Темы (пляжная вечеринка, ниндзя, костюм «Love Conquers All», «Funhouse», деревня)
-переодевают того, кто их применил, а ниндзя ещё даёт катану. У второго игрока после темы возвращаются его
-одежда (`CPedClothesDesc` и `CClothes::RebuildPlayer`) и его оружие ближнего боя.
-
-**Предметы** (`Props.cpp`). Игра, где у человека предмет в руке (`CTaskSimpleHoldEntity`: поднос из закусочной,
-банка из автомата, сигарета) или прикреплён к нему (`CPhysical::m_pAttachedTo`: раскрытый парашют), сообщает
-модель, кость и смещение, видимость, размер и анимацию самого предмета. Другая игра создаёт копию без
-столкновений и каждый кадр ставит её на ту же кость своей копии этого человека. Отпущенный предмет его игра ведёт
-ещё 30 секунд. Так же идут барьеры и горящие остовы машин полицейского заграждения
-(`CRoadBlocks::CreateRoadBlockBetween2Points`): их создаёт только игра игрока с розыском, и другой видел полицию
-за пустой дорогой. У этих объектов область 13 («видны везде»), и расстояние до другого игрока считается как на
-улице. Копии создаются с типом `OBJECT_MISSION2`, как объекты внешних скриптов: для игры это объект миссии, но
-`CPools::SaveObjectPool` сохраняет только `OBJECT_MISSION`, и копии больше не попадают в сохранения хоста.
-
-**Речь людей** (`PedSpeech.cpp`). Игра, чей человек заговорил (`CAEPedSpeechAudioEntity::LoadAndPlaySpeech`),
-шлёт банк и номер звука, а другая проигрывает ту же реплику своей копии этого человека в одном из своих слотов
-речи. Сами копии своих реплик не говорят. Банк, которого у этой игры нет (другие звуковые файлы), не играется.
-Громкоговоритель полицейского вертолёта или катера (`CAEPedlessSpeechAudioEntity`) говорит только в полицейской
-логике своей игры, а копия её не выполняет: другой игрок не слышал пилота (29.10). Теперь игра машины шлёт контекст
-реплики, а другая говорит реплику того же контекста от своей копии (`CAudioEngine::SayPedless`).
-
-Пока напарник не в мире хоста (хост проходит пролог, мир ещё не загружен), подборы, граффити, снимки, читы,
-покупки домов, территории и двери между их играми не ходят: это события разных миров. Дверь интерьера, которую
-миссия хоста закрыла, пока напарник внутри (притон в «Cleaning the Hood»), у напарника остаётся открытой изнутри:
-выходы области, в которой он стоит, всегда открыты.
-
-Огонь, предметы и объекты миссии игрока, игра которого началась заново или который вышел, другая игра убирает.
-Копию огня она узнаёт по слоту, цели и месту: погасшее пламя отдаёт слот следующему огню (коктейль Молотова
-зажигает несколько), и копией считался чужой огонь.
-
-Поезда в синхронизацию машин не попадают: игрок, садившийся в кабину, объявлял поезд машиной, и другая игра
-создавала вагон вне рельсов. Расстояние по рельсам и скорость из сети должны быть конечными:
-`CTrain::ProcessControl` возвращает дистанцию на трассу по одной длине за раз и на огромном числе зависал. Свои
-случайные поезда напарник создаёт дальше 220 м от хоста (на этом расстоянии игра хоста свои удаляет), а поезд
-игра шлёт, только когда другой игрок ближе 300 м.
-
-Предметы побочного занятия (шары бильярда, мишени тира, камни карьера) есть только в игре того, кто им занят:
-их создаёт его скрипт миссии, и другой игрок видел игру в бильярд на пустом столе. Теперь предметы из списка
-миссии этой игры (`CTheScripts::MissionCleanUp`) уходят другой игре так же, как брошенные из рук: без
-столкновений и там, где лежит оригинал (`Props`, вид «лежит»), пока другой игрок ближе 150 м. Предметы сюжетной
-миссии хоста по-прежнему идут через `Objects.cpp`. Мишени совместного захода в тир у второго игрока твёрдые (`RangeCopy`):
-его выстрелы по ним уходят игре владельца (`PropCopyHit`, см. «Совместные подработки и гонки»).
-
-Штангу и гантели спортзала каждая игра создаёт сама на своей скамье и стойке, когда её игрок подходит к ним: это
-мозги объектов `GYMBENC` и `GYMDUMB` из `script.img` (`CREATE_OBJECT`, `ATTACH_OBJECT_TO_OBJECT`, на подходе
-`TASK_PICK_UP_OBJECT`). Копия штанги или гантелей другого игрока в руках его копии и свои на стойке были видны
-вдвоём: две штанги у скамьи, четыре гантели (08.11). Теперь свой снаряд той же модели (`KMB_BPRESS`, `KMB_DUMBBELL_R`,
-`KMB_DUMBBELL_L`), который лежит на стойке ближе 3 м от видимой копии, скрыт (`HideOwnWeights`). Он снова виден,
-когда копии рядом нет или когда наш игрок берёт его сам: скрипт сначала снимает его со стойки. Копию, которую владелец
-положил обратно на стойку (отпущенный предмет его игра ведёт ещё 30 с), игра не показывает, если рядом свой снаряд
-той же модели. Если двое занимаются на одной скамье, каждый в своей игре, копия ложится на ту же скамью вместе со
-штангой: это не исправлено.
-
-## Своя прокачка
-
-У каждого игрока на сервере свой профиль в каждой игре хоста (`profiles/<игра>/<ник>.bin`): мышцы, жир, выносливость, объём лёгких,
-навыки оружия и вождения, стиль боя, деньги, одежда, причёска, тату, максимальное здоровье и броня, а ещё награды
-подработок: бег без усталости, быстрая перезарядка, огнеупорность, выход из тюрьмы и больницы без потерь. Мир
-хоста приносит награды хоста, а профиль возвращает напарнику его собственные.
-
-Хост качается в своём сохранении. Напарник после загрузки мира получает поверх него свой профиль. Изменения
-уходят на сервер каждые 30 секунд. Когда хост сохраняет игру через меню сохранения (`C_PcSave::SaveSlot`),
-напарник сразу сохраняет свой профиль и запоминает своё оружие (`G_HOST_SAVED`), а сервер получает свежий мир.
-Профиль сервер записывает со сбросом на диск (на случай отключения питания), и раньше сетевой поток ждал диска:
-пересылка всех состояний вставала каждый раз, когда напарник присылал профиль (раз в 30 секунд), и игроки видели
-рывки. Теперь профили пишутся в отдельном потоке.
-
-Профиль это последнее состояние напарника, а не сохранения: он умер после сохранения хоста, хост загрузился, и напарник
-оставался с пустыми руками, а хост с оружием (11c). Решение пользователя 04.11: откатывается только оружие. На
-`G_HOST_SAVED` напарник пишет своё оружие в `coop_saved_guns.bin` в своей папке пользователя: файл нужен, потому что загрузка
-бывает на другой день. Хост при каждом запуске мира берёт новый номер загрузки и шлёт его (`G_HOST_LOADED`, снова каждые
-15 секунд). Если номер другой, чем в файле, а игра та же, напарник получает оружие из файла, когда он пеший, жив и миссии нет
-(`BackToWeaponsOfSave`). Переподключение к той же загрузке ничего не меняет. Мёртвый напарник файл не переписывает. Если
-файла нет или он от другой игры (хост сохранился до прихода напарника), в файл идёт оружие, с которым напарник пришёл: иначе
-смерть и загрузка хоста не возвращали ничего.
-
-Профили напарников у каждой игры хоста свои. Раньше новая игра переносила все профили в `profiles\old\<дата>\`,
-и напарник, который вернулся с хостом к старому сохранению, начинал с нуля (01.11). Игру хоста знает его клиент:
-слот загруженного сохранения берётся из имени файла (`ms_LoadFileName`), а какая игра лежит в каком слоте, записано в
-`coop_games.ini` рядом с сохранениями. Новая игра (её пролог идёт с первых секунд) получает новый случайный номер, и
-при сохранении через меню номер записывается к слоту. Хост сообщает номер серверу (`C_GAME_ID`, протокол 34), и
-сервер шлёт подключённым напарникам профиль этой игры. Сохранения, сделанные до 0.3.3 или без мода, считаются игрой
-0, у неё прежнее место: `profiles\<ник>.bin`. Профиль приходит с номером игры, напарник возвращает его с каждым
-сохранением профиля, и сервер не записывает профиль, отправленный ещё для прошлой игры хоста.
-
-Гардероб идёт по списку купленного (`CShopping::ms_bHasBought`): `wardrobe.scm` перебирает товар магазинов через
-`HAS_PLAYER_BOUGHT_ITEM`, `clothes.scm` отмечает то, что уже куплено. Других настоящих читателей у этой команды в скриптах нет. Список лежит
-в сохранении (блок 22), поэтому каждая загрузка мира хоста ставила напарнику список хоста: в гардеробе были вещи хоста, а своих не было
-(04.11). Профиль версии 6 хранит список ключами, потому что `shopping.dat` у игр может быть разным, и после загрузки мира заменяет
-им список мира. Вещи хоста к напарнику не попадают. Если списка в профиле нет (первый приход, профиль старше), напарник приносит список
-своей игры так же, как своего CJ: из памяти, из `coop_own_bought.bin` рядом с сохранениями, из самого нового сохранения. Блок в файле
-определяется по устройству (модификаторы цен, число товаров, байт на товар, следом метка блока), другое число товаров значит другой
-`shopping.dat`, тогда список не читается. Не нашлось своей игры, остаётся список мира. То, что на напарнике надето, в этом случае всегда
-отмечается купленным: иначе гардероб не вернёт его к этим вещам, а купленное в мире хоста раньше нигде не записано. В новой игре хоста
-ничего не приносится, список начинается со стартовой одежды.
-
-Новая игра хоста начинает профили напарников заново: подключённые напарники получают пустой профиль и применяют его
-уже в мире новой игры. Напарники, которые в это время играли в старом мире, тоже ждут конца пролога и переходят
-в новую игру. В новой игре хоста (`IsFollower`, или пустой профиль пришёл после настоящего) свой CJ из одиночной игры
-на напарника не надевается: он начинает в одежде и теле, с которыми начинается игра. Раньше пустой профиль считался
-первым приходом, и напарник приносил в новую игру старую одежду, жир и мышцы (31.10).
-
-Игра принимает скачок статистики после профиля за рост уважения и показывает подсказку «Respect - Upgraded»,
-даже поверх катсцены. Эту подсказку мод убирает в первые секунды после профиля (`Progress.cpp`, GXT-ключ
-с хешем 3B797709).
-
-Внешность (одежда, жир, мышцы) рассылается другим игрокам, и у них персонаж перестраивается
-(`CClothes::RebuildPlayer`). На время этого вызова в фокусе копия: Cheat Menu подменяет вызов `ConstructPedModel` внутри него
-(0x5A834D) своим, который строит одежду `FindPlayerPed()`, и каждый видел другого в своей одежде, а скины показывались (#106,
-разобрано 04.11). Каждый новый пед удалённого игрока (после загрузки мира, смерти) перестраивается
-заново. Пул часто отдаёт новому педу адрес старого, поэтому применённая внешность помнит хендл педа, а не адрес.
-Раньше после перезагрузки мира хоста новый пед с тем же адресом оставался с телом, которое было собрано последним.
-
-У каждого игрока свой облик. Мир хоста приходит к напарнику вместе с CJ хоста, поэтому напарник надевает своего
-CJ. Его берут из своей игры, в которой напарник был до подключения (игра, начатая уже напарником, то есть мир хоста,
-своей не считается и после выхода из сессии). Если напарник подключился из меню, CJ берётся из самого нового его
-сохранения: блок 2, пед-игрок, `CPlayerPedDataSaveStructure` размером 0x84 с одеждой со смещения 8. При первом
-визите вместе с одеждой берутся жир и мышцы, а потом тело идёт от статистики профиля. Профиль версии 3 помнит,
-свой ли в нём облик. Чужой облик (из профиля старой версии или CJ хоста, когда своего CJ нет) один раз уступает
-своему, если напарник за это время сам не переоделся. Профиль привязан к нику, и с новым ником деньги и навыки
-начинаются заново.
-
-Прогресс побочных занятий игра хранит в глобальных переменных main.scm, то есть в мире. Мир хоста при каждой
-загрузке приносил свои значения: уроки, медали и уровни напарника начинались заново, а уникальные трюки платили
-снова. Профиль версии 5 хранит эти переменные по списку (`kSideGlobals`: автошкола, школы лодок и мотоциклов,
-дальнобойщик, карьер, такси, курьер, служебные работы, сутенёр, товарный поезд, спортзал, кражи) и
-возвращает их после каждой загрузки. Профиль приходит с сервера, поэтому записываются только переменные из
-списка. Лётную школу профиль возвращает, только если в мире хоста уже пройдена «Learning to Fly» (`$87`): до
-этого школа часть сюжета.
-
-Кроме переменных профиль хранит то, что лежит в самом движке. Это флаги уникальных трюков (`CStuntJump` +0x40
-«сделан» и +0x41 «найден»), генераторы машин-наград школ и карьера и пикапы дохода от бизнеса. Трюк узнаётся по
-своим зонам старта и финиша: после перезагрузки мира в той же игре пул раздаёт трюкам другие ячейки. Генератор
-включается, если напарник заработал награду, а в мире хоста он выключен. Пикап дохода создаётся там, где его нет
-(`CREATE_PROTECTION_PICKUP`, как у скрипта работы). Как и другие пикапы скриптов напарника, он попадает и в мир
-хоста, поэтому доход копится между перезагрузками, а забрать его может любой из двоих, как и доход хоста.
-
-Сюжетные переменные, номера объектов, флаги «работа идёт» и подруги остаются от мира хоста. Скрипт подруг,
-увидев свидание, которого нет в мире, после каждой загрузки заново двигал бы статистику свиданий.
-
-Список экспорта в порту Easter Basin общий (`features/story/exports`). Скрипт `IMPEXPM` держит его в глобальных переменных: номер
-списка (`$4196`), что сдано (`$4240`), таблицу импорта (`$4304`), конец (`$4736`). Раньше у каждого был свой список в профиле, и
-машину вычёркивала и оплачивала только игра того, кто её сдал. Вторая игра делала то же, только если её игрок стоял в маркере:
-её скрипт принимал копию машины (`GET_RANDOM_CAR_IN_SPHERE_NO_SAVE`) за свою, так рядом платили обоим, а издалека одному (04.11).
-Теперь список принадлежит миру хоста и в профиль не входит. Счётчик сданных машин (стат 213) тоже мировой: от него зависят
-премии за 10, 20 и 30 машин. Игра, где поднялся флаг сдачи, шлёт `G_EXPORT`: номер машины, сумму из `29@` и весь список. Другая
-игра вычёркивает машину, платит ту же сумму, выключает генератор машины, а если её игрок у доски, переводит скрипт к его
-настройке доски, как после сдачи (адрес `0x1D8D5`, только из простоя цикла `0x1DCAF`). Заполненный список она сама переводит на
-следующий. Хост, кроме того, шлёт список при изменении и каждые 15 секунд: мир напарника бывает старше игры хоста. Если игрок
-сейчас сам сдаёт машину (`16@` больше 0), чужое сообщение ждёт конца сдачи, но не дольше 15 секунд. Машина, уже вычеркнутая
-здесь, повторно не считается и не оплачивается, поэтому двое у маркера получают деньги один раз. Прогресс игры
-(`PLAYER_MADE_PROGRESS` у ячеек 16, 28, 40 импорта) идёт только в мире хоста.
-
-Подработки и испытания засчитываются обоим (`G_SIDE_DONE`). Когда у одного игрока встаёт флаг завершения
-(`kDoneFlags`: такси, скорая, пожарные, полиция, курьеры, сутенёр, грузовой поезд, дальнобойщик, карьер, кражи,
-школы, «Blood Bowl» и другие), второй получает тот же флаг и ту же награду, что дала бы ему игра: доход, прибавку к
-здоровью или броне, бег без усталости, огнеупорность, машину или пикап имущества. Флаги мира (общие для двоих) ставит
-только хост. При подключении игроки обмениваются флагами из профилей, так что пройденное раньше тоже засчитывается.
-
-Такси считает поездки дважды: в глобальной `$720` (переменная 180) и в статистике 150, а нитро даёт, когда в конце
-поездки `$720` больше 49. Статистика у обоих общая, а `$720` у каждой игры своя: вдвоём набрали 50 поездок, а нитро
-никто не получил (02.11). Теперь раз в секунду `$720` не ниже статистики 150. Нитро приходит на
-следующей поездке, а флаг 1491 даёт его и второму игроку. Так же кражи: бег без усталости даётся за 10 000 украденного
-в `$7160` (переменная 1790), а ту же сумму копит общая статистика 41.
-
-Грузовики и карьер считают пройденные задания в `$32636` (8159) и `$32684` (8171). По этому счётчику выбирается
-следующее задание, а награда даётся за все (8 и 7). Теперь задания обоих игроков считаются вместе (выбор игроков
-02.11, `kSharedCounters`): прибавку своего счётчика игра отправляет в `G_SIDE_DONE`, а другая игра прибавляет её к
-своему. Кто первым дошёл до конца, получает награду, а флаг подработки даёт её второму. Каждый при этом пропускает
-задания, сделанные другим.
-
-Статистика и важные навыки общие (`G_STAT_SYNC`, `kSharedStats`). У каждой статистики своё правило: сумма (пройденные
-километры, убийства, потраченные деньги), максимум (навыки вождения машины, мотоцикла, велосипеда и самолёта, азарт,
-уровни подработок, рекорды), минимум (лучшее время) или значение хоста. Раз в секунду игра сравнивает статистику с прошлым
-снимком и шлёт изменения, а после загрузки мира, профиля или подключения игрока снимок берётся заново и стороны
-обмениваются всей статистикой. Сумма прибавляет только разницу, поэтому одно и то же не считается дважды. Вкладка
-статистики в меню у обоих показывает одно и то же. Тело (жир, мышцы, выносливость) и навыки оружия у
-каждого свои и живут в профиле.
-
-## Язык
-
-Окно F9, чат, подсказки и сообщения мода есть на русском и английском. Язык хранится в `coop.ini`
-(`[player] language`), переключается в окне F9 и сразу сохраняется. Новая установка берёт язык Windows, а
-конфиги без этого ключа, сделанные прежними версиями, остаются русскими.
-
-Каждый текст клиента записан на обоих языках там, где он используется: `TR("Подключиться", "Join a game")`
-(`shared/config/Config.h`). `Format` объявлен как `printf`, поэтому компилятор сверяет с аргументами обе строки
-пары. `tools/i18n_check.py` в CI ищет русский текст клиента без английского, кроме журнала и комментариев
-`coop.ini`. Сервер не знает языков игроков: свои сообщения в чате, причины отказа и приветствие он отправляет
-сразу на двух языках, а клиент показывает нужный. Загрузчик ASI берёт язык Windows.
-
-## Чат и голос
-
-Чат открывается клавишей `T`. Символ этого нажатия, который Windows уже поставила в очередь («t» или «е»
-в русской раскладке), при открытии чата из очереди убирается. Если `T` нажата сразу после других букв и вместе с
-ними продолжает чит-код (последние нажатия игра хранит в `CCheat::m_CheatString`), она уходит игре, а чат не
-открывается: иначе не набирались коды вроде `NINJATOWN` или `AIWPRTON`. Список таких кодов (64, с буквой T не
-первой) сверен с таблицей хешей `CCheat::m_aCheatHashKeys`. Буква перед `T` должна быть нажата не раньше чем за
-1,5 секунды, а если она одна (`ST...`), то за 0,4 секунды: S с T подряд бывает и отходом назад перед чатом. Коды,
-которые начинаются с `T`, от открытия чата не отличить, для них клавишу чата можно сменить в `coop.ini`. `Enter` отправляет сообщение, `Esc` закрывает чат, PgUp и PgDn листают историю.
-Команды: `/help`, `/players`, `/pm`, `/me`, `/tp` (к напарнику) и `/tphere` (напарника к себе). Хосту доступны ещё
-`/kick` и `/say`. `/tp` и `/tphere` — запросы (`Teleport.cpp`, `G_TP_ASK`, 29.10): второй игрок 20 секунд видит
-окно с Y и N, и только после его согласия игра спросившего делает то, что команда раньше делала сразу, с теми же
-правилами для зданий (`Players::TeleportAllowed`). Хост может запретить напарникам обе команды галочкой при
-создании игры (`partner_teleport` в `coop.ini` и `server.ini`, приходит в `Welcome`, протокол 29).
-
-Окно F2 (`pages/players-menu`) показывает игроков с ролью, деньгами и пингом и забирает мышь и клавиатуру, как F9.
-Деньги других игроков сообщают их игры (`Money.cpp`, `G_MONEY`): при каждом изменении, не чаще двух раз в секунду,
-и раз в 10 секунд. Кнопка со знаком $ из шрифта денег HUD (pricedown) открывает строку перевода. Деньги уходят у
-дарителя сразу и добавляются у получателя, когда его мир загружен, а игра получателя отвечает, что они пришли.
-Если получатель вышел раньше ответа, деньги возвращаются дарителю. Профиль напарника сохраняется сразу после
-перевода. Раньше по F2 был только список поверх игры. Чат рисуется своим рендером на D3D9 шрифтом Windows, поэтому кириллица в нём полная. Ввод
-перехватывается через подменённую оконную процедуру.
-
-Рядом с кнопкой $ кнопка с пистолетом передаёт оружие (0.3.3, `features/weapon-gift`, `G_WEAPON_GIFT`). В строке
-передачи выбирается своё оружие и число патронов, а оружие ближнего боя, цветы, очки и парашют идут целиком. Оружие
-уходит у дарителя сразу и даётся получателю обычной командой (`GIVE_WEAPON_TO_CHAR`: патроны того же оружия
-складываются). В одном слоте одно оружие: если на этом месте у получателя другое, подарок возвращается дарителю, а
-получатель видит в чате, что место занято. Подарок, на который не пришёл ответ до выхода получателя, тоже
-возвращается. Детонатор не передаётся: он идёт с уже брошенной взрывчаткой.
-
-Окно F9 и другие окна мода с курсором забирают мышь у игры: пока они открыты, `CPad::UpdateMouse` не отдаёт игре
-движение. В полноэкранной игре мышь у неё в монопольном режиме DirectInput, и курсор Windows стоит на месте
-(issue #66: курсор замирал на окне с кодом приглашения). Тогда курсор мода двигается по тому же движению мыши,
-которое прочитала игра, а кнопка и колесо берутся оттуда же. Раньше мод переводил мышь игры в общий режим на время
-окна и обратно, но после закрытия окна она оставалась незахваченной, и камера стояла до Alt+Tab, в том числе после
-входа к хосту.
-
-Кнопки окон срабатывают на нажатии, и окно, закрытое щелчком, отдавало мышь игре с ещё зажатой кнопкой. Игра
-считала её новым нажатием: «Включить» в окне U давал сначала удар, потом анимацию (03.11). Теперь после окна
-кнопки мыши доходят до игры только после того, как их отпустили (`HookUpdateMouse` в `Patches.cpp`).
-
-Голос передаётся, пока зажата `B` (клавишу можно поменять). Звук с микрофона захватывается через WinMM
-(16 кГц, моно), сжимается кодеком IMA ADPCM (4 бита на отсчёт, 64 кбит/с) и проходит через буфер джиттера.
-Устройства WinMM опрашивает отдельный поток мода раз в 5 мс, а игровой поток только кодирует, отправляет и ставит
-в очередь то, что пришло. Вызов WinMM иногда держит секунду (`waveInAddBuffer`, даже когда никто не говорит), и при
-опросе в игровом потоке на столько же вставала вся игра: в логе хоста это было пять раз за восемь минут, и это и
-есть лаги в 1–2 секунды, на которые жаловались игроки.
-Громкость может зависеть от расстояния. Пока игрок говорит, у него над головой и в списке игроков горит значок,
-а слева на экране написано, кого сейчас слышно. Пока зажата клавиша, там же горит «● Микрофон».
-Значок — картинка микрофона из ресурса `MICROPHONE`, которую рендерер рисует как символ шрифта (U+E000). Все три
-места берут её через `ui::TalkingMark()`: раньше в части из них оставалось «((.))» (27.10). Если
-картинку прочитать не удалось, вместо неё «((•))», а в журнале строка об этом.
-
-Клавиши мода (чат, сесть пассажиром, список игроков, микрофон) и режим голоса меняются в окне F9, кнопка «Клавиши»
-(0.3.3). Клавишу задаёт следующее нажатие, Esc отменяет выбор. Если клавиша уже занята другим действием мода, действия
-меняются клавишами. Голос: пока клавиша зажата, нажатие включает и выключает (`[voice] toggle`), всегда включён или
-выключен. Всё сразу записывается в `coop.ini`, а модуль голоса подхватывает включение и выключение без
-переподключения.
-
-Если микрофон не открылся, мод пишет об этом в чат и пробует снова, пока зажата клавиша. Раз в 5 секунд
-в журнал пишется, сколько кадров отправлено и какой у них уровень. Если Windows не даёт доступа к микрофону,
-он записывает чистую тишину, и об этом тоже приходит сообщение в чат. Тестовый тон (`[debug] voice_test_tone`)
-микрофона не требует: кадры с ним отправляются по таймеру, так что сетевой путь голоса проверяется на одной
-машине.
-
-## Вылеты
-
-Машину, которую игра удалила, а в её ячейку пула в том же кадре поставила новую той же модели, проверка живой копии
-пропускала: указатель вёл к живой машине той же модели. Но сохранённый номер (`handle`) уже ничего не находил, и
-`GET_CURRENT_VEHICLE_PAINTJOB` из `ApplyLook` отдавал игре пустую машину. Игра хоста падала в
-`CVehicle::GetRemapIndex` (0x6D0B73) в «Small Town Bank» (#93, 30.10). Теперь машина, номер которой больше не находит
-её саму, считается пропавшей (`Vehicles::OnPreProcess`).
-
-Копию другого игрока мод удаляет сам (`Players::DestroyRemote`), а то, что она держала, уходило из мира вместе с её
-задачей «держать предмет». У хоста копия напарника держала кий соперника из его `POOL2`. Игра напарника упала, его
-копию убрали, и `POOL2` хоста упал через 6 секунд на `GET_OBJECT_COORDINATES` этого кия (0x47D582, обращение по
-пустому указателю +0x14, 31.10). Теперь перед удалением копия отпускает предмет
-(`CPed::DropEntityThatThisPedIsHolding` без удаления), и он остаётся у сценария, который его создал.
-
-При вылете обработчик (`CrashHandler.cpp`) пишет в `coop\crash.log` исключение, регистры и адреса возврата со
-стека. Если исключение не обработал никто, дальше шёл отчёт об ошибках Windows, а его окно у полноэкранной игры
-может так и не появиться: игры уже не было, а процесс оставался, и запущенный им сервер держал порт. Следующая
-игра подключалась к этому старому серверу и получала «неверный пароль». Теперь, записав отчёт, процесс
-завершается сам, а игра, которая создаёт сервер, сначала останавливает оставшийся `coop-server.exe` из своей
-папки.
-
-Часть вылетов — ошибки самой игры, которые с модом случаются чаще или зависят от сборки. Мод закрывает их там,
-где они возникают (`Patches.cpp`, раздел защит движка):
-- Миссия может создать машину модели, которую запросила давно, не проверив, что модель ещё в памяти: погоня
-  в «OG Loc» запрашивает Manana, пока грузит записи пути, потом отпускает и по таймеру создаёт три. Модель не
-  в памяти роняла `CVehicleModelInfo::CreateInstance` (0x4C9691) у хоста. Перехват `CCarCtrl::CreateCarForScript`
-  сначала её загружает.
-- Тени высокого качества у объектов карты: `CStencilShadows::RenderForObject` проверяет только число
-  треугольников сетки тени, а `CCollisionData::RemoveCollisionVolumes` (файл коллизии выгружен) освобождает
-  сетку и оставляет числа. Объект, который ещё стоял в списке теней, ронял игру (0x40F64C) сразу после взрывов
-  ракет. Тень без сетки пропускается.
-- Звуковой поток (`CAEStreamThread::Service`) начинает дорожку с позиции по модулю её длины (0x4F1464).
-  Дорожка, декодер которой открылся, но длины не сообщил (битый или пустой звуковой файл сборки), делила на
-  ноль у обоих игроков сразу (парикмахерская в «Райдере»). Теперь такая дорожка начинается с начала: деление
-  заменено переходом на короткую вставку на ассемблере, которая пропускает его при нулевой длине.
-
-Оружие, телефон и реактивный ранец в руках копии другого игрока, а также блок его анимаций простоя мод
-запрашивает у стриминга и ставит через кадр-другой, когда модель уже в памяти. Раньше они грузились сразу
-(`CStreaming::LoadAllRequestedModels`), а эта функция грузит всю очередь стриминга, и каждая смена оружия
-напарника могла остановить игру на секунду и больше (issue #43).
-
-Модели, детали тюнинга, покраски, оружие, звуки речи и имена особых персонажей, пришедшие по сети, мод
-проверяет, прежде чем отдать загрузчику. У игроков с разными модами номера моделей одного могло не быть у
-другого, и загрузчик падал (`CStreaming::RequestModel` без проверки, `CPickup::GiveUsAPickUpObject`,
-`CStoredCar::RestoreCar`). Машину из гаража хоста, которую эта игра собрать не может, она возвращает хосту
-нетронутой. Перед созданием копии проверяется запас в пулах игры (12 пешеходов, 10 машин, 20 объектов): на
-заполненном пуле `CREATE_CHAR` падает, в том числе у самой миссии хоста.
-
-Лимит-аджастер (fastman92) переносит таблицу состояний моделей (`CStreaming::ms_aInfoForModel`) и исправляет места,
-где её читает игра. Мод берёт адрес оттуда же, из `HAS_MODEL_LOADED` (0x47EFFF, `ModelLoadState` в `Game.cpp`): по
-старому месту ни одна модель не считалась загруженной, и копий людей, машин и предметов другой игры не было (#82).
-Особых персонажей (`SpecialModelFor` в `Peds.cpp`) это исправление обошло: их слоты (290-299) мод ещё читал по
-старому месту. Слот всегда выглядел пустым, персонаж запрашивался заново каждые 100 мс, а копии Биг Смоука, Райдера и
-других особых персонажей у напарника не появлялись (#105, в логе строка «The streaming table is at ... a limit
-adjuster moved it»). Теперь и слоты читаются через `ModelLoadState`.
-
-Указатель на копию другого игрока мод регистрирует в движке (`CEntity::RegisterReference`). Машину, которую
-удаляет миссия, игра удаляет вместе с людьми в ней, и обработчики сети следующего кадра трогали освобождённую
-копию. Перед сменой модели копия выходит из машины и сбрасывает задачи: задачи держали анимации старой модели.
-Перед удалением машины все, кто в неё садится, останавливаются (тот же вылет MTA закрывает в 0x646026).
-
-Отчёты о первых исключениях обработчик пишет только для кода игры и мода, отдельно от необработанных: исключения
-драйверов и плагинов, которые те обрабатывают сами, съедали лимит отчётов. Плагины, загруженные после мода
-(CrashInfo.SA, modloader, SilentPatch), ставят свой фильтр поверх. Мод на первом кадре возвращает свой наверх и
-вызывает их после себя. Детектор зависаний работает у всех, а не только с `verbose_log` (29.10): отчёты о
-зависании на чёрном экране (#86, #87) приходили без места, где стояла игра. Он копирует стек остановленного потока
-и пишет файл уже после того, как
-поток снова пошёл: запись при остановленном потоке, который держал блокировку кучи или загрузчика, зависала
-навсегда. К стеку он добавляет оба канала загрузки `CStreaming` и модель, которую каждый читает: чтение,
-которое не удаётся, игра повторяет без конца (`CStreaming::RetryLoadFile`), и снаружи это выглядит как зависание.
-Так нашлась модель 25575, блок анимаций PED: он лежит не в `gta3.img`, а в `anim\ped.ifp`, и его запрос
-(`REQUEST_ANIMATION "PED"` в тестовом боте) читал архив с мусорной позиции. Падение после выхода из главного цикла (`RsGlobal.quit`) мод вылетом не считает: связка MixSets
-(SkipShutdown) и GPS-мода удаляла CJ уже после выгрузки текстур, и в отчёте одного игрока было десять таких
-«вылетов». Лог прошлого запуска остаётся рядом, в `coop.old.log`. Свёрнутая игра стоит в цикле `WinMain` и кадров не
-рисует, так что детектор считает её зависшей: такую запись он помечает «its window minimized» (`IsIconic` окна из
-`RsGlobal.ps`). Без пометки в #97 свёрнутая игра выглядела как зависание.
-
-Команды `LOCATE_CHAR_..._2D/3D` (0x00EC-0x00F1, 0x00FE-0x0103) игра выполняет в `CScriptThread::actorNearPoint`
-(0x486D80) и не проверяет, есть ли такой персонаж: флаги несуществующего она читала по нулевому указателю (0x486DDF).
-У игрока из #97 скрипт его сохранения держал номер персонажа, которого нет, и игра падала, едва загрузив сохранение
-для создания игры (`DoGameSpecificStuffAfterSucessLoad` → `CTheScripts::Process`). Мод перед такой командой
-заглядывает в её первый параметр (`CRunningScript::CollectParameters` с возвратом указателя команды). Если персонажа
-нет, он забирает все параметры, как их берёт сама команда, и отвечает «не там» (`UpdateCompareFlag`). Первые пять
-таких случаев пишутся в лог с именем скрипта.
-
-`GET_CHAR_IN_CAR_PASSENGER_SEAT` (0x0432) игра тоже не проверяет: обработчик (0x489EBC) берёт номер того, кто сидит
-на месте, и на пустом месте `CPool<CPed>::GetRef` читает память далеко ниже пула. У двоих игроков из #99 игра падала
-семь раз, когда они садились в одну машину: скрипт их сборки (в `main.scm` на старте Бэдлендса таких нет) спрашивал,
-кто сидит на пустом месте. Мод так же заглядывает в параметры. Если машины нет или место пустое, команда
-отвечает -1, как `GET_DRIVER_OF_CAR` для машины без водителя, и первые пять случаев пишутся в лог с именем скрипта
-(`PassengerOfEmptySeat` в `Missions.cpp`).
-
-Подработку в машине запускает поток `R3` из `main.scm`: игрок в машине нужной модели и нажатая кнопка (2 на
-клавиатуре). `IS_CHAR_IN_ANY_CAR` и `IS_CHAR_IN_MODEL` верны и для пассажира, а в одиночной игре игрок пассажиром не
-ездит. В коопе пассажир скорой нажимал 2, и подработка начиналась в его игре. `AMBULAN` в начале высаживает всех, кто
-сидит рядом с его игроком (`GET_CHAR_IN_CAR_PASSENGER_SEAT`, `TASK_LEAVE_CAR_IMMEDIATELY`), и отпускает их
-(`MARK_CHAR_AS_NO_LONGER_NEEDED`). Отпущенный персонаж миссии (`CTheScripts::CleanUpThisPed`; игрок и копия другого
-игрока созданы как персонажи миссии) становится обычным прохожим с задачей выйти из машины и бродить. CJ пассажира
-выходил и уходил сам, без управления (комментарий игрока, 02.11). Теперь, пока игрок сидит не за рулём, `R3` видит
-его вне машины: подработка не начинается и подсказки про кнопку нет (`PassengerJobButton`). Скрипты этой игры больше
-не отпускают ни игрока, ни копию другого игрока, а копию ещё и не высаживают из машины (`ReleasesPlayer`). Когда
-скорую запускал водитель, копия пассажира выходила и уходила у водителя, хотя сам пассажир в своей игре ехал
-дальше. Место копии решает игра её владельца.
-
-Процедурные объекты (камни, кусты и мусор, которые `CPlantMgr` раскладывает по земле, `ProcObjectMan_c`) удаляет
-только их менеджер: когда земля уходит из радиуса, `ProcessTriangleRemoved` (0x5A3F70) снимает объект со своего
-списка и удаляет. Объект, удалённый кем-то другим, оставался в списке, и менеджер вызывал `DeleteRwObject` у мёртвого
-объекта через таблицу `CPlaceable`, которую оставил деструктор. У хоста из #99 так было пять раз на старте у
-Энджел Пайна, каждый раз с ломающимся камнем `rockbrkq`, через несколько секунд после загрузки. Кто его удалял,
-пока не известно: сама игра такие объекты (`OBJECT_TYPE_DECORATION`) не удаляет, мод тоже. Мод подменяет первый
-адрес таблицы `CObject` (удаляющий деструктор, 0x5A2BD0). У объекта с `m_bIsProcObject` он ищет его в списках
-менеджера и снимает так же, как менеджер (в свободные, со счётчиками `nNoTempObjects` и матриц), а адрес кода,
-который удалил объект, пишет в лог (`ForgetProcObject` в `Patches.cpp`).
-
-Объект, у которого отработал деструктор, а слот в пуле остался занятым, ронял игру так же: его таблица уже `CPlaceable`,
-и `CPopulation::ManageObject` → `ConvertToDummyObject` → `CWorld::Remove` вызывал из неё мусор (0x42480000). У игрока
-со сборкой с модами так было восемь раз в спортзале (02.11) и один раз при загрузке, в `CObject::DeleteAllMissionObjects`.
-В тот же день его игра упала в `PLAY_OBJECT_ANIM` (0x075A) объекта, которого уже нет: обработчик читает клумп у пустого
-указателя (0x46EA84). Кто оставляет такой объект, пока не известно. Мод ловит его в `ManageObject` и перед
-`DeleteAllMissionObjects`, возвращает слот так же, как `CPool::Delete`, и пишет в лог модель, тип и место
-(`FreeIfDead` в `Patches.cpp`). Если удаляющий деструктор `CObject` вызван без освобождения слота, в лог идёт, кто его
-вызвал. `PLAY_OBJECT_ANIM` объекта, которого нет, мод пропускает вместе с параметрами (`AnimOfNoObject` в
-`Missions.cpp`).
-
-Долгий кадр (обработка дольше 0,5 секунды или больше 0,7 секунды от прошлого кадра) мод пишет в лог с разбивкой:
-сколько заняли его модули до обработки кадра игрой и после неё (и самый долгий из них), сколько обработка самой
-игры (стриминг, скрипты), сколько ушло между кадрами (отрисовка, загрузка мира). Пауза в меню долгим кадром не
-считается. Так жалобы на лаги в 1-2 секунды видно в обычном логе игрока, без подробного.
-
-## Кадр клиента
-
-В сеансе меню паузы игру не останавливает (`no_pause_menu`): мир другого игрока идёт дальше. Меню при закрытии и при
-уходе со страницы звука останавливает радио, рассчитывая на паузу, при которой `CAERadioTrackManager::StopRadio`
-радио машины не трогает. Без паузы радио замолкало до следующей посадки, поэтому, пока в машине играет радио,
-эта остановка пропускается (вызовы 0x576C55 и 0x5737A5).
-
-WinMain обрабатывает кадр (`RsEventHandler(rsIDLE)` → `Idle`) только пока окно на переднем плане. Мод держит
-игру запущенной и в фоне (`run_in_background`), и в полноэкранном режиме после альт-таба она рисовала в
-потерянное устройство D3D9: после возвращения картинка была испорчена, а позже игра вылетала в d3d9. Пока
-устройство потеряно, кадр считается без рисования (`Idle` без аргумента выходит до отрисовки, вызов 0x748D9B),
-а устройство RenderWare восстанавливает на первом нарисованном кадре, как после обычной паузы.
+The position is pulled by interpolation to the sent state. If the divergence is greater than 5 m or the player
+has gone to the ground that is here (search for land `FindGroundZFor3DCoord` below his point), he is
+teleported. Under the remote player in this game there may be no ground: while one of the players in the room,
+his game unloads the street map, and in the distance the collision is not loaded. Physics would drop it
+through the map, and a lift would balance a drop just above the teleport threshold, and it would hang
+underground. Therefore, when players have different rooms up to a remote player more than 150 m or there is no
+land under his point, he stands exactly in the place of the owner, without speed. This happens, for example,
+when the script after the mission for the duration of the show rocking moves the host to 270 m.
+
+On the move of the player, the movement itself turns, and the standing turn puts the sent state. While the
+player is aiming, the camera turns him, and it is only in his game: a copy of the other player remained turned
+where he looked at the beginning of the aiming, and only raised and lowered the weapon. Now, with a pinched
+scope, the copy quickly rotates just like the owner.
+
+The tilt of the player's sight (`CPlayerPedData::m_fLookPitch`, on it `CPedIK::PointGunInDirection` raises and
+lowers the weapon) the game writes only in the third-person camera (`CCam::Process_AimWeapon`). In a
+first-person sight (sniper rifle, RPG, homing rocket launcher, camera), it remains what it was, and the
+replica held the sniper up while the owner aimed down (02.11). For these camera modes, the copy takes a tilt
+from the direction of the owner's camera, which already comes in the state.
+
+Indoor lighting, the game includes when the player enters the door (`CEntryExit::TransitionFinished`): an
+additional color `CTimeCycle` from the entrance to the room. Save it with the world, so after loading the host
+world, the partner received the light of the place where the host was, and after transferring (`/tp`, "move to
+yourself", return to your place), the room remained illuminated as a street. Maud puts it himself
+(`game::LightArea`): takes the entrance of the room closest to the point and its color of the sky like a door.
+At CJ's house, it matched what the game puts in (Color 3, Weather 22).
+
+A remote player behind the wheel shoots from a window (`CVehicle::DoDriveByShootings`). The game only does
+this for a machine with player status, and its machine here is a mirror, so the mod invokes this feature in
+the context of the remote player with his buttons. The side of shooting with a conventional camera in the car,
+the game takes from the flags "look left / right" of the active camera, and at the time of the call they put
+its buttons. Permission to shoot from a machine at a remote player slot is activated when it is created
+(`SET_PLAYER_CAN_DO_DRIVE_BY`). SMG for such shooting the owner all the way in hand
+(`CPed::RemoveWeaponWhenEnteringVehicle`), so the copy driver model Micro SMG, MP5 or Tec-9 remains: it was
+shot as a passenger, and the copy fired from an empty hand (#107, disassembled 04.11). The other gun in the
+driver's hand is not shown as the owner's.
+
+The sound of the car (`CAEVehicleAudioEntity::Service`) counts the PLAYER1 driver as a player, so the remote
+player's car turned on the radio here and picked up the player's motor sound. During this call, the remote
+driver becomes a network player (`PED_TYPE_PLAYER_NETWORK`).
+
+Falla counts the shooter's game and sends the event to the victim's owner. The rest of the bullets of a remote
+player do not hurt anyone and are only needed for the view.
+
+The remote player has a PLAYER1 pedal type so that the enemies will attack both. But for each pedo of this
+type, the game casts a real-time shadow from a zero cell (`CRealTimeShadowManager::GetRealTimeShadow`), and
+players took it from each other. The destructor (`CPhysical::~CPhysical` returns shadow to the master) dropped
+the game when the world was loaded and when it was released. Therefore, during this call, the remote player
+becomes PLAYER2 and receives a free cell, like a regular pedal. In addition, remote players are removed before
+the game takes apart the world when booting from the game.
+
+Save (`CPools::SavePedPool`) writes all PLAYER1 type peds that are not sitting in the car, and the remote
+player gets into the host save and the world that the partner gets. When downloading, the game makes each such
+player CJ 0 pedal with the general player data (clothing, wanted, sight), and assigns the latter to the
+player. So the second CJ appeared: he ran at the player's presses and dropped his sight, and after loading his
+save, the host was in the clothes of a partner. Now, for the duration of the save, the remote player becomes
+`PED_TYPE_PLAYER_NETWORK`. If there are already copies in the save, only the story CJ is downloaded: the one
+pointed at by `$PLAYER_ACTOR` (global variable 12 in main.scm, it has already been read to download the
+pedals). The rest are created by player 1 peds without their own group (intercept constructor in
+`CPools::LoadPedPool`) and are removed immediately after download.
+
+The tag on the map (`FrontEndMenuManager.m_nTargetBlipIndex`) is checked once every half second and when the
+sender `G_WAYPOINT` (`Waypoint.cpp`) changes. She draws alien tags with the same icon on top of her radar and
+map tags (after `CRadar::DrawBlips`), rather than setting script tags for them: so they do not fall into the
+save. Save the same keeps its mark, so the partner after downloading the world of the host removes the tag of
+the host, which he got as his own.
+
+The second player on the radar and map is drawn by the arrow in his direction in the color of his tag
+(`DrawArrows` in the same intercept `CRadar::DrawBlips`, sprite center radar; `[game] partner_arrow = 0`
+returns the point). Its size is `SCREEN_STRETCH_X(5)`: with the size of the CJ (8) arrow, it seemed larger
+than it (27.10).
+
+**The path to the radar marker** (`Gps.cpp` in the same part, idea 28.10: "a marker with navigation to go on a
+strip"). While the player is in the car, on an ATV, motorcycle or bicycle (driving or a passenger), on the
+street and not in the cutscene, the radar shows the path along the roads: a red line to his mark on the map,
+and without it to the mark of another player, a yellow one to the goal of the mission (the nearest coordinate
+mark without a badge on the radar, not the near one), if there are no marks (for purposes yellow and for the
+mark red, 28.10). The target should be more than 30 meters. The path is searched by the game itself through
+the nodes for the machines (`CPathFind::DoPathSearch` 0x4515D0, from the node at the machine
+`FindNodeClosestToCoors` to the node of the same connected network closest to the mark on the plane: the mark
+has no height). The search goes once a second and immediately if the mark has moved or the car has gone out of
+the way beyond 40 m. The game only keeps nodes 350m around the player, so the mod orders areas between the
+player and the tag (up to 1.5km forward) with the same single request as `LOAD_PATH_NODES_IN_AREA`
+(`MakeRequestForNodesToBeLoaded`), and only if the request is not occupied by the mission script. If the path
+is not found to the mark (the search for the game throws after 4950 knots), the path is taken to the point at
+half, quarter and eighth part of the path. The line is drawn first in interception `CRadar::DrawBlips`, under
+icons, quadrangles `CSprite2d::Draw2DPolygon`, and is clipped around the radar circle. If the limit limiter
+moved `ThePaths`, there is no way and the log has one warning. Turns off `[game] gps = 0`. The line is in
+`coop.ini`, which creates a mod (`WriteDefaultConfig`), and in the old file, the connection via F9 adds it if
+it is not there (`SaveConnectSettings`): the player with a mod on the radar was looking for how to remove the
+path (07.11). Counter-direction roads and closed bridges start the game search does not take into account.
+
+Above the head of the remote player to the right of the health strip is the icon of his weapon. It is drawn by
+the game's sprite code immediately after its interface (intercept `CHud::Draw`): the icons are in the
+dictionaries of the textures of weapons models ("model>ICON"), the fist - the sprite interface. To the left of
+the strip of his wanted star (level is in the player state): the same "]" sign of font `FONT_GOTHIC` of color
+`HUD_COLOUR_GOLD` that the stars of the interface (`CHud::DrawWanted`), only smaller. `CFont::DrawFonts`
+prints them immediately after the interface.
+
+While another player is playing a toy on the radio control (Zero mission), his name with stripes and arrow on
+the radar are shown above the toy, not above his CJ (`RemoteToy`, `TagAnchor`, `DrawArrows`). The name above
+the toy can be seen up to 250 m, above the CJ up to 70 m: the toy is small, and without a mark it was
+impossible to understand where the partner flies (31.10).
+
+A script that puts its player at a point (a clothing store, a place in the mission) puts it inside a copy of
+the partner, if he was standing there. The peds got stuck in each other (`CEntity::m_bIsStuck`), and the
+player’s next scripting task didn’t start: the store waited for animations to exit the fitting room with the
+control taken away. As long as players are inside each other, they don't clash
+(`CPhysical::m_pEntityIgnoredCollision` in both, the game itself resets it when they've separated).
+
+The jetpack flies on the player's buttons, and the remote player receives them here. Therefore, a flag with a
+backpack is enough on foot (`CPedIntelligence::GetTaskJetPack`): the game gives the backpack to its remote
+player pedal (`TASK_JETPACK`) or removes it if the backpack is left only here.
+
+What the player does on the spot (barber’s chair, tattoo, food, drink machine, gym, dance, billiards, box in
+hand, parachute), he plays a script or attractor, not buttons. The owner's game tells you which animations of
+the IFP blocks of these classes the player is playing now (by block names and animations, like NPC mirrors,
+`G_PLAYER_ANIM`), and the other plays it on a copy as soon as it is on foot and the block is loaded
+(`Anims.cpp`). When the lesson is over, the copy is returned to the counter: the player's task starts walking
+again only when the state of movement changes, and the pedal drops the game without animations (see). Machines
+and NPCs: Who Owns What
+
+Falling is also transmitted as an occupation. The player is hit by a car, thrown an explosion or impact, he
+flew off the motorcycle: in his game there are tasks of falling and lifting (`CTaskComplexFallAndGetUp`,
+`CTaskSimpleFall`, `CTaskSimpleGetUp`), and the other player saw only that he was standing again. While this
+task is underway, any animation outside the gait set is considered an occupation, except for facial
+expressions, hand movements (`ANIMATION_SECONDARY_TASK_ANIM`) and looped partial racks like IDLE_ARMED. The
+drops of KO_* and KD_* in the game are marked partial (0x10): this flag means “on top of the rest” and not
+“only top of the body”. Animation is also transmitted to the player, which the script has enabled
+(`TASK_PLAY_ANIM`, task 401), from any block. A parachute jump loses a free fall from the PED block, and
+before that, the copy of another player just fell. With animation comes the flag "holds": the owner it is
+controlled by the task, not buttons. While the flag is raised, the copy receives an empty gamepad, the game
+does not change her walking posture, does not start her own fall in the air (`CEventInAir::AffectsPed`) and
+removes the already begun. The `CTaskSimpleInAir` would then superimpose a FALL_fall over the parachute.
+
+The animations go between games by name rather than number: the block name key (`anim::BlockKey`, FNV-1a on
+the lowercase name) and the animation name key, which the game itself stores in
+`CAnimBlendHierarchy::m_hashKey` (`CKeyGen::GetUppercaseKey`). Each game’s block and animation numbers are
+different: builds like the Essentials Pack add IFP files to `gta3.img` or change `ped.ifp`, and the numbers
+are shifted. Until 03.11, the mod sent numbers, and the player with the mod assembly had a copy in the gym and
+in the dressing room standing or playing other animations. The receiver finds the block by key
+(`anim::BlockByKey`, the table is rebuilt when the number of blocks changes), and the animation in it by key
+(`anim::Find`). If there is no block with such a name (the player’s own file, which the other person does not
+have), the copy stands as it stood and someone else’s animation does not play. Also by name are animations of
+NPC mirrors (`PedSyncState`), objects (`Props`) and billiards (`G_POOL`). Protocol 39.
+
+The copy, which has no body animations left, stands in the anchoring position, the letter T. That's how she
+was seen while the owner was playing basketball or going to the gym. Once a second such a copy returns the
+rack of its set, and once in the magazine writes what animations were on it.
+
+Animations that the player includes himself (window U, `features/anims/Emotes.cpp`, window
+`pages/anims-menu`). The window divides them into emotions, poses, actions, dances, animations together and
+their own, each number for the team `/anims <number>` (without a number it opens a window). The CJ plays the
+selected team as the mission involves animation to the player: `TASK_PLAY_ANIM` (0x0605), and gestures with
+one upper body `TASK_PLAY_ANIM_SECONDARY` (0x0A1A), on the go. This is a 401 task, so another player sees it
+on a copy through the same "occupation" as any script animation (`G_PLAYER_ANIM`), with a "hold" flag. The
+uninterrupted command (0x0812) is not moded: the CJ would have stood under bullets and cars. Strike, shot,
+hit, fall, death, arrest end the animation with the events of the game as missionary. Poses, struts, dances
+and seats (locked and with the retention of the last frame, on the whole body) are held until the player
+presses the space or F (running or entering the car), like SA-MP animations: this is how the user chose 03.11
+("to last long"), before they were knocked down by any WASD press. The game itself does not interrupt such
+animation from the keys (`CTaskSimpleRunNamedAnim::ProcessPed`, 0x61BF20, does not read the keyboard), only
+mod check stops it. At the beginning of the first such animation for the game, the chat once writes how to
+stop it. Short animations still stop walking, jumping, running, getting in the car, shooting, sighting and
+squatting. Animations with output (sit on the ground, lie down, tai chi, smoke) first play the output, the
+rest of the animation comes to naught (`CLEAR_CHAR_TASKS`). Positions on the ground from the pack `restpose`
+have no exit and lifted the CJ jerk in a quarter of a second. Now they have a way out of the game's
+animations, the root of which starts as low (0.8-0.95 m): from the ground on the back as from the beach
+(`SUNBATHE/Lay_Bac_out`), on the side and curled up as after a fall (`PED/getup`), sitting as from the grass
+of the park (`SUNBATHE/ParkSit_M_out`). The exit block is asked along with the animation and only plays if it
+is in memory. A key held before the start stops nothing. During the animation, CJ removes the weapon
+(`SET_CURRENT_CHAR_WEAPON` 0) and takes it back if it is still in his hands. The animation does not turn on in
+the car, in the water, in the air, squatting, in the cutscene, in the scene with the game’s camera (wide
+screen), while the player has taken control (`CPad::DisablePlayerControls`: stores, telephone, mission
+scenes), in the mini-game and competition, while CJ is busy with his task (falls, gets up, climbs, gets into
+the car, flies on a backpack, carries a box) and while he sits in a toy or at a turrel. If any of this
+happened during the animation, the mod throws it and the weapon does not touch: the CJ is now in the script or
+in the game.
+
+In the window, only what is used on RP-servers SA-MP: sit down, lie down, smoke, eat, phone, gestures,
+adjuster (user choice 04.11, all 1678 animations of the game were superfluous: among them there is a lot that
+looks bad on CJ). Sample: Samp-Rp server sections `/anim` and Advance RP window lines 88. The server does not
+name the animations of the game, so its rows are matched in order of the official script `gl_actions` and by
+the movement in the game files. What CJ does in the game, the list is not: strikes, battle racks, racks with
+weapons, reloads, throws, warm-ups. It’s about 170 lines in `BuildList`, each with its own beginning and end,
+if any, in the game. Lying down and after the falls, CJ stands up with animations of the game (`getup`,
+`getup_front`). All names checked on `anim/ped.ifp` and `anim/anim.img`. PageUp and PageDown, Home and End are
+listed, the typed letter translates to the pack on this letter. The wheel moves the list by three lines, and
+the lines smoothly reach the place: `g_view` catches up with `g_scroll`, and `Renderer::Clip` crops them at
+the edge of the list. Animation is checked in the downloaded library (`anim::Find` on key
+`CKeyGen::GetUppercaseKey`): IFP mode instead of gaming may not have it. Libraries that the mod himself asked
+for from the streaming (`NeedBlock`, the GAME_REQUIRED flag), are released (`CStreaming::SetModelIsDeletable`,
+0x409C10, removes only this flag, the flag of the MISSION_REQUIRED script remains) when none of them plays
+(`CAnimBlock::RefCnt`), they are not used by either CJ animation or preview (a copy in the preview plays
+without reference to the block) and with the last need 3 seconds have passed. Otherwise, all 11 MB `anim.img`
+would remain in memory after scrolling through the preview.
+
+The U key opens the window and still reaches the game, and the window takes the keyboard only from its first
+frame. So the code that starts with U (UZUMYMW, UBHYZHQ, URKQSRK) is typed further: its second letter in the
+first 0.6 seconds closes the window and also goes into the game. If U is inside the typed code (BAGUVIX,
+BUFFMEUP), the window does not open: the check is the same as the chat with T, on a list of 50 codes with U
+(letter codes and phrases, checked with hashes `CCheat::m_aCheatHashKeys`). Next to the competition, U still
+calls for competition.
+
+The animation begins with an invitation (`G_EMOTE`: 1 go, 2 no, 3 start, 4 stop). The second player answers Y
+or N as if on /tp. The answer “yes” is placed opposite the inviter, facing him, at the distance at which they
+are put by the scripts of the game: handshake HNDSHKFA in a meter (main.scm 0xF302B, Sweet 0x113236), business
+0.92 m (0x15CF78), hand on the shoulder 0.9 m (scene with Sweet 0x93776), dispute 1.2 m (`TASK_GOTO_CHAR`
+0x2104E7). Place checked: ground at the same height and direct chest-to-chest visibility
+(`CWorld::GetIsLineOfSightClear`), otherwise the answer is no and the reason is in the chat. The inviter
+starts when he gets the "beginnings," responding to half the ping later, so both pieces go together. If one
+stops or is knocked down, the second comes “stop”. A kiss and a slap on the back, the user decided not to add
+(03.11).
+
+The preview in the window (`AnimPreview.cpp`) is a copy of the body of our CJ, and in the animations, both are
+also a copy of the body of a partner. The copy is made in the same way as the game makes the body of the peda
+(`CClumpModelInfo::CreateInstance`: `RpClumpClone`, its own hierarchy of bones from clone frames, skin atoms
+translated to it, `RpAnimBlendClumpInit`). The animation on it moves the game's animated code, and draws its
+own RenderWare camera into texture after the main frame camera (call `RwCameraEndUpdate` of `Idle`, 0x53EBF5,
+after the Core hook), as the game draws the shadow of the peda (`CShadowCamera`). There is no physics, no
+tasks, no other player can see it. The side of the texture is the degree of deuce about the double size of the
+preview on the screen (512, 1024 or 2048): the window shows it reduced, and the edges of the figure come out
+smoothed. The animation copy plays the same way as the script (`TASK_PLAY_ANIM`) on the pede: a partial
+overhead of the rack `IDLE_stance`. In emotion animations, 26 bones, in the rack all 32: jaw (8), eyebrows (6,
+7), stomach (201) and “chest” are taken from the rack. When the whole body animation was playing and the rack
+was gone, there was no source left for these bones, the turn was going out of an empty amount, and the mouth
+with eyebrows moved (03.11). In order to prevent the root from sagging, the animation data of the copy
+indicate a “pedal shift” like that of the real pede and the cutscene object (`m_PedPosition`,
+`CPed::SetModelIndex`): then the root goes through the extraction of speed (0x4D1680), like that of the pede.
+Without this, the root of the body without the pedal takes place from the sum of the weights of the stand and
+animation (`FrameUpdateCallBackSkinned` 0x4D2B90), and the sitting CJ goes twice deeper. After updating the
+dice, the preview calls `CPed::ShoulderBoneRotation` (0x5DF560), as a game of `CPed::PreRender` for the player
+model and in the cutscenes for CSPLAY: CJ skin has bones between the collarbone and the shoulder ("chest", 301
+and 302) that no animation moves. Without this challenge, the shoulders remained in the position in which the
+skin is made (hands to the sides), and protruded with corners (03.11). The challenge is only if the skeleton
+has bones 21, 22, 31, 32, 301 and 302: otherwise, the game code writes before the array of matrixes begins.
+The camera holds the whole body: the bones are projected on the axis of the picture, the frame immediately
+grows and slowly shrinks (in 2 seconds), so the loop does not “breathe”, and the lying CJ camera approaches
+when he lies down. Turning the mouse starts the frame again. Under the bodies floor: light spot and shadow of
+each (`RwIm3D`, fan triangles at a height of -1 m from the middle of the pedal, this is the bottom of its
+collision frame). Light is own: filling, warm from above on the camera side (turned `pDirect`) and cold from
+behind for the contour (extra directional, `AddAnExtraDirectionalLight`). After drawing, the light of the
+frame and all the touched states of the drawing return. The frame of the game ends with a flat shading
+(`rwSHADEMODEFLAT`, seen in the log 03.11): with it, the CJ came out in faces with dark triangles on jeans,
+and the floor was not visible (the fan is painted with the color of the top of the rim with zero
+transparency). Therefore, the preview shading is smooth (`rwSHADEMODEGOURAUD`). The depth buffer for the
+RenderWare camera creates with the screen smoothing type (`_rwD3D9CreateZBufferRaster` 0x4CCE48 takes
+`MultiSampleType` from `g_D3Dpp`, 0xC9C050), and the texture does not smooth. According to the rules of D3D9,
+they must match, so at the time of creating our buffer, the screen smoothing is zeroed. After resetting the
+device, RenderWare recreates the rasters with screen smoothing, then the preview camera is created anew (Deep
+buffer check `GetDesc`). On the stand with Intel UHD and MSAA 2x preview was drawn without this: the driver
+forgives the discrepancy, with other drivers not checked.
+
+Their animations are .ifp files from folder `coop\anims` (up to 32 files, up to 4 MB each). The game reads
+them once the player appears, until the first cutscene: the cutscene on exit removes the last block
+(`RemoveLastAnimFile`) and it must be her. The game believes every number in the file, so first the mod reads
+the file itself (`Ifp.h`: only ANP3 and ANP2, counters and dimensions within the file, the frame of compressed
+and uncompressed keys, the key time does not go backwards, otherwise the animation cycle does not end). The
+block is called `C_` and the file name is capitalized in Latin, since it is the same for both players at any
+file name register. Place in the animation table (`ms_aAnimations`, 2500) at its end, with 2150: blocks of
+games get places in order when they are first loaded (total 1871, our COOPCS 36, cutscene to 18), and the
+block loaded after its own would go to the end of the table. The mod registers the block
+(`RegisterAnimBlock`), gives it the first place and number of animations, and the game downloader leaves the
+known block its place (0x4D520A). The table counter returns back after loading. If the blocks of the game
+still reached 2150 (a game with many animation mods), your animations are turned off. Another player
+recognizes his animation not by block number, but by name (`G_PLAYER_ANIM`, operation 5): the numbers of his
+blocks in different games are different. If he doesn't have a file like that, the copy is worth it.
+
+Packs are alien animations that the mod brings itself (`package/coop/packs`, in the game `coop\packs`), the
+Paki tab with a section on the pack (the title and author above its lines), numbers with 601. Almost all packs
+on sites are put instead of the game file (`crack.ifp`, `ghands.ifp`, `ped.ifp`), new in them only animations
+that differ from the game. Script `anim_pack.py` (in the test folder, `scripts`) finds such records (`diff`
+with the game file), transfers their bytes to the pack file (the ANP3 record itself: name, sequences, frames)
+and gives them their names (`Graf01`, `Fortnite01`). Pack loads in the same way as its files, but before them
+and with the prefix `P_` (`P_FORTNITE`): blocks of the game remain their own, scripts missions and cutscenes
+see the old `GHANDS` and `CRACK`. The pack places at the end of the table are shared with their files (from
+2150 to 2500), and when the table is overflowed with the game, they are turned off along with them. Animations
+that have a root of meters (flips, dances that move on the floor) come with a flag of `MOVES`:
+`TASK_PLAY_ANIM` with locks X and Y, CJ leaves with the animation and stays where it ended. Without locks, the
+body would go forward and come back at the end. Sources of packs and authors are listed in README and
+instructions. Fortnite v1 is not taken: its script includes the dances of the game itself. Repeats are thrown
+out (Acrostreet `onehandlayout` equals `onehandflash`, six Military Greeting animations are the same,
+`RHGsign2` from Fortnite coincides with the "Break 2" Arch in the length and stroke of the root and left at
+Arch). In two animations (GTA V welcome, rap) the keys started with −0.05 and −0.3 s, our verification of such
+a file does not allow: `anim_pack.py` shifts all the keys of the record so that the first one was in zero.
+Unit test `test_ifp.cpp` checks and packs (files after the folder of the game). By the user’s decision, 39
+animations from Assassin’s Creed and a conversation from GTA LCS were not taken. The preview turns the camera
+to the face of the body taken along the thigh line 0.4 seconds after selecting animations: animations made for
+other locations in the game unfold the body, and pack dances stood with their backs.
+
+The gait set of a thick or inflated CJ lies in its IFP block, and the game only remembers its player's block
+(`CClothes::RequestMotionGroupAnims`), so the fat partner walked with the other player as a regular CJ. Now a
+block of copies is requested by its statistics once a second. The body assembly of the copy
+(`ConstructPedModel` under `MuscleFrom`) requested a block over the muscles of a copy and released its
+player's block. Streaming would unload it while the player was standing, and the first step would read an
+empty set of gait: so the game would fall in `CTaskSimplePlayerOnFoot::PlayerControlZelda` (0x68861B). After
+each such build, the player's block is requested again. Assembling without a dictionary of textures of the
+fashion model misses: on the balaclava of Home Invasion, the game fell to `RwTexDictionaryForAllTextures`
+(0x7F3737).
+
+The style of combat from the gym (`CPed::m_nFightingStyle` + 0x72D and techniques + 0x72E) goes in the
+description of the appearance, and the copy fights in the same way as the owner. In the past, boxing and kung
+fu from another player looked like normal punches. The receptions are now stored by the partner's profile
+(version 4).
+
+In one place of the script (a dashboard, a hairdresser's chair, a simulator, a fitting room, a casino table),
+each game puts its player, and the two bodies stood in each other. A replica that stands inside its player for
+more than a second now hides with the name overhead until they disperse. In the cutscene, the partner shows
+`ScenePartner`, and there's no copy hiding.
+
+The dressing room door is an object with animation (`CJ_BINCO_DOOR` and five more models 2873-2879 from
+props2.ide). It is created and downloaded (`PLAY_OBJECT_ANIM` blocks `CLOTHES`) by the script of the store
+`CLOTH` of each game, and only for its player. A copy of another player entered the booth through a closed
+door (28.10). Now that the copy has an entry or exit animation (`CLO_In`, `CLO_Pose_Out` – door
+`CLO_Pose_Out_O`, `CLO_Out`, `CLO_Pose_In` – `CLO_Pose_In_O`, in the same pairs as in the script), the game
+rocks its door 4 m from the copy at the same time (`SwingBoothDoor` in `Anims.cpp`). If the second script does
+not have a store (came through /tp), there is no door and there is nothing to download.
+
+The other player's motorcycle is a mirror, and the owner's fortunes pushed him into curbs and cars.
+`CBike::VehicleDamage` drops riders (`DamageKnockOffRider`) before checking collision protection, so our
+player flew from the back seat, although the driver was driving further. While our player is sitting on the
+back of such a motorcycle, you cannot drop it (`CPed` + 0x474, bits 27-28, like
+`SET_CHAR_CAN_BE_KNOCKED_OFF_BIKE`) and then it gets the same value. The driver's fall is decided by his game:
+if his copy is here on foot without an exit event, our player gets off too. It's also protected by a copy on a
+motorcycle that's not run by us. On our motorcycle, it can be dropped, otherwise our driver would not fall:
+the game does not reset anyone, if one of the two can not be dropped.
+
+The model of the player, which was replaced by the mod with skins (`SET_PLAYER_MODEL`, 0x47A820), goes in the
+description of the appearance (0 - CJ in his clothes). The other game changes the copy model in the same way
+that this command does: removes the RenderWare object, puts the model anew, and saves the gait set. Special
+characters (290–299) are loaded under a name that the other game does not know, so the player remains a CJ.
+
+A copy of another player dies by his animation. His game reports what fall from the default set he fell
+(`G_PLAYER_DEATH`, Intercept Designer `CTaskComplexDie`). The death flag arrives earlier, so the copy waits
+for this animation up to 300ms. Previously, any death of a player from another looked like one fall to the
+back.
+
+A partner who is killed or arrested during a host mission no further than 300m from the host returns to the
+right of the host, not at the hospital or site at the other end of the map: mission enemies go to any PLAYER1,
+and the mission continues without it.
+
+If the host during the mission sat in a transport where the partner does not have a place (motorcycle, loader,
+"Picador" Ryder, full "Greenwood" Sweet), the partner immediately sits behind the wheel of the same model of
+transport (`WARP_CHAR_INTO_CAR`) and receives a message in the chat. Previously, the transport only appeared
+nearby, and while the partner sat down, the host left (04.11). As long as the partner is held by another,
+there is no transport, and the attempt is repeated once per second: a script or scene
+(`DisablePlayerControls`, wide screen, mini-game), a turret (`AttachedTo`), a pack, landing in another car,
+death. You can exit the issued machine, the second one will not come to the same host machine (`m_bikeFor`).
+
+In missions Zero and Toreno (scenarios `zero*`, `toreno*`, `des*` and `maf4`, the eighth mission of the desert
+with a backpack, 0.3.3) also issued a plane or helicopter if the host is at the helm and there is no space for
+a partner, and a jetpack when the host put it on (`TASK_JETPACK`, model 370 loads in the background). A
+backpack is issued once for each person who wears the host. Radio controlled toys Zero (RC Baron, Raider,
+Goblin, Tiger, Cam, Bandit) do not count: they do not fly.
+
+In the missions of Zero, the host does not fly (0.3.3, decision 31.10, `features/story/rc-toys`). In Air Raid
+(`ZERO1`) he sits on a turret (`ATTACH_CHAR_TO_OBJECT`), in Superly Lines (`ZERO2`) he leads the RC Baron, in
+New Model Army (`ZERO4`) he sits on a turret over a table in Area 10. While the turret or toy of the host is
+working, his game sends to the partners `G_RC`, and the partner's game gives him his own: in Air Raid, a
+machine gun next to the host turret, in the rest of his toy with the same team as the mission
+(`GIVE_REMOTE_CONTROLLED_MODEL_TO_PLAYER`): RC Baron on the roof of Zero or RC Goblin 6 m from the host toy on
+the table. `CRemote::GivePlayerRemoteControlledCar` (0x45AB10) puts the toy on the ground under a given point,
+records it in `CPlayerInfo::m_pRemoteVehicle` (+0xB0) and disables the machine in which the CJ sits on the
+mission with a bicycle: therefore CJ. A pedestrian CJ would walk from the same sticks and shoot from the same
+button, so the partner for this time is frozen and without a weapon in his hands. The world is loaded around
+the toy (`CStreaming::Update`), and collisions and interiors around the player's area: for the table, his CJ
+moves to Area 10 where it stands, and back he is released when there is again a floor of the street under it.
+The car boarding key returns the partner his CJ, and until the end of this part of the host's mission, he is
+not given anything else. Instead of hitting a toy in 8 seconds give a new one. Toy machine gun
+(`CWeapon::FireOneInstantHitRound`, 0x73AF00) hits cars without the author of the shot and with the number of
+the weapon Micro SMG: as long as the player has a toy, `Damage` considers such a hit on a copy of it as a shot
+and sends it to the owner. Games communicate the network number of their toys (`G_RC` 2) to each other, and
+without fire, they do not injure it.
+
+Toy explosion solves the flag `CVehicle::bDisableRemoteDetonation` (0xC1CC00), it puts
+`SET_ENABLE_RC_DETONATE`. The `STATUS_REMOTE_CONTROLLED` machine explodes from the fire button
+(`CarGunJustDown`) if the flag is removed and the RC Baron aircraft fire is the same button. Zero missions are
+shutting down the explosion. The mod turned it on, believing that the toy was being blown up by a landing key,
+and that the partner's plane in "Supply Lines" was exploding instead of being shot (31.10). Now the explosion
+is off, like in missions.
+
+The machine gun in the Air Raid mod does the same as the mission makes it a host. The host turret is an
+invisible collision-free object on the roof of Zero, to which the CJ is attached with a minigan
+(`ATTACH_CHAR_TO_OBJECT` with a displacement of -0.25 -0.5 1.25, a full circle and a weapon of 38, then
+`SET_HEADING_FOR_ATTACHED_PLAYER 270 300` and `SET_CHAR_PROOFS`). The host sends the place and turn of its
+object (`G_RC` 1 with minigan model 362). The game of the partner looks for a place 1.8-3.5 m away from him,
+where the roof floor is at the same height and there are no obstacles, puts his object there and attaches the
+CJ to it. The attachment gives a minigan (`CPed::AttachPedToEntity`), and the detachment returns the former
+weapon to the hand. The minigan occupies a slot of heavy weapons: what lay in this slot, the mod remembers and
+then gives. While his partner's at the machine gun, he's invincible, and then he goes back to where he was.
+Previously, the partner received here the RC Baron, indistinguishable from Berkeley aircraft, which is shot
+down by the host (31.10).
+
+While the partner watches the host scene on the engine (`SceneWatched`), the toy is not given to him: the
+scene takes the camera and at the end gives it to the CJ, not the toy. The toy issued at the beginning of
+"Supply Lines" flew out of frame, and on the screen stood a frozen CJ (31.10).
+`CRemote::GivePlayerRemoteControlledCar` points the camera through `CCamera::TakeControl` (camera target at
+`TheCamera` + 0x958, mode `MODE_BEHINDCAR`). If the camera's target is not a toy and there is no scene or
+cutscene, the mod points the camera at the toy again.
+
+The game places the toy on the ground under a predetermined point (`CWorld::FindGroundZFor3DCoord`) and
+collisions are loaded around the CJ. There was no table in area 10 for the CJ partner: the helicopter fell
+under him into the void, and the screen remained green (31.10). Therefore, for the CJ table, the partner first
+moves to area 10 and waits next to the place where the mission holds the CJ host (on a bicycle in the air at
+-1004, 1001), and the camera, meanwhile, looks at the table from the point of one of the planes itself
+`ZERO4`. The toy waits for the floor under its seat for up to 8 seconds (`ToyPlace`). The place is searched by
+rings 4-8 m from the host toy: the floor is not higher than its point and not lower by 1.5 m on the roof or 7
+m at the table (the table lies 5 m below the host helicopter), and a meter around empty. The first check was
+waiting for the floor 1.5 m from the height of the host helicopter and the table itself was not counted by the
+floor: the partner hung in the void for 8 seconds over and over again (31.10, fourth check). If the floor
+never showed up, the toy is no longer given in this part of the mission. After the toy, CJ returns to the
+street where he stood.
+
+A partner further than 300 m from the Zero store, fashion once for part of the mission carries to its door
+(`ComeOver`), as a transfer behind the host (`CS_FOLLOW`) would do: not from his part-time job, shop or after
+death, and the car he drives is carried along with him. While the host's CJ sits in frozen transport,
+`CS_FOLLOW` waits until the end of the mission, and the partner next to whom the host dialed /mission zero2
+2.8 km from the store was left without an aircraft (31.10). There is no transfer for a machine gun in the Air
+Raid: the usual `CS_FOLLOW` leads a partner there, because the host on the turret can move. The /mission
+itself launches the mission where the host is: from Los Santos, `ZERO2` put the host plane on the roof, which
+had not yet loaded, and it was underground. In the game, the mission begins in the store, and this does not
+happen. In the /mission test build for missions, Zero first transfers the host to the store door if it is
+further than 50 m (01.11: 4.4 km from the store, the host is again under textures).
+
+The mod partner's toy is removed by himself (`DropToy` ). `REMOVE_RC_BUGGY` only returns the CJ to the player,
+and the car remains in the world: the partner's RC plane fell without a pilot and exploded next to him (01.11,
+"Supply Lines"). Now, after this command, the toy is removed by `DELETE_CAR`. The table toy in the New Model
+Army appeared in the zero area and in the hall (area 10) was not visible: the partner was flying an invisible
+helicopter (01.11). Now she gets the area of her seat (`SET_VEHICLE_AREA_VISIBLE`). After the toy at the
+table, the partner goes to the door of the Zero store, rather than to his former place in the city from which
+he was taken.
+
+The helicopter partner on the table magnet, like the host (player selection 02.11, `Objects.cpp`). The host
+magnet works via script `ZERO4`: a point in a meter under the helicopter (`GET_OFFSET_FROM_CAR_IN_WORLD_COORDS
+0,0,-1`), an object within a meter of it (`LOCATE_OBJECT_3D`), a fire button (button 17) and
+`ATTACH_OBJECT_TO_CAR`. The partner has a similar `MINI_MAGNET` under the helicopter, and the fire button also
+picks up a copy of the barrel (`BARREL2`) or board (`KMB_PLANK`) and drops it. The game of the host on
+`G_OBJ_HOLD` (`MAGNET`) clings the real object to its copy of the partner's helicopter, and when reset
+(`RELEASE`) unhooks it where the copy was hanging. This is how the partner removes obstacles from the path of
+the bandit. An object that is already hanging on a magnet (host or Berkeley) can not be taken, and if someone
+else's magnet took it, the partner lets it go. The bomb (`RCBOMB`) remains the domain of the host: the script
+only explodes the one that dropped its magnet. The host sees the magnet under the partner's helicopter.
+
+The game remembers through which door the pediatrician entered the interior (`CPed::m_pEnex` + 0x78C) and
+displays it outside. The player, transferred to the interior to another (`/tp`, saved seat, transfer to the
+host), was there without a door. Now he receives the door of a copy of the person to whom he was transferred,
+and if the copy does not have it, the door on the street where the player was standing (`StreetDoorOf`). A
+copy of the other player also receives the door through which he entered.
+
+After processing the copy, its rotation is aligned with the owner when he is aiming or when they have diverged
+by more than 45 degrees. With a gunshot, the game turned the copy to where the owner’s camera was aiming from
+the point where the copy itself stood, that is, up to 7 degrees to the side. Stick in the squat, the game
+spreads along the axes of the character himself, and the sideways sideways turned the copy into a step
+forward. A 180° turn could have gone the other way. The squat tumbling (`CROUCH_ROLL_L/R`) goes as a lesson,
+and the squatted copy after the lesson returns to the squat rack, not to the usual rack: before it was 0.4
+seconds up. Reloading (`ANIM_ID_RELOAD`, `CROUCHRELOAD` groups of weapons) is transmitted by animation: the
+copy does not run out of cartridges, and it itself was not reloaded.
+
+When the player is led by a task rather than a stick (passing to the store door `CTaskComplexGotoDoorAndOpen`,
+walking on the script command: tasks 900-939), the owner places a flag `F_TASK_WALK`. The copy gets a stick
+that leads it in the same turn and at the same speed, and the push of the door (`Walk_DoorPartial`) goes like
+an occupation that does not hold it: when it ends, the copy goes on, and does not stand up and move again.
+Previously, the copy slid standing and spinning jule: its stick relatively fixed camera at the door showed
+where it went. The flag stands all the way through the door (`CEntryExitManager::ms_exitEnterState`), not just
+while the door task is on. As the screen darkens, the player walks in under the empty task
+`CTaskSimpleUninterruptable`, and the drop has already been turned on again: the copy ran along his stick and
+the door camera to the side, or even back to the street. The owner transmits the transition sign itself
+(`F2_DOOR`) and the copy, having unfolded more than 115°, disappears before being transferred inside. While
+the copy itself gets into the car (`EnteringCar`: the task of landing by the driver or passenger), this stick
+is not given to it. To the door, the owner goes by the task, the flag stands, and the stick argues with the
+task of landing the copy: she walked on the spot until the synchronization after a few seconds put her in the
+car (27.10).
+
+The host and the partners stand side by side according to the same rule. `PartnerRank` gives the partners the
+same order in all games: the first, second, third in the player's number, the host out of count. `PartnerSide`
+places the first on the right of the person to whom he is led, the second on the left, the third behind. This
+is how transfer after host (`CS_FOLLOW`), return after death next to the host, appearance after downloading
+the world, entry into someone else's part-time job, places in the lowrider competition and in dance. Turtles
+and Zero toys look for space from different points of the circle around the host, the second arrow and the
+third sit next to the first with a shift of 0.8 m. The starting point of the mission is wider, the more
+players there are: on one spot, four will not stand up.
+
+Moving `/tp` and `/tphere` with three and four players goes by the player number (`/tp 2`): nicknames are
+uncomfortable to dial. The numbers show window F2 and `/players`, only a nickname remains above the heads, and
+the team without a number writes a list to the chat room. Nick's a good fit, too. There can be several
+requests at once: one for each player (`g_asked`), another is in line, and Y or N responds to the first
+(`g_asking`). With two players, the number is not needed and is not shown anywhere. The same commands in the
+F2 window go with arrow buttons.
+
+If there are three or four players, the owner's game announces what is next to any other player, and the
+message goes to everyone. A player away from this place would get copies of other people's streets, which he
+does not have with two players, and they would occupy pools. `FarFromUs` keeps such machines in `m_pending`,
+and pedes without a pede in the record, as long as they are further than the same distances as the owner (170
+and 120 m for appearance, 220 and 150 m for departure). The states then update the record. Script machines and
+machines in which the player sits are always displayed: they are supported by mission tags, arrows and the
+players themselves. The sight and damage of the returned car comes with the owner's next mailing, it goes once
+every 10 seconds.
+
+When the player leaves, his machines and people are left with one game (`WeInherit`): the host, and if the
+host is gone, the first one is the number. She announces them again, the others delete their copies.
+Otherwise, each game would make them their own and show others on top of their own. The car you’re sitting in
+doesn’t remove the game. The population of two partners away from the host creates the first of them
+(`UpdateSuppression`): without this, there would be people on the same street of both games.
+
+## Vehicles: driving, riding, and stealing
+
+In cars, players are equal.
+
+You can get behind the wheel in any parked car, and a car with a driver-NPC can be stolen: the driver is
+pulled out by regular animation. This also works with machines that are simulated by another player. For the
+owner of the machine, the remote player performs the same landing task (`CTaskComplexEnterCarAsDriver`) and
+the NPC that is thrown away remains with the owner. The player takes the car to the first frame behind the
+wheel. Previously, this was waiting for a state to be sent, which does not go more often than once in 33 ms,
+and the next update of the copy managed to return it to the owner’s deadened motor: the car did not go until
+you got into it again (issue #43). When an NPC pulls out a player of this game or a copy, the owner of the
+pedal is already standing outside, and here his mirror is still pulling out of the machine landing task.
+Previously, the mirror was immediately placed next to the machine and stood up without animation, as if from a
+communication delay (27.10). Now, while the machine is being boarded (`m_nNumGettingIn`, +0x485, or our
+player's driver-landing task 701/713, or a copy of this machine), the mirror waits for the animation to end,
+but no longer than 6 seconds (`kCarTaskGraceMs`).
+
+The key `G` (which can be changed) is placed on the nearest available passenger seat. In single-player, there
+is no such possibility, and the mod adds it. You can sit with a partner, to the NPC or in an empty car. There
+is no free button on the gamepad, so the passenger sits down, holding the entry button (triangle) for half a
+second: the started landing behind the wheel is removed, and the player goes to the passenger seat
+(`Players::HoldForPassengerSeat`). The same retention applies to the input key on the keyboard. While the
+player is aiming or holding the target, `G` recruits Grove fighters, and before CJ instead went to the car
+next to him. At this time, the passenger key does not work.
+
+The mode location is selected at the nearest door (`NearestFreeSeat`): for each free space, the game calls its
+door (`CCarEnterExit::ComputeTargetDoorToEnterAsPassenger`) and the point where it is opened
+(`GetPositionToOpenCarDoor`), and takes the place whose point is closer to the player. Previously, the first
+free seat, i.e. the right front, was taken, and the CJ walked the car past the free rear door (user request,
+03.11). Places without a door (by the bus, the fourth place of the van) are last. It also selects the place
+and the entry key of the car, which is driven by another player.
+
+From the water to Skimmer, Vortex, Sea Sparrow and Leviathan, the game sails to the nearest of the two front
+doors, whatever seat is needed (`CTaskComplexEnterCar::CreateFirstSubTask` and on road
+`CTaskComplexGoToCarDoorAndStandStill`, both through `CCarEnterExit::GetNearestCarDoor`). The passenger swims
+to the pilot’s door and takes out a copy of the partner, and the pilot to the passenger’s door, where the
+partner sat, and no one sat down. Both of them landed from the pier (Players Complaint, 08.11). Now the player
+and the player's copy in the water, if the seat at the selected door is occupied, and the other front door is
+free, the answer will be a free door (intercept `GetNearestCarDoor`, `Players.cpp`). On land, at the NPC, and
+when both seats are free, it's like a game.
+
+Passenger shoots out the window. Such shooting in the game is only in the split-screen mode
+(`CTaskSimpleCarDrive::ProcessPed`, 0x6449AB): the player in the passenger seat sticks out with a weapon
+(`CTaskSimpleGangDriveBy`). Maud replaces the call `CGameLogic::IsCoopGameGoingOn` in this branch with his
+check: the session is going, the right mouse button is clamped (in the car it is `m_bVehicleMouseLook`) or R1
+on the gamepad, the camera is not yet in sight mode from the car, in the hands of a firearm of instant hit
+with cartridges. Checks slot submachine guns and camera mode for two after the call removed: the task takes
+any weapon instant hit. At the end of the landing, the game puts an Uzi, Tec-9, or MP5 in hand, if any
+(`CPed::RemoveWeaponWhenEnteringVehicle`, 0x5E6370). The passenger, who sat down with another firearm of
+instant hit (M4, shotgun, pistol), mod leaves it (#83): at the time of the call shoots
+`CPlayerInfo::m_bCanDoDriveBy`, and the game removes the model of the weapon, as in a car without shooting,
+and the tilt from the window returns it to the hand. The driver, the passenger with fists, cold weapons or
+submachine gun receive their weapons, as before. Once leaning out, the passenger switches the weapon with a
+mouse wheel or a gamepad cross up and down (`Players::PassengerWeaponWheel`): in the car, both put `DPadUp` /
+`DPadDown` for the radio. In a circle there is an instant hit weapon with ammunition, the selected one remains
+in the hands after the exit (`m_nSavedWeapon` = 55). The radio at this time is not heard by the wheel: two of
+its calls `CPad::NextStationJustUp` / `LastStationJustUp` (0x4EB72A, 0x4EB753) are redirected. The window
+firing task holds the weapon data from the start (`m_pWeaponInfo`, +0x30), so the mod resets them every step
+of the way, and the task takes them from the weapon in hand. Without a button, the firing task that the mod
+began ends: intercepting the `CTaskSimpleGangDriveBy::ProcessPed` puts it in the completion flag (+8), and the
+firing the mission gave does not touch. The player who is in focus is processed, so a copy of the partner
+sticks out under his buttons. His game adds a mouse button to the R1 state, which sends while he is a
+passenger (`FillCommon`). The copy weapon in the mod machine puts himself, `CPed::SetCurrentWeapon`
+(0x5E6280): he immediately changes the slot and model. `SET_CURRENT_CHAR_WEAPON` peda player only records the
+choice (`m_nChosenWeapon`), and uses it `CPlayerPed::ProcessWeaponSwitch` (0x60D850) only on foot. A replica
+of the passenger who had changed his weapon with the wheel remained with the ouzi the game had given her on
+landing, and the second player saw a submachine gun in her hand (27.10). Until the owner sticks out (no R1),
+the gun model is removed from the copy (`CPed::RemoveWeaponModel`, 0x5E3990), like that of a seated passenger.
+
+The driver is also protruding (0.3.3, player selection 01.11). In the game, this is the driver's branch in
+`CTaskSimpleCarDrive::ProcessPed` under the "aiming behind the wheel" cheat (OUIQDMW,
+`CHEAT_WEAPON_AIMING_WHILE_DRIVING`): with the cheat included, the player at the wheel sticks out with a
+submachine gun from the slot 4. The mod replaces reading the cheat flag (0x6446B6) with calling its check
+(`DriverDriveBy` in `Players.cpp`, via an insert that saves the ecx and edx) and removes the check of the slot
+4 after it. With the cheat turned on, the check repeats the game. Without a cheat in the session, the driver
+sticks out while holding the right mouse button (`m_bVehicleMouseLook`; R1 the driver has a handhold, so there
+is no such thing on the gamepad), with any firearm instantly hitting in the hand and until the mission has
+banned firing from the car (`m_bCanDoDriveBy`). Released the button, and the task ends with its 7 command,
+like a passenger. A copy of the driver is not able to receive such a button: it sticks out while the camera of
+its owner is in sight mode from the car (`MODE_AIMWEAPON_FROMCAR`, it is set by the shooting task itself for
+the player, `CTaskSimpleGangDriveBy::SetupStaticAnimForPlayer`). Repeat the task while it is running
+(`CTaskManager::FindActiveTaskByType`, problem 1022).
+
+The camera of the protruding driver was pulled towards the center during shooting (01.11, again 02.11). The
+sight from the car (`CCam::Process_AimWeapon`) at the driver is a timer of inactivity (0xB6EC48, ms). When it
+has passed 2 seconds and the sight is closer to 30° to the nose of the car, or has passed 5 seconds, the
+camera smoothly returns to the nose. The timer resets only the mode stick for two and the shot until the timer
+is less than 2s. The mouse does not touch him, and while the driver held the mouse in place and shot, the
+camera was taken to the center. While the player driver is leaning out, the mod keeps the timer at zero.
+Turning the pedal here does not give anything: each frame gives the driver a turn of the car
+(`CPed::SetPedPositionInCar`).
+
+The passenger also fires rocket launchers (#94, only the passenger of the player's choice). The task of firing
+from the window immediately ends for the weapon is not an instant hit (0x62D3DF): this check is replaced by an
+insert that passes the RPG and homing rocket launcher at the passenger-player (`DriveByWeaponOk`).
+`CWeapon::FireProjectile` shoots the player's missile only from the aiming camera (`MODE_ROCKETLAUNCHER` and
+others from the first person), and once it sticks out in sight mode from the car. At the time of the shot
+(call `CWeapon::Fire` of `CTaskSimpleGangDriveBy::FireGun`, 0x628328), the mod puts the camera
+`MODE_ROCKETLAUNCHER` and the rocket flies where the camera is looking. There's no target capture, homing goes
+straight. A copy of the passenger does not fire a rocket: it is sent by the owner's game (`Fire`). The round
+sight of the protruding player `CHud::DrawCrossHairs` draws only for weapons 22-33, 37 and 38, and the rocket
+launchers had no sight (01.11). Insert on the 0x58E1C7 adds 35 and 36 in sight mode from the car.
+
+The car is owned by its driver. As soon as the player gets behind the wheel, his game begins to send out the
+physics of the machine: position, quaternion, speed, steering wheel, gas and brake, damage, siren and horn.
+The mirror has the status of an AI-controlled machine, so its AI steering (`CCarCtrl::SteerAICarWithPhysics`)
+is turned off: without a task, it stung the brake and the handheld, and the mirror rode in jerks. The mirror
+displays the damage to the owner in the way that the save load builds them: repairs the machine
+(`CAutomobile::Fix`) and puts the parts in condition (`SetupDamageAfterLoad`). This assembly re-discards every
+missing part (`SpawnFlyingComponent`) and with each new dent in the owner’s dent, the mirror again dropped the
+already lost hood and bumpers: one car had a pile of them (02.11). The assembly itself rewrites part of the
+state (door that can not be damaged, `SetDoorDamage`), and the mirror, which checked the living state with the
+sent, was assembled twice per second, dropping parts each time. Now the part lost from the last assembly falls
+once, the rest are simply hidden (at the time of assembly, the counter of temporary objects
+`CObject::nNoTempObjects` costs 150, and the game does not create debris), and the reassembly takes place only
+in a new state from the owner. In the back seat of Wayfarer (586), players saw a distorted face: jaw down,
+eyebrows sideways (02.11). This is a game file error: `WF_passenger` is the only one of the passenger
+animations without facial bones (26 bones vs. 32), and these bones do not have a single node with a turn.
+`HoldWayfarerFace` (Players.cpp) holds on such a passenger `CAR_sitp` of ped.ifp partial animation with a
+weight of 1%: the facial bones take rest from it, the rest it hardly moves. The flag of the secondary problem
+removes it with the landing (`CCarEnterExit::RemoveCarSitAnim`), and `anim::Main` does not count such
+animations. Log `NoteRideAnims` is still there. Handle (`bIsHandbrakeOn`) takes a mirror from the owner
+(`F_HANDBRAKE`): left on since the car was in this game, he held its rear wheels, and the car was driving with
+burning stop lights and smoke from under the wheels, as if braking (“Cesar Vialpando”). If there is no land
+under the mirror point in this game, it stands exactly in the place of the owner. The mirror that our player's
+car crashed into (`CPhysical::GetHasCollidedWith`, 0x543540, both ways) moves 0.6 seconds only by the physics
+of this game and the next 1.4 seconds returns to the owner's place several times slower than usual.
+Previously, every shot of it was pulled to the place of the owner, who did not yet know about the impact, and
+the car from the traffic of another game stood as a wall: our car rested on it (27.10). Cars with a player
+inside and airplanes with helicopters are not affected. An empty car stays behind the last driver while he's
+around. Then the possession goes to the nearest player.
+
+The interior door for the time of dimming (about 2 seconds) puts up to 32 things around area 13 to hide them,
+and then returns (`CEntryExitManager::SetAreaCodeForVisibleObjects`, `ms_visibleEntityList`,
+`ms_oldAreaCode`). The empty machine at the entrance was where there was no player: cycle `gone` in
+`ScanTraffic` slal `G_VEH_REMOVE`, the other game took a copy of itself (`KeepsWhenDeleted`), and after the
+door both declared the car again, and there were two of them (Binco, disassembled 04.11). `TrueArea`
+(Game.cpp) sees through it: machines and people take the real area. The same pairing occurred when one player
+took another player's car (`createdByUs`) and left it while he was in the interior: the owner let it go
+because the other player was in another area, and his game announced its copy over the top. Now, such a
+machine closer to `kTrafficOut` to the door that another player has left (`rp.streetPos`) remains online
+(`ByTheirDoor`). If she's taken further and abandoned, a couple is still possible.
+
+An empty machine, under which the owner has no land in the game (`CColStore::HasCollisionLoaded`, 0x410CE0:
+the player has gone far or into the interior, and the collision is loaded only around him), the owner's game
+keeps motionless: flag `FREEZE_CAR_POSITION` (`CPhysical::bDontApplySpeed`), check once in half a second
+(`Vehicles::HoldCarsWithoutGround`). This is how the game holds its mission machines until a collision loads
+underneath them (`m_bIsStaticWaitingForCollision`). A standing car with no land did not drop anything, but
+when it was touched, it fell through the map. The partner went to Binco, the host opened the door of his
+Savanna: in the partner's game, a copy of the host opened the same door, the machine woke up and fell, and
+behind it a copy of the host and the host himself who sat in it (03.11, 0.3.2; "at a distance, the partner
+often does this"). The car is released as soon as the ground is back, our player has sat in it or the car is
+no longer ours (the one who sat behind the wheel, drives it in his game, where the land is). A copy of another
+player, seated as a passenger, does not remove the retention: it would wake the car and wake up. Cars with
+people who are not players (traffic), the mod does not keep: their game leads itself. Other people's flags
+freeze (mission) fashion does not touch: such cars he misses. The mirror takes the position with advance on
+the speed of the owner for the time from the last state, and the turn now too: the quaternion is twisted at
+the angular velocity (`Quat::Turned`, unit test `unit/test_quat.cpp` in the test repository). Previously, the
+car, which is rotated in place with a braked gas (W+S, “donut”), each frame was pulled back to the turn from
+the previous state, and the other player it rotated slower and twitched. In the bot test, the course
+divergence at such a turn is not more than 7 °.
+
+With the state of the car there are also parts that the driver moves. The mirror does not change them, because
+his status is not a player, and each frame receives the values of the owner:
+- `CAutomobile::m_wMiscComponentAngle`: Hydra nozzles, raised hydraulics, tow truck boom, forklifts and other
+  movable parts;
+- chassis of the aircraft `CPlane::m_fLandingGearStatus`, during the lifting and release of another `SetGearUp`
+  / `SetGearDown`, so that the wheels disappear or return, and for the flame of the engines
+  `m_fAccelerationBreakStatus`;
+- Rhino towers, SWAT van and fire truck (`m_fDoomVerticalRotation`, `m_fDoomHorizontalRotation`)
+- motorcycle and bicycle slope (`CBike` + 0x648, + 0x650). Its `CBike::ProcessControl` outputs from the lateral
+  velocity change in a step, and the speed of the mirror puts every state: the copy swung from side to side,
+  and the rider did not lean forward and backward.
+
+The horn sounds while the counter is raised (`CVehicle::m_HornCounter`), only in the player's car. In any
+other machine, the sound of the horn plays a random pattern of signals, so the mirror hums through the
+interception `CAEVehicleAudioEntity::GetHornState`: exactly while the owner hums. The owner picks up the
+player's horn from the button (`CPad::GetHorn`) and the NPCs from the counter. The alarm keeps its time in the
+same meter, so the car with the mod alarm does not touch it.
+
+The helicopter spotlight (`CHeli` + 0xA11 on, + 0x9F4 points, + 0xA00 brightness) comes with the state of the
+car. `CHeli::ProcessControl` at the mirror it turns off (there is no police AI or player at the helm), so the
+mod puts the owner's values after processing, and at night `CHeli::PreRender` adds light to the frame, like
+the owner. There are four spots for spotlights in the frame (`CHeli::HeliSearchLights`), and
+`AddHeliSearchLight` does not check the border: with helicopters of another game, the night chase lit the
+fifth on top of what lies behind the array. The extras are missed.
+
+The height of the hydraulic wheels is kept only in local variables, while counting it from the right stick.
+Therefore, in a car driven by a remote player, heights are considered here from his stick the same formula.
+The mirror has the status of a mission machine, and for it, `CAutomobile::HydraulicControl` takes heights out
+of `CVehicle::m_aSpecialHydraulicData` (the slot allocates `GetSpecialColModel`, slots for the entire game
+four).
+
+A trailer or a car pulled by a player's car is picked up by the game (`m_pVehicleBeingTowed`) and sent out as
+often as a car with a driver. The status of physics is not imposed on the mirror of the trailer: the abandoned
+trailer itself is looking for a tractor (`CTrailer::ScanForTowLink`), even if the tractor in this game is a
+mirror.
+
+`CREATE_CAR` marks the car occupied by the script (`CVehicle::bIsLocked`), and the tow truck and tractor do
+not catch such (`CAutomobile::TowTruckControl`). Mirrors are created by the same team, so the mark is removed
+from the mirrors of ordinary cars, and the mission machines remain as in the owner's game. Only the tow truck
+driver button clings to the car, so the coupling is transmitted by the driver’s game (`X_TOW`, network id of
+the tractor), and the other clutches copies (`CVehicle::SetTowLink`) and leaves the car on the hook the status
+of towed: with any other, its processing breaks the coupling. A luggage train at the airport is a chain where
+each trolley pulls the next one, and the driver’s game takes the entire chain.
+
+Events “began to sit down” (car, seat, driver or passenger, theft) and “out” are transmitted reliably. Remote
+ped plays regular landing and exit tasks, and if the animation fails due to outsynchron, it is transplanted
+instantly (`WARP_CHAR_INTO_CAR*`). There will be no animation if the car has already left: its speed is more
+than 3 m / s or up to it is more than 8 m (`CarGoneOn`). Then the copy immediately sits in place. Previously,
+she ran for a car or motorcycle up to 4 seconds, on which the owner sat for a second, and only then was
+transferred (27.10). While the owner is still walking to the car (his state is “on foot”), the speed threshold
+is 8 m / s: the car is stolen, which rolls to a stop. At 3 m / s, the copy did not go to the door, the driver
+from the partner pulled out the synchronization, and he played the animation “pulled out” in the side, at the
+lamp, and a copy was put in the car without animation (28.10). The entrance pass is written into the log with
+the speed of the machine and the distance to it.
+
+If our player is sitting in the driver's seat, his companions (player group: Denise in Burning Desire,
+recruited Groves) sit in the vacant seats of the same car, and when he gets out, they go out
+(`Players::GroupRides`). The game itself calls the group into the car only by the event "leader got behind the
+wheel" (`CEventLeaderEnteredCarAsDriver`), so before the satellites remained outside until the host sat behind
+the wheel. Maud lands them 3 seconds after landing and only those who just follow him (Task 913, 923, 1207): a
+mission that seats its people (Sweet's Girl) has time earlier. The mission ban (group `m_bGroupNeverFollow`,
+`m_bMembersEnterLeadersVehicle`) is observed.
+
+Body details (`CVehicle::m_anExtras`, + 0x438: board on the roof of the Picador, raised or folded roof of the
+convertible) are selected by the game when creating the car randomly, and the two players did not match. The
+owner sends them with the announcement of the car, and a copy is created with them
+(`CVehicleModelInfo::ms_compsToUse`, 0x8A6458: in front of `CREATE_CAR` parts number, after it again
+"accidentally", -2). The parked car, which has already stood in both games and has been accepted as a replica,
+remains with its details.
+
+The passenger sees the partner's car as a mirror that moves smoothly through network data. The driver shows
+the passenger as a remote player in his seat.
+
+If the owner has removed the car in which our player is traveling as a passenger (“Home Invasion” removes the
+van from the warehouse), our player leaves next to the owner’s player when he walks and is not more than 50
+meters, otherwise in the place of the car. He used to stay in it: the car would become his own, get stuck in
+the gates that are closed here, and he would fall under the floor.
+
+The health of the car was in a state before, but a standing car was sent out every 2 seconds. An inverted or
+burning machine loses about 200 units per second, and the smoke of the copy (health white, then black) and the
+fire lagged behind the owner. Now, a car that has changed its health is sent out as often as a car that is
+traveling.
+
+The radio-controlled model is a normal car of its game without a driver. The player who controls it stays on
+foot (`CPed::bInVehicle` is not put, the model lies in `CPlayerInfo::m_pRemoteVehicle`), so his fortune goes
+like a foot, and the model of the other game sees a mirror like any car.
+
+Trains are not network machines: cars go on the rails themselves, behind the first car. This is shown by
+`Trains.cpp` (see para. "Common World." A player on a train sends a state of a pedestrian with a flag of
+`F_IN_TRAIN`, and another game lands a copy of it in the cockpit of his nearest train
+(`CTrain::FindNearestTrain`), removing the NPC driver with whom the train is created. If the player gets into
+the cockpit of a copy of a foreign train, the train owner’s game first leads to the cockpit a copy of it
+(`TRAIN_ENTER`), and transplants it only if it does not reach.
+
+** Radio in the car** (`Radio.cpp`, `G_RADIO`; user request 03.11, device from PR #49). Each game has its own
+radio (`CAERadioTrackManager`, 0x8CB6F8). The remote driver was not a player for the sound of the car
+(intercept `CAEVehicleAudioEntity::Service` in `Players.cpp`), so the passenger's radio turned on his own
+landing (`TurnOnRadioForVehicle`): the station of the car, a random track from a random place, and the
+passenger switched it himself. Now the station is selected by the driver (user choice). While players are
+driving in his car, his game sends a station, queue tracks (`m_ActiveSettings.TrackQueue`, their types and
+numbers) and a place in the playing track (`PlayTime`: the flow position that `CAERadioTrackManager::Service`
+receives each frame). It sends immediately when changing the station, track or passengers, and to correct once
+every 3 seconds. As long as the driver's radio is rebuilt, it doesn't send anything. The passenger's game puts
+the same station as the button (`StartRadio`, 0x4EB3C0), and replaces the tracks it has chosen with the
+driver's tracks in `m_RequestedSettings`. The place she puts when `Service` starts the track (call
+`AEAudioHardware.PlayTrack` to 0x4EBB11): where the driver is now, adjusted for ping and for the time the
+stream spends starting. If the passenger has separated from the driver for more than a second, the track is
+restarted, but not more than twice per track. The click, rearrange sound and station name on the screen are
+the same as the button.
+
+While the game itself runs the same track (passenger just sat down, `m_nMode` less than `RADIO_PLAYING`), the
+matching waits. If the track is still in the flow channel (`CAEStreamingChannel`, "ready" or "stopped"),
+`CAEStreamThread::Service` does not rewind it, but only releases it (`SetReady`), and the place from the
+launch disappears. This branch of the game connects the tracks (`CheckForTrackConcatenation`). The track was
+running from where the game had chosen, 135 seconds from the driver (05.11), and one of two corrections was
+lost. The bill of amendments starts anew with a new trip and a new station. What ended the amendment, writes
+the log: “in step” with a difference in MS or “kept missing”. Mode tracks are matched by number, so players
+with different sound files (mode) number will match, and the song does not. The length of the track of the
+driver comes in the same message, and if your own log writes it once on the track (“the two games’ audio
+differs”).
+
+The time of the game itself is not accurate. The flow channel buffer consists of two halves, at the 32 kHz
+track, half plays 3072 ms. `CAEStreamingChannel::PrepareStream` fills both and puts `m_lastSlot` in 0, and
+`m_lastWrittenSlot` leaves from the previous track. If there's 1, `UpdatePlayTime` shows half the buffer more
+until the first half finishes. The passenger checked after 3 seconds after the launch and saw a difference of
+3 seconds where it was not, and the second time in vain started the track. The driver, who had just got into
+the car, sent a seat 3 from the front, and the passenger actually went ahead until the next amendment (05.11:
+7 trips out of 12 ended in "kept missing" with a difference of 2.9-3.1 seconds). Hook `PrepareStream` in
+`Radio.cpp` levelles the field, and the time is correct from the first frame. The field only reads
+`UpdatePlayTime`, and it has no other customers.
+
+The radio buttons of the remote driver passenger do not work: `Service` passes `CheckForStationRetune` and
+`CheckForStationRetuneDuringPause` (0x4EB9F4, 0x4EB9FD), and their requests (buttons, `RetuneRadio` scripts, a
+sound page in the menu, at `no_pause_menu` and under the open menu) are reset. After the first tap in a
+session, the chat writes that the driver switches the radio. User Track Player plays files from the driver’s
+computer, so the passenger turns on his own, and without his files the radio is turned off, and this also
+writes a chat. It doesn't transmit music online. The driver or the passenger is out, the synchronization ends,
+and the radio stays as it was. With the driver-NPC and in the car with a special radio (police scanner)
+everything is in the game.
+
+When leaving the machine, the game remembers the station (`CAERadioTrackManager::StopRadio`, 0x4E9820: station
+at +0x74, time at +0x58, day and hour of the game at +0x16 and +0x17) and in the next machine for a minute
+turns it on itself (`StartRadio` when the autoset radio is included in the menu). After the passenger
+traveled, the partner station came to the host’s own car (03.11: the host machine played SF-UR from the trip
+two minutes earlier), and the pause menu showed it selected: the menu takes the current station when it opens.
+Now, the passenger's game remembers these four fields when he sits at the remote driver, and returns them when
+he gets out of the car (as soon as `StopRadio` recorded his, or a second later). If a passenger has moved
+behind the wheel of the same car, the station is already his, and nothing returns.
+
+When leaving the pause menu at the host "the game was not shown, there were lights" (03.11), this is not
+visible in the logs: the mod menu did not record. Now `Diagnostics` writes opening and closing the pause menu,
+whether the radio is reconfigured (as long as it is heard, `CMenuManager::CheckForMenuClosing` does not close
+the menu on Esc: `CAudioEngine::IsRadioRetuneInProgress`) and the screen is darkened (`TheCamera` + 0xBFC;
+while the screen is darkened, `Idle` does not draw the world). If after 1.5 seconds after closing the screen
+is still darkened, this is a warning in the log.
+
+## Ownership of vehicles and NPCs
+
+Each entity (machine, peda, object) has an owner, that is, a game that simulates it. The owner sends out her
+fortune, and the rest of the players instead create a mirror: a missionary entity without AI, which is driven
+by the network.
+
+Each player creates a population around them. If the partner is closer to 60 m to the host (hysteresis up to
+90 m) and he has no wanted, he does not create pedestrians, traffic and parked cars. All this is done by the
+host (`Population.cpp`). With the wanted partner calls his cops himself, but the generators of parked cars are
+still there (`g_covered`): his traffic and the police are responsible for the chase, and the host game gives
+the parking nearby. A wanted partner's game put their cars in the same parking spots as the host, both
+declared them at once, and a copy of each wiped out her car at the other game (08.11, four, further on what
+came out of this). When a partner's population is turned on again, the counters
+(`CPopulation::m_CountDownToPedsAtStart`, `CCarCtrl::CountDownToCarsAtStart`) fill the county at once, rather
+than one pedestrian at the edge of the screen. They are turned on only behind a dark screen: they put people
+10 meters in plain sight, and cars are close to the player. The host keeps its peds and cars near the partner
+only as long as it has land under them (no further than 100 m from the host). Otherwise, the engine would have
+removed them from the host’s camera, and without the ground they would have failed.
+
+With a toy on radio control, the game creates a population around it: `FindPlayerCentreOfWorld` (0x56E250)
+takes `CPlayerInfo::m_pRemoteVehicle` before the machine and the player himself. Therefore, if a partner or
+host has a toy, the distance for this rule is measured from it, and the partner finds the host toy by its
+network number (`G_RC` 2). In "Supply Lines", both CJs stood on the roof of Zero, the partner's population was
+turned off, the host created his own around his toy, and the partner's plane flew over empty streets (31.10).
+
+Pedestrians are declared within a 120m radius of another player. Cars with drivers and passengers he declares
+in a radius of 170 m. Further 150 and 220 m, respectively, he removes them from the network (`Peds.cpp`,
+`Vehicles.cpp`). The pedal mirror is obtained from the civil pedal of the same model with an empty decision
+maker (template 65542) and all proofs. It goes with the tasks of “go to the point”, so the animations of
+walking and running are common. Host cops are seen by a partner as mirrors, and vice versa. A mirror that
+could not be created in 5 seconds, once falls into the log with the reason: a special model, the model is not
+in this game, the model is not yet loaded, the car is not or the place is occupied, the pool of pedes is full
+(no more than 30 per session). In Robbing Uncle Sam, the partner did not see the attackers on Ryder (01.11),
+and there was no reason in the log.
+
+The distance to the other player is measured from his toy (`RemoteViewDistance`): the partner sees what is
+next to his plane, not just what is next to his CJ on the roof. Without this goal, the hosts in the "Supply
+Lines" were only tagged on the radar (31.10). The game announces its toy, no matter how far it flies, so that
+the other game knows where the player is looking from.
+
+If the same car is already in place (parked cars both games create the same), it becomes a mirror instead of a
+new one. The machine that the script created is not taken this way: then it would become a normal machine, the
+engine would remove it, and the script would fall on the next command with it.
+
+The car with the player behind the wheel is owned by this player. The rest of the cars and pedals are owned by
+the person who created them. The owner does not remove his peds and cars next to his partner (ManagePed and
+PossiblyRemoveVehicle are intercepted).
+
+The car in which the player arrived, waits at the entrance while he is in the interior. The interior lies
+miles from the door, and the `CCarCtrl::PossiblyRemoveVehicle` measures the distance on the map, so the game
+removed the car or gave it to another player with a regular machine, and it disappeared as soon as he too
+left. Now, for the duration of the interior, the machine is listed as a mission machine, and after the exit,
+it receives the former type.
+
+The door lock (`CVehicle::m_nDoorLock`) comes with the exterior of the machine: the mission locks and unlocks
+its machines after both games know about them. There used to be a lock, which was when the car became known,
+and the partner who got into the locked mission car, could not get out of it (Savanna after "Cesar
+Vialpando").
+
+When the owner’s game has removed his or her passer-by or regular car and the other player is noticeably
+closer to them (30 m for the pedal, 40 m for the machine), it passes them to the other player’s game
+(`G_PED_OWNER`, `G_VEH_HANDOVER`). The car leaves with the peds sitting in it. The host makes his mirror a
+normal pede or car and lets the car with the driver drive around the city, and then removes them herself.
+Previously, such passers-by and cars disappeared in front of a partner as soon as the host drove away. Without
+a margin of distance, they were thrown back and forth while the players were standing nearby. What the game
+would delete (`CVehicle::CanBeDeleted`, `CPed::CanBeDeleted`: not mission characters, not recruited, not those
+who get in the car or get out), what is not visible on its screen and what does not hold its script
+(`CTheScripts::MissionCleanUp`, `StoreVehicleIndex`). The usual machine, which the owner's game has removed
+next to another player (about 80 m, in the same area), this game keeps with the people sitting in it
+(`Vehicles::KeepsWhenDeleted`, `TakeOver`). If there are several players next to the car, one game leaves it:
+the host, if the host is nearby, otherwise the player with a smaller number (the same order as two at the
+wheel). The others delete their copy and get the machine from the game announcement, so they lose about 0.3
+seconds. Three and four of each game left a copy next to itself and announced it again, and in one place stood
+up one car from each (08.11). If two at the 80m border think differently and leave the car both, their copies
+will wipe each other off when they appear and leave like the cars that gave way (below). So after the death of
+the host, his game removes the police from the streets, and police cars cannot be transferred: their crew goes
+into someone else's game, only to chase. They used to disappear in front of a partner. During the mission of
+the host, the partner does not leave such machines to himself: the mission clears the scene (`CLEAR_AREA` in
+the lowrider contest), and the abandoned machine returned to the host with the partner's machine. Mission
+vehicles, skeletons and helicopters with planes are still leaving: a helicopter without police AI would be
+hanging in the air. Cops, medics and firefighters are not transferred: the mirror of another player is always
+a civilian pedal. Nor is a person with a script-brain (`CPed::bHasAScriptBrain`) transmitted: a diner cashier,
+an Ammu-Nation salesman, a hairdresser, a tattooist. The game puts it at the attractor and leads the script,
+and the other player he remained a copy without both. The attractor there was considered empty, the game put
+its cashier, and there were two. Only the player who is currently in the game gets it: while the partner loads
+the world, nothing is given to him.
+
+In "Ryder" the script of the diner host (`JFUD`) at the signal of the mission (`$352`) removes its cashier,
+and the mission puts its own 0.9 m from its place (`CREATE_CHAR 24 155`) and its copy goes to the partner. The
+partner does not receive such a signal, and his `JFUD` (he goes if the partner's player enters the door) holds
+his cashier: two cashiers next to him, calm and with his hands raised (28.10). Now the man script of this game
+(`Peds::MarkLocal`) is hidden from the partner while during the host mission 1.5 m away from him is a copy of
+the man mission of the host of the same model, and again visible when they dispersed (`Peds::HideTwins`). You
+can't delete it: `JFUD` without a cashier, each frame erases hints (`CLEAR_HELP`).
+
+Police lock-up cars (`IMPND`, it is launched by `IMPND_L` when the player is closer to 120 m) each game puts
+itself, and copies of strangers stood on top of their own (“why the car on top”, “clone”, 28.10). The machines
+that created this script remain their own until no one is behind the wheel (`Vehicles::KeepLocal` of
+interception `CCarCtrl::CreateCarForScript`, check at `ScanTraffic`). His people were already his own
+(`MarkLocal`).
+
+Also, other mod scripting machines (Busy Pedestrian, Urbanize: CLEO scripts put machines in permanent places
+and let their garbage trucks run) remain in their game. Their code lies outside the main.scm space, and it's
+not the main.scm stream from a single file (`m_bIsExternal`) as in #36. Each game made its own, copies of the
+other game's machines got into them, and the machines exploded (30.10). Such a machine goes to another game
+only when the player is sitting in it.
+
+The machine that the owner removed to the shelter garage (the door closed and the game saved it in the garage,
+or the host took the partner's car), the owner's game deletes, and the other game left a copy of itself as a
+regular machine (`KeepsWhenDeleted`). In the garage, the car was in two places at once: in the garage
+recording and on the floor. The garage was full, cars were coming out again and again, and the door would not
+open (CJ 28.10). Now, a copy that stands in the shelter garage (`CGarages::IsPointWithinHideOutGarage`) when
+the owner removes it, goes away here (`HandleRemove`): it is held by the garage record.
+
+A pedestrian who fights, shoots or runs away does not give up as long as there is ground under him: handed
+over, he became calm to a passer-by in the middle of a fight. Further than 100 m from his player, the land
+under the pedal of this game may not be, and then he is given even in plain sight, otherwise he will fail.
+Released by the script to disappear (`REMOVE_CHAR_ELEGANTLY`, `CPed::bFadeOut`) is not held or given: Catalina
+after the failed mission stood on the restart twice.
+
+The game removes its passers-by by its camera: outside it and beyond 25 m peda disappeared in 4 seconds,
+although standing in front of another player. Now the ped stays while the other player is looking at him (no
+further than 60 m and within 60° of the direction of his camera, the camera is in his state) and this game has
+the ground under him.
+
+Passing through the door, the game removes all of its passers-by (`CEntryExit::TransitionFinished` →
+`CPopulation::RemoveAllRandomPeds`). The street around the other player was empty when this one entered the
+store, and the interior people were disappearing from the one who was left inside. Now those who are 60m away
+from the other player move into his game first.
+
+The machine that was transmitted by another game loses its mirror protection (`Release`). In the past,
+collision protection remained on it, and its traffic did not get damaged in accidents.
+
+The mirror is protected from the population of its game: while the machine is alien, it is listed as a created
+mission, and when it becomes its own again, it receives the same type (`Protect` and `Release` in
+`Vehicles.cpp`). In the past, a car that was taken by another player remained common in the previous owner’s
+game and was removed as soon as he left, along with the other player’s character sitting in it. The script
+machine of another game remains missionary for the new owner: it cannot be removed in the middle of the
+mission. If the owner removes the machine, and its copy here is not created by a mod, but is taken from his
+world, it is not deleted and returns to his game, the script machine remains at his script. When a script
+releases a machine that is now a mirror in its game (its mission is over), the owner learns about it
+(`G_VEH_SCRIPT_FREE`) and makes his copy a regular machine. Otherwise, she remained missionary forever, and
+with a new announcement, she stood second. The walking mirror may lag behind: the task of walking is waiting,
+the path blocked what is only in this game, or the straight line did not coincide with the route of the owner.
+If the backlog is more than 1.5 m, each frame is pulled up by 5% to the owner's place. The mirror goes to a
+point slightly ahead, in the same direction of the owner, about a second ahead, so that the walk does not
+freeze between states. When the owner rolls around the corner, the dot ends up in the wall and the mirror goes
+into the building (issue #43). If a building or object interferes with it (`CWorld::GetIsLineOfSightClear`),
+the mirror goes straight to the owner’s seat. The mirror crouches with the owner’s pedal (over the cover in a
+shootout): the flag came before, but was not used.
+
+The pede, which the owner was out of the car without the task of exiting (dropped off the motorcycle, thrown
+out by an accident, pulled out), here comes out immediately in its place. The `TASK_LEAVE_CAR` used to get off
+politely or sit on a sliding motorcycle for a few seconds. While someone gets into the car here (our player
+steals it), the driver is not put back: the next one will come in a state that he was pulled out. The driver
+that the mission keeps behind the wheel (`CPed::bDontDragMeOutCar`: Smoak on a motorcycle in Just Business)
+cannot be pulled out of the mirror. Previously, our player took away the mission motorcycle here, and from the
+owner, Smoak sat on a copy of the car and did not go anywhere.
+
+The local manager of the population does not touch the mirror: the removal comes from the owner. When the game
+starts or restarts, the player sends `G_RESYNC`, and the others re-announce their cars and peds.
+
+The task that the script gave takes up one of 128 entries `CPedScriptedTaskRecord` until the ped takes it. The
+mirror is where this game is not loaded with collision, does not take tasks, and new ones accumulated until
+the recordings ended, and the game fell. Now the mirror is not given a new task while the old one is waiting
+(`TaskPending` in `Peds.cpp`). If the records are still over, the game first releases the executed, and the
+log is written which teams hold them.
+
+The time of day and weather are set by the host (`World.cpp` times per second). The partner lets down his
+watch when it parted with the host's clock for more than half a minute of play. A couple of weather hosts (old
+and new) he takes, only as long as both are the same hour. Each game counts a fraction of an hour
+(`CWeather::InterpolationValue`) by its own clock, and its decrease of `CWeather::Update` (0x72B8A1) takes it
+for a new hour and moves on to the next weather of its list. The mod used to record a partner's share of an
+hour of the host. Because of the network delay, it often slightly overtakes his own, and the partner's weather
+and color correction switched about once per second. Now, after the eyeliner, the fashion puts a fraction of
+an hour on the partner's new watch. The game itself translates hours after death or arrest (12 hours), saving
+(6 hours), and missing a trip (`CGameLogic::PassTime`). A partner in the host world misses this translation
+(call `CClock::SetGameClock` to 0x441534): the clock of the world is shared, and before they returned in a
+second synchronization, and the light galloped twice.
+
+The search for a host that comes to the partner along with saving is reset at the start.
+
+NPC actions are repeated by the game itself. Aiming and shooting are repeated with "aim" and "shoot" tasks
+with posture, flash, sound and tracers. The target could be a player, a network pedal or a point. Copies of
+police officers look like police officers themselves, according to three edits, verified by a bot from
+animations on both screens. The policeman holds the gun with two hands (`colt45_fire_2hands`): the game gives
+the skill `WEAPSKILL_COP` peda type pistol COP, and the copy is a civilian, not to be considered by the
+police, so the skill (`CPed::m_nWeaponSkill`, + 0x72C) she puts himself while in the hand the gun. Step side
+by side with the weapon (`GunMove_L/R/FWD/BWD`) copy makes its task shooting: in
+`CTaskSimpleUseGun::m_MoveCmd` (+ 0x14) is written the direction of speed of the owner relative to the copy.
+At `ControlGunMove` it is impossible: at a high FPS, its steps do not grow to the threshold of 0.1, and the
+copy stood and slid. The squat copy (`SetTaskDuckSecondary`) was created as a squat that holds another task
+(`DUCK_TASK_CONTROLLED`). The policeman has the task of attacking him, and the copy has no one, and after 4
+frames it ended. Maud put it up again every 0.4 seconds, and each time the game filmed an animation of the
+weapon, so the copy never fired a squat. Now the squat is translated into script
+(`CTaskSimpleDuck::SetControlType`, `DUCK_SCRIPT_CONTROLLED`) and holds until the owner stands up. The
+policemen walk into the game of the wanted player with only two stars: one is chased by one policeman, and the
+others stood next to him and did not let the star burn (issue #56). Getting into and out of the car is
+repeated by regular tasks. Everything else (conversations, phone, benches, fights, falls) is transmitted as
+the current “action animation” of the owner: the number of the IFP block and the animation number in it.
+Walking, running and rack (the pedal movement group) are not transmitted, facial expressions (flag
+`ANIMATION_FACIAL`) are also transmitted: each peda has its own task. Partial animation (hit, block) is
+superimposed on the full (battle stand) and is considered an action while playing. The mirror holds the full
+under it and continues it, rather than starting over. Cycling animation that has had time gone backwards has
+just gone on a new lap, it's not a restart. As long as the mirror holds full action, the game does not change
+the position of walking and standing (`CPed::SetMoveAnim`): the real pedal does the task of fighting, but the
+mirror does not. Without it, the rack would go out and rise anew after each stroke, and it seemed like the NPC
+was swinging all the time.
+
+Updating the animations peda takes the first of them without looking (speed allocation, 0x4D1750), so the
+pedal without animations drops the game. The peds of the game itself always have a stand or a walk under
+everything else. The action of the mirror (combat stand) fades when the owner runs out, and the game gives the
+walking posture only when the state of movement changes, and the games flew out half a second after the fight.
+Now the mirror without a long animation of the body returns the rack of its set
+(`CAnimManager::BlendAnimation`, `ANIM_ID_IDLE`).
+
+On foot, the NPC mirror shoots the firing task (`TASK_SHOOT_AT_CHAR`, `TASK_SHOOT_AT_COORD`) while its owner
+shoots, and the rest of the time only aims. What the NPC shoots, the owner’s game saw on the empty clip, and
+cheat endless rounds (`FULLCLIP`, each game has its own) does not spend the clip from anyone: the partner’s
+people of the host only aimed (29.10). Now the shot is seen at `CWeapon::Fire`. The mirror is given 25,000
+rounds: from such a reserve, the game does not waste ammunition, and the previous 500 ended in a long
+shootout, and the mirror only aimed further.
+
+The mirror repeats NPC shooting from the car with the gang’s regular task (`TASK_DRIVE_BY`, task 1022): stick
+out, aim and shoot at the same target as the owner (at a copy of his target or at a point). His shots hurt
+what this game possesses, including its player, as does shooting a mirror on foot. Finishes the shooter: the
+mirror is cleared of tasks (`CPedIntelligence::ClearTasks`) and it sits again.
+
+Interior people (policemen, shoppers, tenants of a furnished house) are created by the game when its player
+enters (`CEntryExit::GenerateAmbientPeds`, `InteriorGroup_c::SetupPeds`). Before, each player had his own, and
+he did not see strangers. Now they are created by the player who entered first, and the other player misses
+these calls while the other player is in the same interior. The check goes to the point that the game
+transmits: the player is still standing at the door outside. Such people remain in the zero area, so
+`Peds.cpp` counts them in the player's interior, next to which they are standing. It could also be another
+player: earlier, when the host left, their game took them off the network, and the partner who remained
+inside, they disappeared. Now they're moving into a partner game. Most of the interiors hang high above the
+map, but some stand at street level (Atrium, Lil' Probe Inn), and the people of the street around them were
+counted inside and disappeared from the player outside. Below 500m pedes are always considered outdoors.
+
+The people that the script creates, in addition to the story mission of the host (seller Ammu-Nation,
+shooters, casino croupiers, gym boxers, airport security), the same script creates in another game for its
+player. Announced in the network, they stood at each two in the same place. Now such pedes remain in their
+game as rebounds (interception `CPed::SetCharCreatedBy`). The pede, who left by car, is announced again, and
+the other player still sees the people who work part-time on the street (a taxi passenger, vigilante
+criminals). Models of such people in two games can differ: the script chooses them randomly. Tested by a bot
+at Binco and Ammu-Nation: In each game, one seller, host buyers are visible to a partner, and no one is worth
+twice.
+
+The exception is the gym coach in the ring (`GYMLS`, `GYMSF`, `GYMLV`). While he is fighting our player (Task
+`TASK_COMPLEX_KILL_PED_ON_FOOT` with the goal is our player, health is above 100 after `SET_CHAR_HEALTH 1000`;
+the sparring pair in the corner of the hall does not change health) or teaching him how to take him after the
+first victory (wide screen, closer to 8 m), he is announced to the network (`GymOpponent` at `ScanOwned`).
+Previously, the second player saw a copy hitting the void: “fight the invisible” (28.10). His coach of the
+second player at this time is in his corner, it is not hidden: in Las Venturas the same model boxes sparring
+partner, and the hidden model would leave the other without a pair.
+
+The pedestrian, who was handed over by another game, needs to be made normal again: the mirror was civil
+without reaction. It is returned to the owner type (except for cops, medics and firefighters, who have a
+different class) and the standard decision maker according to its statistics
+(`CPed::SetPedDefaultDecisionMaker`). The mirrors of the player who went out also become their mirrors: before
+they were removed, and his cars remained on the road without drivers. The cars of the deceased become their
+own and leave the network. When he connects again, his game will start counting numbers from the beginning,
+and the matching number will give him our car. The number counter now and starts every time from a new place.
+Accepted ped passes in the population counters from the type with which it was created to his own
+(`CPopulation::UpdatePedCount`). Without this, everyone left an unnecessary civilian and missing bandit, and
+the composition of the streets moved for a long game. The senses of the passerby return to him (gangs hear and
+see at 40 m, the rest at 15 m): the mirror is created by a script, and the script pedal hears and sees at 30 m
+and does not call its own.
+
+The mirror of the machine is invulnerable to collisions (`bCollisionProof`) as long as it is a mirror. One
+strong blow (the Rhino ram is considered fifteen times) exploded the copy immediately, its passengers died in
+this game, and the car from the owner drove further. The game gives its car in place of the mirror to him only
+if it is empty (the car of the parking generator is in both games): the car with the driver would be driven
+further by its driver, against the owner's states.
+
+Two drivers of one car (sitting at the same time, or one pulled out the other, and the game of the second did
+not see this) used to send each other applications for it while both were driving, and each saw a copy of the
+other frozen nearby. The machine remains with the player with a smaller number, that is, the host, and the
+second is transferred to the next place if it is free. The mission machine of the host, which was ridden by
+the partner, returns to the host when it is empty for 2 seconds. Otherwise, the host mission commands
+(replace, freeze, repair, delete) acted only on a copy of it from the host and immediately rolled back.
+
+The commands with which the mod creates and moves copies of people and objects (`CREATE_CHAR`,
+`SET_CHAR_COORDINATES`, `WARP_CHAR_FROM_CAR_TO_COORD`, `CREATE_OBJECT`) no longer clear space around them
+(`CTheScripts::ClearSpaceForMissionEntity`). A copy of the partner removed the taxi of this game along with
+the driver when the partner was driving in it, and a copy stood in his place. Copies of cars are still
+clearing the place, otherwise two cars at the same point flew away.
+
+His announced car, which was so erased by a copy of the car of another game, gave way to it. The game sends
+its deletion with a mark (`G_VEH_REMOVE`, byte 1, `NetVehicle::gaveWay`), and no one leaves such a machine for
+themselves: in its place stands the one whose copy was erased. Two games put their cars in the same parking
+spots and declared them all at once, a copy of each erased the other's car. The rest of the games were left
+erased and announced again, these copies erased each other in turn, and four in 15 seconds in one place scored
+a hundred cars: the pool was filled, the frame went 0.7 seconds (08.11). If both cars wiped each other at the
+same time, neither remains.
+
+The gait that the script gave to the pedestrian (`SET_ANIM_GROUP_FOR_CHAR`: drunk, old man), the owner sends
+in condition (`CPed::m_nAnimGroup`), and the copy walks just as soon as the block of these animations is
+loaded.
+
+A replica of a bandit, dealer, criminal, prostitute or bum gets the owner type. `CREATE_CHAR` makes for all
+these types of the same civilian, and the gangs of this game didn't consider copies alien: a fight between the
+people of the two games didn't start. The copy itself does not react to anything, the people of this game
+react to it. Our pedestrian hits a copy of a stranger by the owner (`G_DAMAGE` species `TARGET_PED_BY_PED`
+with the attacker’s number), and there his peda is injured by our copy of the attacker.
+
+The cops of this game, next to another player who is wanted (and we don’t), go into his game: only she can
+chase him. There, an accepted cop is created by a cop (`CREATE_CHAR` with Type 6) and begins the chase
+himself.
+
+A Grove fighter can be recruited when he is a copy, and a prostitute can be called to his car, too. The game
+asks the owner to give the pede (`G_PED_OWNER`, addressed to the sender himself), and the received pede joins
+the player group (`MakeThisPedJoinOurGroup`).
+
+The body removed by the owner dissolves in another player (`0x034F`) rather than disappearing immediately. If
+the pool of peds or machines is full, the copy takes the place of the farthest passer-by of this game, which
+is not visible, or an empty random car. Before, a copy just didn't show up.
+
+A replica whose owner is in the air (a SWAT fighter on a helicopter cable, a fall) hangs where he is.
+Previously, gravity pulled her down, the rule of “elevation difference greater than 4 m” put her back, and the
+fighter jumped up and down. A copy of the model that is not in this game (the other player has a mod) is not
+shown, and the magazine once writes which model is not.
+
+The game puts new people and machines in front of its camera. Another player nearby saw people appear 5-45m in
+front of him and cars right in front. Now the seat is closer to 42.5 m (for a 90 m machine) to the other
+player's camera and within 60 ° from its direction is skipped until the next attempt
+(`CPedPlacement::IsPositionClearForPed` in two calls `CPopulation::AddToPopulation`,
+`CCarCtrl::GenerateCarCreationCoors2`). Two more people check calls are untouched: one gathers neighbors, and
+the other "busy" means "put."
+
+The machine generator (`CCarGenerator`, parked cars) also looks only at its player
+(`CheckIfWithinRangeOfAnyPlayers`), and the high-priority generator places the machine at any distance. The
+robbery van (`CREATE_CAR_GENERATOR` model 609) appeared 2 meters from another player, inside the van of their
+joint robbery: both exploded and the robbery failed (03.11). The generator machines played the robber, and the
+second played the generators whenever one player was in the house and the other on the street. The generator
+now waits for another player to stand closer than 20m from his seat or sees that spot from 90m
+(`CCarGenerator::CheckForBlockage`), as well as a spot for a random machine.
+
+The high-priority generator puts the car further than 140 m from its player, and the
+`CCarCtrl::PossiblyRemoveVehicle` immediately removes the car outside the camera further than 45 m. The
+generator puts a new one in 0-10 seconds, and so on in a circle. The host waited at the driving school 144m
+from the van generator of the robbery in San Fierro, and in 10 minutes the mod announced 37 vans to another
+game, and the latter each created and removed. Now, a parked car only leaves the net when it has stood 5
+seconds (`CVehicle::m_nCreationTime`, + 0x430) or when the player is sitting in it (`Vehicles::ScanTraffic`).
+
+Interior people are created by the game of the one who entered first. If the host and the partner entered at
+the same time, each game saw the other outside and created its own. Now, the host reports that it has created
+interior humans (`G_INTERIOR_POP`) and the partner is cleaning up their own. Interior spaces for visitors
+(buyers of Ammu-Nation) are filled only by the game that created them.
+
+The pedestrian of this game next to another player would be silent if our camera was further than 40m: the
+game doesn't start a phrase further away from its camera. For such phrases, the distance check is from another
+player's camera (`PedSpeech`).
+
+## Damage
+
+Peds and cars are damaged only by the owner. The local player gets hit by the mirror (`G_DAMAGE`) and the
+owner uses it regularly (`CWeapon::GenerateDamageEvent`, `CVehicle::InflictDamage`), considering the attacker
+to be a remote player. The NPC runs away, fights back, or dies as usual.
+
+An NPC strike in close combat on a remote player, his game forwards that player's game (`G_DAMAGE` with the
+goal of "players"). Here, the remote player has all the protections, and the NPC mirror in that game only
+repeats the animation, so without sending the fists and bats, no one was injured. You don’t need to send NPC
+bullets: the mirror in that game shoots for real. The mirror's own blow to the player is not considered
+anywhere: the owner reports the actual strikes. Mirrors sometimes fought themselves and the player was hit a
+second time off (29.10).
+
+With a blow is the reception, which he was inflicted in the game of the batter (`CTaskSimpleFight`: set and
+number of the hit). The victim's game chooses the fight response (`CEventDamage::ComputeDamageAnim`:
+`HitA_1..3` style, knocking down the last punch of the series), and the mirror does not have such a task, and
+the victim always shuddered the same. At the time of calling damage in the attack slot, the batter is tasked
+with fighting with this technique (`FightAs`), then the slot returns its own. The victim's game determines the
+side of the blow to its player (`ComputePedShotSide`) by how its player actually stands: the copy of the
+victim in the batter's game turns with a delay.
+
+Katana, who beats the player to death, blows his head (`CPed::RemoveBodyPart`: flag `bRemoveHead` and body
+part in +0x754). In a single-player game, CJ can't be killed, and the other player's copy is ped `PLAYER1`,
+and her katana kills like that. Resurrection did not return the head (`CPlayerPed::SetInitialState` of these
+fields do not touch), and both players went headless (29.10). Now, when the player is resurrected, the flag is
+removed and a part of the body is dropped.
+
+The crime counts the play of the person who committed it. The engine records the crime on the player in focus
+(`CEventGroup::Add` → `ReportCriminalEvent` → `FindPlayerWanted`), so that the beats of the partner used by
+the host game raised the search for the host. Now, applying someone else's punch, the owner returns his
+`CWanted` as was (before the sound object of the police scanner), and the player's play records the crime
+itself, as the game records his player's punches (`CEventDamage::ReportCriminalEvent`): in line
+`CWanted::RegisterCrime`, with the same type of gun crime. Stars are given by the police, who will see it,
+through the mission search multiplier. `CCrime::ReportCrime`, which was here before, with a police officer
+closer than 14 meters, immediately put the star past the multiplier, and the partner received stars in
+missions where the host does not receive them.
+
+The police hosts of a partner stand in replicas with the type of an ordinary passer-by: they do not need
+police tasks. `CWanted::WorkOutPolicePresence` counts only people of type `PED_TYPE_COP`, and the car theft in
+front of such a copy of the star did not give (#92). Now, at the time of the report of their crime
+(`CCrime::ReportCrime`) copies of the policemen are given their real type, and then return the old one.
+
+The game records the hijacking directly in the landing task: `CTaskSimpleCarSetPedInAsDriver` and
+`AsPassenger` are called `ReportCrime(CRIME_CAR_STEAL, vehicle, FindPlayerPed(-1))`, whoever sits down. A copy
+of a partner getting into the host's car gave a star to the host (#92, disassembled 04.11). `HookReportCrime`
+misses the hijacking report if the machine is not the one our player is landing in (`m_pVehicle` tasks put
+before the report), or if there is another player in it. In his game, the partner did not receive a report:
+`CREATE_CAR` marks the copy as the player had already had it (`bHasBeenOwnedByPlayer`, bit 2 in + 0x42A), and
+the task missed it. Now the `VehicleSpawn::owned` carries the owner's real bit, and a replica of a regular
+machine takes it. The car that the player already had is not considered a theft, so landing to the host by a
+passenger does not give a star.
+
+The battering of a police car gives a star of `CBike::VehicleDamage` and `CAutomobile::VehicleDamage`, but
+after checking the collision protection, and copies of it have: a shot down policeman of another game cost
+nothing (disassembled 04.11). `RammedPoliceCopy` (Damage.cpp, hooks 0x6B8EC0 and 0x6A7650) repeats the terms
+of the game for a copy with a policeman behind the wheel: a hit stronger than 25, our car is faster and faster
+than 0.1. The flag `bIsLawEnforcer` is not in the copy, the model (`IsLawEnforcementVehicle`) and the driver
+type (`pedType`) are checked. If the mission multiplier is 0, there is no star.
+
+The other player's car here is being driven by a replica of him, the PLAYER1 ped, and her crimes were recorded
+on this player. Who did this car hit at low speed (`CTaskSimpleKillPedWithCar` raises "hit"), what cops jumped
+from it, its explosions and fire raised the search for this player: "I am given stars when my partner crushes
+people." The driver's game counts this itself, and here such reports are omitted if the culprit is a copy:
+`CCrime::ReportCrime`, `ReportCriminalEvent` hit, damage, damage to the car and knocking off the motorcycle,
+jumping to the side (`CTaskSimpleEvasiveDive`).
+
+A car hit (`CPed::KillPedWithCar`) is also decided by the driver's game. The mirror is protected from
+collisions and would stand like a stone, so its downfall goes to the owner, and he knocks down the pede with
+the car of a remote player. This car doesn't hit anyone at the owner's. The canister and fire extinguisher do
+not reach the mirror (`CShotInfo` passes refractory peds), so the owner applies their effect on his peds
+himself, except for the action on his player.
+
+A weak machine kick (momentum less than 12) does not kill a person in any game (`CPed::KillPedWithCar`). Each
+frame was pulled back to the owner’s place, and it stood in front of the car like a wall (30.10). Now, second
+after being hit by our machine (`lastRamMs`), the copy is not pulled, and our physics is repulsing it as a
+human. A further 6 m copy is still transferred immediately.
+
+The money and weapons of the murdered pede fall in the game of the one who killed him. If the pedestal dies
+from a blow, the owner turns off his fallout. The killer's mirror receives a gun drop-off flag and money
+through `SET_CHAR_MONEY`: the scripted pedal drops only the money issued by the script. Police, medics and
+firefighters don't drop money, just like in single-player. The selections are not synchronized, so only the
+killer sees the victim.
+
+The mirror killed by our strike falls as the game throws: the mod applies the same blow (weapon, body part,
+direction) to it with a loss of 1000. Previously, `TASK_DIE` for any death played one downside, "they just
+fall down." The killer is not recorded: the murder counts the answer of the owner. The mirror killed by
+someone else first rises to the place where the owner’s pedal lies (the running one lagged behind), and dies
+as before. After death, the body of the copy continues to follow the body of the owner: if it flew away (mode
+"super-strike", explosion) or lies further than 1.5 m, the copy is transferred there once in 0.5 seconds and
+flies at its speed. Previously, the copy was where it fell. In the test, the body, thrown by the explosion at
+7 m, lies in both at the same point.
+
+The shots of the remote player are only repeated by emulating the gamepad, and their damage is discarded. The
+shooter's game reports the hits. The victim's owner thinks it's a car hit.
+
+The car shooting mod (any weapon behind the wheel, its aiming) fires its own code, and it works only for its
+player: a copy of the other player did not shoot at the gamepad, and the players did not see each other’s
+shots (#76). Now each game reports the bullets that its player fired from the machine (`Shots.cpp`,
+`G_BULLET`: where from, where from, weapons, interception `CWeapon::DoBulletImpact`). Another player's game
+200 ms later draws them at a copy: the tracer (`CBulletTraces::AddTrace`), the flash at the barrel
+(`g_fx.TriggerGunshot`) and the sound of the shot (`AudioEngine.ReportWeaponEvent`). If the copy during this
+time shot itself (regular shooting from the car comes on the gamepad), the bullets are not drawn, and the
+shots are not blown away. There are also queues of machine guns mounted on the machine
+(`CVehicle::FireFixedMachineGuns`: Hunter, Seasparrow, Rustler, Predator): a copy of them never fires
+(`CVehicle::ProcessWeapons` works only for the player's car), and the other player did not see these shots.
+
+NPC shots, explosions and fire damage what this game has, including its player.
+
+Teams `SET_CHAR_ONLY_DAMAGED_BY_PLAYER` and `SET_CAR_ONLY_DAMAGED_BY_PLAYER` (mission target, criminals on
+part-time police work) miss only hits `FindPlayerPed` (`CEventDamage::AffectsPed`,
+`CVehicle::CanVehicleBeDamaged`), and hits by a partner on them did not work. The other player is also a
+player, so while the owner applies his hit, this flag (`CPhysical::bInvulnerable`) is removed.
+
+During the script scene (the wide screen of the camera), the other player’s side does not hurt anything here:
+his player runs on while this one is watching, and the mission failed when her people were injured in the
+scene (the partner’s car, left at the hairdresser, was touched, and Ryder appeared in it).
+
+Damage between players involves the host ticking "Partner Damage" before creating the game. The server
+receives it with the key `--friendly-fire` (for a dedicated server it is `friendly_fire` in `server.ini`) and
+tells everyone in `Welcome`. Without it, nothing from a remote player or his car hurts his player. With her
+bullets and blows considers the shooter's game: she sees a hit on a copy of the partner and sends it
+(`G_DAMAGE` for the purpose of "player from the player"), and the partner's game uses it normally, and the
+attacker is considered a copy of the shooter. Explosions, fire, gas and car are decided by the game of the
+victim. The copy of the partner has all the protections, and `CWorld::TriggerExplosionSectorList` and
+`CShotInfo::Update` protected pedes are missed, so such hits do not reach the shooter's game. A rocket,
+cocktail or gunman's car is repeated in the victim's game and injures the player there. Quiet stabbing from
+the back goes past `GenerateDamageEvent`: the attacker's play itself gives the victim damage and the task
+`CTaskSimpleStealthKill`, and a copy of the attacker from the victim does the same under his pad and kills the
+partner without a tick (issue #58). Without a tick, `CPedIntelligence::TestForStealthKill`, the player
+responds with “no” and the knife strikes with a conventional blow that does not reach the partner.
+
+The “Common Life” tick (0.3.3) follows the same road: `shared_life` in `coop.ini` and `server.ini`, key
+`--shared-life`, flag `Welcome`. When a partner dies (flag `F_DEAD` in its state) during a host story mission,
+the host game fails the mission in the same way as when the host dies: puts the mission scenario a death flag
+(`CRunningScript` + 0xD4, read by `HAS_DEATHARREST_BEEN_EXECUTED`) and gives `FAIL_CURRENT_MISSION`. One
+`FAIL_CURRENT_MISSION` would return the mission from the main part straight to the cleanup, without the
+inscription "Mission Failed."
+
+Without a tick, the death of the host in the story mission does not fail, while the partner lives in his world
+(solution 31.10): the host stands next to the partner and plays further, and failure happens only if both are
+killed. While the CJ lies dead, `CGameLogic::Update` each frame evokes `CPlayerInfo::KillPlayer` (0x56E580).
+The mod intercepts him and the player remains in `PLAYERSTATE_PLAYING`: without `PLAYERSTATE_HAS_DIED`, the
+mission script death check (`CRunningScript::DoDeathArrestCheck`) does not work. After 1.5 seconds, the screen
+darkens, and the mod picks up the CJ himself (`Revive`): takes out of the car, as the game does in the
+revival, gives complete health, calls `CPlayerPed::SetInitialState` and `RestartNonPartialAnims` and transfers
+to the partner (`Players::GoTo`, to the right at 1.5 m or 2.5 m from his car, to the ground below).
+`CGameLogic` while already standing at `GAMELOGIC_STATE_WASTED` and 3 seconds after the last call would send
+the CJ to the hospital, so the mod returns `GameState` (0x96A8B0) to `PLAYING`. Its revival of the game
+(`RestorePlayerStuffDuringResurrection`) is not suitable: it removes people, cars and fire for 4 km around and
+removes the wanted, and the path through the hospital translates the clock to 12 hours and takes $ 100. The
+weapons, stars, and time remain with the host. If a partner has also died or the mission is over, `KillPlayer`
+goes through as usual.
+
+Without fire on the player's shots on a copy of the machine in which another player is sitting, it is not
+transmitted. In "Just Business," the Russian partner's blunders hit Smoak's motorcycle with the host, and his
+strip melted twice as fast (30.10). The other player's empty car gets the damage as before.
+
+The death of a remote player determines his game. We've got his dog playing death and re-created after the
+respawn.
+
+Murder counts as the killer's game: statistics, respect, slaughter and provocation of gang warfare. The owner
+of the pede, killed by someone else's blow, informs the killer (`G_DAMAGE` with the view of "your murder",
+interception `CEventHandler::RegisterKill`), and believes that he was killed by someone else
+(`CDarkel::RegisterKillNotByPlayer`). The killer's game calls in `RegisterKill` for its copy of the pede,
+giving it a pede type from the owner for the time being: copies are created by civilians. Gang wars only occur
+in the host game, so killing a ballass or vagos by a partner 100 meters from the host sends the host, and the
+host adds it to the provocation (`CGangWars::AddKillToProvocation`).
+
+Explosions of a remote player (missiles, grenades, tank) occur in our country, repeated `Fire.cpp`. The pedal
+mirrors in the game shoot all the defenses, and the explosion misses them, so the explosion hurts their pedes
+here: the exception is `GenerateDamageEvent` for `WEAPON_EXPLOSION`, the wanted at the same time remains. The
+machine explosion injures the shooter in the game, and the hit is sent to the owner like a bullet.
+
+## Story and missions
+
+The world is shared by preserving the host. When connected, the partner receives the host save file and
+downloads it, so both have the same open areas, gangs, homes, and stores. The search for the host from the
+partner's save is reset.
+
+The host selects a new game in the F9 window as the last item on the save list. The prologue (Mission `INTRO`:
+two cutscenes, a ride in a police car under the credits, a bicycle) host passes one: this is a mission, and
+during the mission the game is not saved, so there is nothing to convey the world. Here's the order:
+
+1. When the host launches the prologue, the game sends `C_WORLD_NEWGAME`. The server deletes the saved world (it
+   is from the previous game), and those who ask for peace, responds `S_WORLD_WAIT`. The partner waits on the
+   menu with the status "Host passes the prologue", and his game does not give up the wait after 120 seconds,
+   as usual.
+2. The prologue ends when CJ gets on the bike. You can’t stay on the bike either, so the host sends
+   `C_WORLD_FOLLOW` and the server sends `S_WORLD_NEWGAME` to the waiters and tags them. If someone asks for
+   peace while the host is driving, they will get the same.
+3. The teammate starts his new game. Its prologue ends immediately: as soon as stream `INTRO` is started, its
+   first command is replaced by `TERMINATE_THIS_SCRIPT`, and the dimming that `main.scm` includes before the
+   prologue is removed by the mod itself. The game transfers the partner to the host, and, since the host is
+   on a bicycle, the same one appears next to the partner (`Players::FollowHost`).
+4. Once the host gets off the bike, his game takes a snapshot of the world. The server sends it to tagged
+   partners, and they move into the host world with a normal download.
+
+Save the game loads without checking that it is from the same `main.scm`: `CTheScripts::Load` reads the script
+sizes and throws them away, and streams puts them in their places in the downloaded `main.scm`. The world of
+the host with another `main.scm` flew from the partner in the first scripts. Saving these dimensions stores,
+so before downloading the host world, the partner's game looks for its own (`MainScriptSize`, the size of the
+largest mission, the number of missions): downloaded `main.scm`, and if it is not already loaded, a game file
+or a replacement from the modloader. I didn't find it, the world doesn't load, and the chat says what's going
+on.
+
+A partner gets a bicycle when the host gets on a bicycle in the story of the mission (for example, in Big
+Smoke), if the host is nearby. Also, the partner gets his car when there is no room in the host car: Ryder's
+Picador, Greenwood Sweet with the gang. The place to which the copy of the host person goes is considered
+occupied (`Peds::SeatClaimed`), otherwise the partner sat in the place of Ryder. The car is placed 3.5 m to
+the right, left, rear, front or between where there is ground, no wall or pillar on the way
+(`CWorld::GetIsLineOfSightClear`) and no car or person in the 2×2 m square (`IS_AREA_OCCUPIED`). This team
+counts everything that the limiting sphere reaches. The sphere of the partner (1.25 m) touched the previous
+square of 5×5 m at each place, and the bike did not appear at all (INTRO1). The model loads in the background,
+and the unsuccessful attempt is repeated once a second until the partner is 150 m from the host. The host
+machine, for which the partner has already received his, the game remembers by handle: the new machine in the
+same pool slot is already different.
+
+Main.scm scripts work for both, so that shops, rockers, food, hairdressers, tattoos and tuning are available
+to everyone. Story missions are launched only by the host. `CPlayerPed::CanPlayerStartMission` says no if it
+asks for main.scm flow (mission triggers). Streaming scripts of shops, food and hairdressers (ammu, junkfud,
+barber, tattoo, clothes and others) ask from their buffers and work as usual.
+
+The mission begins when both are in the marker. Yellow plot markers draw radar at contact points
+(`BLIP_CONTACT_POINT`), and the trigger only checks where the player is and asks `CanPlayerStartMission`. If
+the host is at the point of contact or in the location-team marker, and the partner is not nearby (two have a
+meter of stock), the host also receives this question “no”, and the host sends `G_MISSION_WAIT`. The host on
+the screen says "Waiting for a partner", the partner - "the host is waiting for you at the mission marker",
+and the marker is drawn where the host is. Missions without a marker (call, story event) start as usual.
+
+The host is also waiting for a partner (0.3.3). If the host has reached the mark of his story mission
+(`LOCATE_..._2D/3D` of his player with a drawn tag), and the partner is 30-300 meters away from it, the host
+game responds to the script “not yet in place” (`ObjectiveAnswer`). The wait lasts until the partner comes
+closer to 30 m, but not longer than 45 seconds. It is not there while the mission timer is on the screen: the
+wait could exhaust it. A partner beyond 300 m host is not waiting, he is busy with his own. The host says
+"Wait for a partner at the target", the partner says "Host is waiting for you at the target" (`G_MISSION_WAIT`
+with the last byte 1).
+
+A partner may be the first to arrive. His game tells the host once a second that he is standing in it on foot
+(`G_MISSION_WAIT` in the opposite direction, flag `PW_AT`), and the partner says “Wait for <host> at the
+mission marker”. If the point is on the street, and the host is free (not in the mission and not in the
+cutscene, controls itself and does not stand in the marker), the host appears “a partner is waiting for you at
+the mission marker” with the prompt “Y – move to the marker, N – no”. At Y, the host stands at a point next to
+the partner, in the middle of it, or 0.9 m from it, if the partner is at the very middle. Next, the mission
+launches the usual host trigger. N removes the invitation until the partner gets out of the spot.
+
+While the player is on the mission (`CTheScripts::IsPlayerOnAMission`), the radar does not draw the starting
+points of the missions: their letters and markers. The partner doesn't have a mission, and he's seen them
+while the host mission was going on. Now, in these two calls (`CRadar::DrawCoordBlip`,
+`CRadar::Draw3dMarkers`), the host mission is also considered.
+
+The beginning points themselves (the contact letter on the map and the marker at his house) put and remove the
+script of the mission that has passed, that is, the game of the host. Previously, the partner received them
+only with the world of the host, and the world is loaded at a quiet moment: on foot, without stars, outside
+the mission. While the partner was driving, he had a point of the mission passed, inactive, and there was no
+new one, sometimes until the next mission. Now the host checks its contact points once a second (without
+houses and saves) and sends them `G_CONTACTS` when changing, and at the same time repeats once every 5
+seconds. The partner removes the points that the host does not have, adds the missing ones
+(`ADD_SPRITE_BLIP_FOR_CONTACT_POINT`) and exposes them to the appearance of the host, along with the binding
+to the interior door.
+
+The mission scene on the game engine (wide stripes or taken control together with the script camera) is
+watched by the host camera (`G_SCENE_CAM`). While the host’s camera is moving, it sends its position,
+direction and viewing angle 20 times per second, and while it is standing, 4 times. He notes the slake
+himself: by the camera flag or by jumping more than 3 m. The end of the scene leaves a reliable message. A
+partner takes a scene if he is 100 m from the host and 150 m from the camera, in the same interior and his
+camera is free (not his cutscene). His player freezes, and the camera each frame stands where the host camera
+is now, with predictions from the last two packets and smoothing. Moving further than 150 m from the host or
+200 m from the camera, the scene throws. In the end, the camera goes back behind the back, and the control is
+back at the partner. Those who do not watch the scene, 300 meters from the host still lose control with him
+(`SET_PLAYER_CONTROL`), so as not to push her participants: in the cemetery in “Los Sepulcros” scene because
+of this stood for several minutes.
+
+While the host is on a mission or trigger, the partner repeats the following (`Missions.cpp`):
+
+- Texts `CMessages` (small, large, with numbers), prompts `CHud::SetHelpMessage` and their cleaning, and with
+  them and subtitles cutscene, because they print the script mission. Texts lie in a permanent pool, as the
+  game stores pointers on them. Text from GXT is also transmitted with a key (hash plus mission table), and
+  the partner shows the text of his game: he can have another translation or language, where someone else’s
+  line will come out as cranks. The line itself remains a backup option. The host mission table is uploaded by
+  the partner to his `TheText`, and the signatures of timers and counters are also drawn from its keys. The
+  host's "WASTED" and "BUSTED" (`CPlayerInfo::KillPlayer`, `CGameLogic`) are not transmitted: it is not
+  mission text, but the partner's interface keeps the text of this style until its own player resurrects
+  (`CHud::ResetWastedText`). The mission melody (`PLAY_MISSION_PASSED_TUNE`) is the same message (`TXT_TUNE`),
+  previously played only by the host.
+- Replicas of people outside the cutscene (`MissionSpeech.cpp`, `G_MISSION_AUDIO`) The mission uploads a replica
+  to one of the mission's four sound slots, ties it to the person who's talking, or puts it on a point and
+  loses, and the subtitle comes with the lyrics. The host forwards these calls to its mission scripts
+  (`CAudioEngine::PreloadMissionAudio`, `AttachMissionAudioToPed` and neighboring, `SetMissionAudioPosition`,
+  `PlayLoadedMissionAudio`, `ClearMissionAudio`), and the partner does the same. The mission's script here is
+  not only its stream, but also the streams it launched (`START_NEW_SCRIPT`), with their descendants: "Cesar
+  Vialpando" speaks replicas of its scenes in `AUDIOL`, a stream from main.scm, and the partner saw in these
+  scenes subtitles without voices. The facial expressions of these replicas (`START_CHAR_FACIAL_TALK`) follow
+  the same rule. The stream is recognized by its object and the address of the beginning of the code: the pool
+  slot, then occupied by another thread, is no longer considered a mission. The replica sounds from his copy
+  of the speaker, so the volume depends on how close he is. A replica of someone who is not a partner (a
+  person far away, a phone call), he hears only 50 meters from the host. If the partner's replica is still
+  loaded, it will begin when it loads, and after 5 seconds of waiting, it is skipped. Story calls between
+  missions are not in the mission, but in main.scm streams (`MOB_LA1`, `MOB_SF` and others: the mission flag
+  is raised, there is no mission), and their lines did not go to the partner (28.10). Now, stream `mob_…` is
+  being forwarded while the mission is not on its way. Random calls (`MOB_RAN`) are still their own. If the
+  partner is talking on the phone himself (task 1600), the host's replicas do not load into his slots.
+
+  The game does not load a replica into the slot where the previous one still sounds (`PreloadMissionAudio`
+0x4EC190 checks `IsMissionAudioSampleFinished`), and the partner started the replica later than the host. The
+next load of the host, his game silently missed, and the command to “play” sounded the past line: in
+conversations in the car, the phrases went in circles, and one word could be repeated all the way (30.10).
+Now, before downloading, the slot, which still sounds the past replica of the host, is cleared
+(`ClearMissionAudio`).
+
+  The phone removes only the call task, and only when the animation `phone_out` passes 1.57 s out of 2
+(`CTaskComplexUseMobilePhone`). Interrupted earlier (fight, button), she left the phone in her hand without
+ringing and did not return the weapon, at the player himself and at his copy. Now each player's game removes
+the phone from his or her CJ's hand if there is no call task (`CPed__removeCellphone` 0x6348F0: Model 330 is
+removed, the weapon from `m_nSavedWeapon` is returned).
+- Radar tags created after the mission began. They are placed on the same machines, peds and mission objects
+  (Home Invasion boxes: with an arrow above the copy) over the network id. If the partner does not yet have an
+  entity, the tag is placed by coordinates and updated until the entity appears. Color, size and icon match.
+  Labels at the radar 175 (`CRadar::ms_RadarTrace`, then lie `vec2DRadarOrigin` and text tips `CHud`): before
+  the mod read 250 and sent a partner garbage tips like tags with other people's sprites. The game removes the
+  mark of the car or peda with them, so before updating, the partner checks that his label is alive (the
+  counter in the tag number), otherwise puts it again. The tags of the airfields are set by the game itself
+  when the player is on the plane, and they are not transmitted. An indoor tag tied to the entrance
+  (`SET_BLIP_ENTRY_EXIT`: Pizzeria counter in "Ryder") is drawn by radar at the street door of this entrance
+  while the player is outside. With the tag now comes the entry number in the input pool (both games load the
+  inputs the same). My partner used to see her at the coordinates of the interior, far away in Red County.
+- Destination markers for "locate" commands (`CTheScripts::HighlightImportantArea`: three red cylinders through
+  `CShadows::RenderIndicatorShadow`). Only mission script markers (`m_bIsMission`) leave, not those that the
+  host game draws for itself (at tuning workshops, while the host is in the machine). The partner puts them up
+  to `CGame::Process`: the 3D marker becomes visible in `CSpecialFX::Update` (`C3dMarkers::Update`) of the
+  same frame, and the one put after it is destroyed when rendered without showing (`Render3dMarkers`).
+  Previously, the mod put them after processing the frame, and the partner did not see a single red cylinder
+  of the mission of the host.
+- Racing checkpoints (`CREATE_CHECKPOINT`, array `CTheScripts::ScriptCheckpointArray`) and script spheres
+  (`ADD_SPHERE`, `ScriptSphereArray`, `G_CHECKPOINTS`). The partner puts the same ones, and at the end of the
+  mission cleans up. The checkpoint stores the direction to the next point (`CCheckpoints::PlaceMarker`
+  normalizes the difference), so the partner passes the team a point a step along it, rather than the
+  direction itself. Red Circle `DRAW_SPHERE` script draws in each frame while it is needed (at Freddie's door
+  in "OG Loc"), through `C3dMarkers::PlaceMarkerSet`. The host sends it along with the location command
+  markers (recording of the “sphere” type: center and radius), and the partner draws the same one.
+- The weapon that the mission issues to its CJ (the canister in the Tagging Up Turf, the barrels in some
+  missions) and takes back (`G_MISSION_WEAPON`). The host sees this by CJ's weapon slots before and after
+  mission script commands. Only what the mission gave away is taken from the partner. Cartridges are
+  transferred as much as the CJ became, not how much is added: the missions and reduce them (emmet's pistol
+  30000 for the training and 10 after it, the can again with 1000 at the end), and the partner remained with
+  an infinite supply. The gun of the machine shooter is not transferred: it is issued by `ATTACH_CHAR_TO_CAR`
+  (`CPed::AttachPedToEntity`) and takes `DETACH_CHAR_FROM_CAR`, and after these commands the host again
+  removes the CJ slots. The partner walked with a helicopter minigan from The Da Nang Thang (28.10). So is the
+  turret on the object or motorcycle (`ATTACH_CHAR_TO_OBJECT`, `ATTACH_CHAR_TO_BIKE`): after "Air Raid" the
+  partner was left with a minigan with endless rounds (#102).
+- When the plot takes away all of CJ's weapons (`REMOVE_ALL_CHAR_WEAPONS`: Tenpenny before the reference to "The
+  Green Sabre", the river in "The Da Nang Thang"), the partner 150m from the host loses all of his too
+  (`WEAPON_TAKE_ALL`, player selection 02.11). The link takes the CJ to Angel Pine in the same frame, so the
+  distance is measured from where the CJ was at the beginning of the frame.
+- `CLEAR_AREA` Host Missions (Call `CWorld::ClearExcitingStuffFromArea`) Ordinary empty cars from the place
+  where the mission puts its own, the game removes itself, and the partner's car remained there because the
+  host has a copy of it - the mission machine. In Ryder, she was put on Ryder's car at a pizzeria, it
+  exploded, and the mission failed. The host now sends out copies in this area (`G_VEH_CLEAR`) and owners
+  delete their empty machines. Alien cars are cleaned only 60 meters from the point and not in the garages of
+  shelters (`CGarages::IsPointWithinHideOutGarage`): missions clean both 500 and 1000 meters, and the partner
+  lost cars left across the city and in his garage.
+- Script dimming, wide screen, screen timers and counters (block `COnscreenTimer` together with variable
+  values). A blackout is considered scripted if it started while the script commands were running
+  (intercepting `CRunningScript::Process` on its single call 0x46A21B, not at the beginning of the function:
+  our transition at the beginning ended at 0x469F04, where the build plugin put its `call`, and the game
+  jumped on E8xxxxxxx, issue #52). Visibility of timers and counters the game counts each frame by their
+  variables (`COnscreenTimer::ProcessForDisplay`), and the host mission shoots its counters in the last frame,
+  which is no longer transmitted, so at the end of the mission the partner resets the entire block
+  (`COnscreenTimer::Init`). The host’s dimming (door entrance, rebirth) is not transmitted to the partner:
+  before his screen darkened at every door that the host entered, and the light pulsated. The partner’s screen
+  remains dark only as long as the host screen is really dark. If after darkening the script, the screen
+  opened the cutscene or door, the partner screen no longer goes out again with each update.
+- Entrances to buildings. Missions open and close them for a while (the prologue closes the hairdressers, the
+  Ryder opens one for a haircut), and the partner's game does not perform missions. The entry state is stored
+  in its flags (`CEntryExit::m_nFlags`, which is also written by the save), and the host sends them out when
+  changed (`Entrances.cpp`, `G_ENEX`), except for bits about where the player himself went, and the removal
+  bit (`DELETE_ENEX`): it is set by loading its game when the building with the door is unloaded while the
+  player is inside, and when this player exits the door is removed. The host beat removed the door of the
+  host's house from the partner, and the mark of the house disappeared during the robbery (28.10). Entrance is
+  by name and place, not by number: with other mods (extra interiors) and for inputs that the script created
+  later, the numbers in the two games diverge.
+- Cutscenes. When the host calls `LoadCutsceneData`, each partner loads the same cutscene with the host's
+  interior and `LOAD_SCENE` and launches it as soon as it loads. At the end, the partner passes it and calls
+  `CLEAR_CUTSCENE`, after which the control and camera return.
+- Cutscene skip. The pass button (Enter, space, left mouse button, gamepad cross) does not miss anything, but
+  only suggests: its check at `CCutsceneMgr::Update_overlay` (call at 0x5B1947 ) is intercepted. The host
+  collects responses (`G_CUTSCENE` with `CS_SKIP_VOTE` and `CS_SKIP_STATE`) and calls `SkipCutscene` when
+  everyone who already has a game in the host world agrees: the partner who waits on the menu for the end of
+  the prologue does not hold a pass. Esc means “look ahead” and without a reply, the sentence is removed after
+  15 seconds. The partner's cutstage ends with the host's cutstage. Along the way, the cutscene is no longer
+  missed by itself when the window loses focus: the original check considers the background to be a tap.
+
+In the cutscene, the partner plays a secondary character. Where and what he does, the game of the host decides
+on each change of plan (`ScenePartner.cpp`). She sends the seat along with the start time of the plan by the
+camera clock (`G_CUTSCENE` with `CS_SPOT`) and the partner puts the character up when his camera reaches that
+time. One game decides, because the frames of the two games do not match and the choice of each separately
+differed. The host has a remote ped, and the partner has his own player. The selected place belongs to the
+first partner, and the next place counts each game itself and the same (`ForRank`), so the network is one
+message. The cutscene route (`POSE_WAY`) has its own: `cspath.py --ranks 3` considers it on the same map,
+putting the already counted partners people of the stage, and in `cutscene_ways.txt` it lies under the name
+`NAME#1`, `NAME#2`. If this is not the case, take the route of the first with a shift of 0.9 m. In the scene
+car, the `InCar` gives the remaining available seats (`Spot::seat`, go along with the seat) to the next
+teammates, and those who do not have a seat are not in this regard. Next to the CJ, the next one takes the
+other side, stands on the floor one step sideways from the first, and if the first one is sitting, it stands
+next to it. On the partner's screen, copies of the other partners stand where their own game puts them. The CJ
+partner in the cutscene is dressed as a host, and the host's ped is hidden. CJ cutscene (model 1) takes
+textures by name from the vocabulary "player", common to model 0, and there lies the last one to wear, that
+is, the remote player. Therefore, before loading the cutscene, the model 0 is assembled from the host's
+clothing (`CClothes::ConstructPedModel`), and the CJ cutscene itself from the host pedal: the call
+`RebuildCutscenePlayer` inside `LoadCutsceneData` (0x4D5EA3) is redirected. The `RebuildCutscenePlayer`
+himself first writes down fat and muscles from his game statistics in the description of clothes, and the
+model collector always takes muscles from statistics (0x5A42B0). Therefore, the CJ of the host is collected
+directly (`ConstructPedModel`), and at the time of assembly of the alien body, the muscle statistics are
+temporarily it (`game::MuscleFrom`). The same is going to be the view of a partner at the host.
+
+If there is no texture in the general vocabulary to decorate the CJ cutscenes (chain, watch, glasses, hat,
+"extra1"), it is not going to: without material, the assembly fell (#72). The check was shifted to one model:
+without the texture of “extra1” (it almost no one wears) the hat was removed, and without “necklace” instead
+of shoes, bare feet remained, at the host and at the partner, in all cutscenes (30.10). Jewelry is model 5-9,
+and model 4 is shoes.
+
+- What stands around CJ is taken from what is drawn. Triangles of buildings, objects and props of the cutscene
+  are laid in the height map with 10 cm increments: the highest obstacle in the cage, seat, floor. Collisions
+  for this is not enough: the scenery walls and furniture are often without it, and props (tables, chairs,
+  sofas) do not have it at all. The people of the scene do not fall into the map, these are skeletal objects
+  of the cutscene.
+- Places: dots around the CJ and on the floor that the camera sees; chairs, sofas and steps (flat surface at
+  seat height, back, legroom in front); walls behind you to lean against.
+- The place is suitable if the character is completely in the frame, does not obscure CJ and other people,
+  stands on the floor, does not rest on anything, and the camera sees his head and chest. The wall, facing the
+  camera with the reverse side, does not close the view: cutscene cameras often stand behind such a wall. The
+  character is no bigger than the people on the stage and doesn't stand between two of them closer to the
+  camera than they are. Only those who have the middle of the figure in the frame are counted: the CJ at the
+  camera itself, from which one elbow is visible, otherwise it would allow the partner to occupy the entire
+  screen.
+- All of this is tested for the whole plan, not the first frame: the cams of the scenes pan, and people walk.
+  The path of the camera to the next gluing is taken from the spline of the cutscene
+  (`TheCamera.m_aPathArray`, Bezier curves between the keys as they are read by `CCam::Process_FlyBy`; the
+  keys closer to 32 ms to each other are glued). Where people will go, say the root tracks of their
+  animations: the object of the cutscene moves exactly at the displacement of the root. The place is discarded
+  if later in the plan someone enters it, the character will overshadow someone or almost all the time will be
+  out of the frame or cut off by its edge. Slugs are also on the splice, even if the camera barely moved.
+- Cutscene machines are its own collision-free models, and they are animated just like humans. Their outline is
+  taken from the drawing, the path to gluing is taken from the animation track, and the partner does not stand
+  where the car will pass. If CJ is sitting in the car, the partner is hiding: outside he has nothing to do,
+  and you can not put him in the cutscene car.
+- Animations of leaning and sitting shift the body back from the pedal point (by 0.5 m at `leanIDLE` and
+  `SEAT_idle`, by 0.24 m at `M_smklean_loop`) and the point is put with this margin, otherwise the character
+  goes into the wall or into the back of the sofa.
+- Classes: standing and listening, smoking with a cigarette in his hand, leaning against the wall, sitting.
+- The character is worth the same as CJ in cutscenes. Module `SceneMocap.cpp`, when entering the game, cuts 28
+  five-second segments from the animations themselves (`anim\cuts.img`), where the CJ silently stands and
+  listens, and the character plays them in a row with a transition of 0.8 seconds (`kClipBlend`). The segments
+  are chosen as follows: the root almost does not move, and the body moves no more than the listener. And then
+  they're all seen in the game, and they've dropped the phone at the ear, the hand at the mouth, the foot on
+  the stand, the support on the rack, the bends and the raised hands. From the segment remain the bones of the
+  body without a face. The root stands on the pedal point at the height of normal postures, and on average
+  looks at the same place as the pedal. File analysis is in the background stream. The finished clips are
+  collected into an ANPK file in memory, and the game itself makes a block `COOPCS`
+  (`CAnimManager::LoadAnimFile` from the RenderWare stream in memory). The block is created before the first
+  cutscene: when the cutscene ends, the game removes the last block (`RemoveLastAnimFile`) and it must be the
+  block of the cutscene itself. Rockstar Mod animations are unlucky. If the clips could not be collected, the
+  character stands in the postures of waiting for the game.
+- If CJ is in the plan, the character goes with him: 1.7 m behind him on his way and 0.75 m to the side. The
+  path is the root track of the animation of the CJ itself, so there's a floor and a passage there. Both games
+  consider the path by their own CJ and therefore coincide, and only the “go” pose and the side go away on the
+  network. The step is also taken from the cutscenes: the same module cuts out eight cycles of CJ walking in
+  two steps, in which the last pose almost coincides with the first. The root in them is in place, and the
+  peda moves the mod every frame. The pede is frozen because there is often no collision in the cutscene
+  scenery. The pace is adjusted to the speed of the path (`SET_CHAR_ANIM_SPEED`), and when the CJ stops, the
+  character gets up and moves to the clips of the rack. Walking is checked for the whole plan, as is the
+  place: it does not obscure anyone, does not bump into anyone, and the camera does not approach it closer
+  than 1.3 m. The camera often follows the CJ exactly where the partner would walk, and the body projection at
+  the camera itself shows nothing. Therefore, in such plans he does not go, but stands.
+- The key time in the clip goes from zero in order. In looped animation, the negative frame duration loops
+  permanently `CAnimBlendNode::NextKeyFrame` (0x4D04A0), and the game hangs. In cutscene files, a key is
+  occasionally found 3 ms back in time: when slicing, it is skipped, and a clip with a disturbed order does
+  not enter the block.
+- The character lives on top of the pose. In the poses of the game, he occasionally plays a variation of the
+  same posture: nods, thinks, shakes his head, carries weight, kneads his leg or shoulders, scratches the back
+  of his head, looks at his watch, tightens himself with a cigarette. Variations begin and end in the position
+  of the loop (the root moves no more than 6 cm), so the transitions do not twitch.
+- The head and shoulders turn to the person who is speaking (`IKChainManager_c::LookAt`) and sometimes for a
+  second to someone else. The speaker gives out the jaw: the faces of the cutscene is a bone of 5015, and the
+  rest of the people 8. Its movement relative to the head in the last third of a second in the speaker is
+  several times more than in the silent. When the line ends, the character nods sometimes. He raises his
+  eyebrows to a new voice and chews gum from time to time (facial expressions are performed by the peda’s
+  `CTaskComplexFacial` task).
+- Variations, looks and gum are selected by the clock of the catscene camera and the place of the character, so
+  that the host and partner have a difference of several frames. While the cutscene is running, the `Anims`
+  module does not send out waiting animations: the partner both games animate themselves.
+- People don't go missing or jump between plans. The character's previous place is retained throughout the
+  stage, whether it is visible in the new plan or not (`Stays`): if it does not obscure anyone, does not
+  interfere with the scene, does not stand in someone's way, the camera does not rest on him, and the CJ is
+  next to him (from 1 to 9 m, on the same floor). Previously, the place was only preserved if the new plan
+  showed it at least half the time, and the character moved to where it was visible: from the wall to the
+  suite and further to the depths of the room on each change of plan (28.10). The players chose one place on
+  the stage. A new place is sought only when the old one is not suitable or the scene has gone: to another
+  floor or beyond 25 m (previously enough for the CJ to move away by 9 m). The old place holds up only if the
+  new plan shows it at least some part of the time (`SeenShare` is above zero). In "Cleaning the Hood," the
+  partner stayed where he wasn't seen, in 8 out of 12 plans (29.10). Now, for such a plan, a place in the
+  frame is first sought, and the partner moves there, and not in the place that this plan shows. Why the old
+  place didn't fit, writes the host's magazine ("not staying: ..."). The place chosen outside the frame (no
+  place in the frame of this plan was not found) does not hold: the next plan first looks for a place in the
+  frame, and only finding it, the partner stands there further. In "Cleaning the Hood," the first-plane spot
+  was off-screen, and ten consecutive plans were not visible (28.10). Then the place is searched in the frame,
+  and if there is no good place in the frame, the place is taken worse, but in the frame: on the edge, half
+  behind something or behind people. You can stand behind a person if he is closer to the camera at least a
+  meter, and people cover no more than 60% of the figure. Previously, the place was rejected by any person
+  with whom the partner intersected in the frame, and in the average plans of the company he was not a place.
+  Such a place should be visible at least a third of the plan, and from several take what is seen longer.
+  Unless there is one, the character stays in the same place outside the frame or stands next to the CJ where
+  the plan does not look, and the next plan, turned that way, finds him there. If the camera for the plan
+  bypasses everything around the CJ, he stands in the frame as it turns out: he can cut the edge of the frame
+  or half-close the pole, but he still does not obscure anyone.
+
+  If the old place in the new plan is not visible, the new one is now chosen by the nearest one: each meter from
+the former place removes from the score (`Rate`) a point. Previously, the best seat was 6m away from the CJ,
+and the second CJ crossed across the room in almost every way (31.10). Players chose the option "visible in
+every plan, but in short steps." The penalty is valid only if the previous place in the same scene: no further
+than 25 m from the CJ and on its floor.
+
+  In the 31.10 test, the second CJ was still missing: in 21 out of 47 plans, he was not visible at all, in the
+first cutscene of "Nines and AKs" almost all the time. Strict and loose rules discarded each seat, and he
+stayed where he was, out of the frame, or where the plan did not look. Now before that comes the final attempt
+in the frame (`SEEN` in `Rate`): a place up to 10 m from the CJ, sideways to someone other than the CJ (up to
+a third of the width), or three quarters behind the backs of people, for a moment at someone in the way. Such
+a place should be visible at least a fifth of the plan, and from several take what is seen longer. It remains
+in its original place only if the new plan shows it at least a fifth of the time: before, one moment was
+enough and the rest of the plan was not visible, and half and a half it changed place in almost every plane,
+as if teleported (second check 31.10). In the last attempt, he does not lean against the wall (at the door of
+the Zero store he stood like a guard) and stands only where you can walk from the CJ: from the CJ on the
+obstacle map there is a free floor pour with a margin of 20 cm (`BuildReach`), and the place behind the
+counter or behind the wall does not fit. At the Zero store, his last attempt was to put him behind the
+counter. The spare seat next to the CJ (`Beside`) is now 2.3m rather than 1.8m: in a cramped store it stood
+close to the CJ.
+
+  After the sixth check (01.11), the players said that in some scenes the second CJ stands aside, as if not
+involved. Now each meter further than 2 m from the nearest person of the scene (CJ too) removes from the score
+0.7 points, and the free space around it is considered only up to 1.5 m: before the assessment grew with every
+meter of emptiness around.
+
+  After the eighth check (02.11): he jumped from place to place, and you need a live walk. Now he walks to a new
+place near him (`Spot::walk`, `StartGoing`, `Going`). The host lets it in step, when both places are
+"standing" or "leaning", on the same floor, no further than 8 m, and on the straight between them on the map
+of the frame there is nothing to trip over, there is a floor and there are no people of the scene (`WalkWay`).
+The mark goes to the partner along with the seat (`CS_SPOT`, protocol 36). Both games lead him with clips of
+walking from the cutscene at a speed of 1.3 m / s on the cutscene clock, so the steps are the same. In the
+last 0.4 seconds, it turns as the place stands, and there the action of the place begins. Distant places and
+sitting still without walking.
+
+  After checking the 18th build (03.11), the players asked not for random seats, but next to the host: in
+"Tagging Up Turf", the second CJ stood at Sweet and Big Smoak 2-5 m from CJ, in ZERO_2 went from wall to wall
+and out of frame. User selection: side of CJ. Now, immediately after the trip and walking with the CJ, the
+place is searched for at its side (`BesideCj`): level with the CJ at 1.2 or 1.5 m to the right or left, facing
+the same place where the CJ looks, and if it is occupied, then 1.1 m to the side and 0.8 m behind. The side is
+selected in the foreground of the scene, the one farther away from the people of the scene (it does not stand
+between the CJ and the one CJ is speaking to), and holds the whole scene (`g_side`), the other is taken only
+on the plan where the first is occupied. The place is checked strictly (there is a place for the body on the
+floor of the CJ, no one is standing there, no one is in the camera, no one is shielded and no one will pass
+through it for the plan), and if in closeness neither strictly fits, then gently: without the last two
+conditions. If it doesn’t work, the old rules work. If it is already no further than 0.8 m from the new side
+and no closer than 0.9 m to the CJ, it remains where it stands, without unnecessary steps. Standing at the
+side of the CJ, it doesn't go off to the people of the scene in plans where the CJ isn't visible (`Elsewhere`
+doesn't work for it): it's next to the host, visible or not. When CJ walks, his partner follows him on his
+side.
+
+  Verification 04.11 (Both sides logs, 26 plans): 14 plans did not show him, and in conversation he went from
+plan to plan. Now it stays in place as long as it fits (`Stays`) and the CJ is no further than 3.5 m, no
+matter how the CJ turns. Previously, the side seat was recounted from the CJ's gaze on each plane, and he
+would go for it. If the plan shows the CJ at least a third of the time and the partner is not, the location at
+the side or behind the CJ that the plan shows is searched. Such a transition is a leap on the change of plan,
+because the new plan does not show the old place, and not more often than once every 6 seconds. On foot, he's
+now just following CJ or getting out of the way. Side seats are searched in an arc around the CJ (1.5, 2 and
+2.6 m, side-to-back, front-never), not among three points: in the GARAG3A garage they were busy, and the frame
+rules drove him around the room at 8 m. With the CJ, it only goes if the CJ for the plan goes at least 2 m,
+not 1 m. The jerk at the beginning of the walk came from the direction: until the CJ did not pass 1.7 m, the
+partner stood behind him by a random shift of several centimeters or by the look of the CJ and circled him at
+a speed of 5 m / s. Now it is the direction of the first half meter of its path (`WalkOff`).
+
+  Stop plan (user selection 04.11) Choosing place plan after plan, mod didn't know what the next ones would
+show. But in the cutscene files (`anim/cuts.img`: `.cut`, `.ifp`, `.dat`) everything is known in advance: the
+spline cameras and the path of each person go all the way to the end of the scene. As long as the CJ stands at
+about one place (not going beyond 3 m and not going 2 m per plan), `BuildPlan` immediately reviews all plans
+for this stop. Places are taken from the side and slightly behind the CJ (below) plus where the partner is
+already standing. For each place and plan, it is considered how much the plan shows it and whether it does not
+interfere (`RateShot`: there is no one in the place, the camera is not in it, in someone’s frame it is no
+longer than a quarter of the plan, the wall is checked by the obstacle map). Then the best chain of seats for
+the entire stop is selected: the most time in the frame and fewer noticeable transitions. Going through the
+change of plan costs 4 per display if the partner is not visible on one side of the glue, and another 8
+seconds plus a second per meter if you can see on both sides of the glue. Such transitions are a leap in the
+direction of a change of plan. A new stop is counted anew when CJ has reached it, because the walls and floor
+are taken from what is painted around it. If there is no chain, the choice of plans works. Run without a game
+(`E:\GTA COOP Tests\scripts\analysis\csanim\csplan.py`, the same rules, but no walls), the first version with
+seats in a circle: 143 cutscenes, 1346 plans, 5785 with legs. The companion is visible 51% of the time, which
+is 72% of the time the CJ is visible. The model has a 31% choice according to plans. Transitions of 1.7 to the
+stage instead of 3.2.
+
+  The place where it already stands, goes into plan only on the floor of this stop and no further than 3.5 m
+from it. It used to come from anywhere, and even with an increase for not having to cross. In SWEET3A, the CJ
+is waiting for its exit under the floor, and the partner remained there for another 28 seconds when the CJ had
+already risen, and in INTRO1A was 7 m across the room (check 05.11, partner logs vs. cutscene files). The same
+run: further 3.6 m from the CJ 181 s instead of 578 s, on the other floor 2.5 s instead of 109 s, you can see
+the same number of transitions 231 instead of 243. The first place of the stage waits for CJ to land: in 12
+cutscenes out of 148, the first keys of his track carry it from afar (INTRO1A: 17 m in four frames), and the
+seat was chosen by the stairs, 6 m above the room.
+
+  Where the CJ was looking, the mod didn't know before assembly 31. `CCutsceneObject::ProcessControl` moves only
+the position (`SetTranslateOnly`), the cutscene object matrix looks the whole scene north, and the body turns
+the root of the animation. Therefore, "side of the CJ" (`BesideCj`) was 1.5 m on the X-axis of the map, and
+"face to the same" meant face to the north. If the CJ was looking along the X-axis, the partner was standing
+right in front of him or behind him: 37s at 1.2m in front of the CJ in the INTRO1A conversation, 64s at 343s
+in the five 05.11 test cutscene. The present course is taken from the root keys (`FacingAt`): turning the root
+turns the X axis to where the person is looking. On 883 walk sections of all cutscenes, this coincides with
+the direction of the stride (0.9 on average). The game stores a quaternion paired to a file (`LoadAnimFile`)
+and `FacingAt` reads it from memory.
+
+  With the correct course, the plan locations lie only on the side and slightly behind (`BuildPlan`: 1.5, 2 and
+2.6 m, 60° to 150° from the CJ's face, both sides). A moment 50° in front of a CJ closer than 4 m is
+considered a moment in someone else’s path (`InFrontOf`), and `Stays` does not leave a partner in front of
+him. The transition costs 4 from the display instead of 0.5 s, and visible from both sides of the gluing 8 s
+instead of 4 s: at the previous price, he for 100 with INTRO1A changed 9 seats and walked around the CJ. Run
+without playing, 143 cutscene: before CJ 1% of the time instead of 22%, side 59% instead of 43%, behind 41%
+instead of 35%, transitions 0.9 to the stage instead of 1.6, stops 1.5 instead of 2. You can see him 36% of
+the time instead of 52%: he used to be seen just because he was standing in front of the CJ, facing the
+camera. If there is no one around, he looks where CJ is, otherwise at the people he's standing with.
+
+  Route to the whole stage (assembly 32). Choosing a place on the change of plan, the mod saw only what was
+drawn around the CJ in this frame, and did not know the map: for 2 from the plan it went 8 m, three planes
+stood 8-10 m from CJ, and the first place INTRO1A hung 0.4 m above the floor (check 05.11). The game files
+have everything in advance: a map of the place (what the IPL arranges, DFF mesh), the paths of CJ and people,
+the camera. Scripts in `E:\GTA COOP Tests\scripts\analysis\csanim` count on them the partner's route for each
+cutscene: `csworld.py` reads the map, `cssite.py` builds a grid of 10 cm (the height of the floor that stands
+on it, where the person will fit, steps up to 32 cm), `cspath.py` counts the route. Partner stands while CJ's
+around. When the CJ goes beyond 2.6 m (assembly 34) or already goes there, it follows to the place where the
+CJ stops, the shortest way bypassing furniture and people, at a speed of 1.05 m / s, acceleration and braking
+of 0.9 m / s2. If the CJ has bypassed him, he calmly turns around. It skips only where the cutscene itself
+carries the CJ, or if you don't walk. While the CJ is set (SWEET3A, GROVE1A), it waits where the CJ comes out.
+The total is `src/client/features/story/cutscene-partner/cutscene_ways.txt` and sewn into `coop.asi` (resource
+`CUTSCENE_WAYS` in `coop.rc`): time, place, course. All games read one text on the clock of their CJ, pose
+`POSE_WAY`, only its number is on the network. If there is no route (CJ in the car the whole scene, CJ at the
+table on a date), the previous choice of location works. Getting in the car is more important than the route.
+No game, 143 cutscenes: the route is 119, 4 m from CJ 3% of the time, in front of him 4%, 1.3 passes to the
+stage, 8 jumps for the whole game, the partner is visible 45% of the time when CJ is visible.
+
+  Selections throughout the scene (assembly 33). The place was chosen for the next seconds and only from a few
+points on the side of the CJ, so in the conversation of the two partners remained behind the scenes. Now
+`cspath.py` evaluates all floor locations 4 m from the CJ path (40 cm grid) every 0.25 s and selects the
+entire chain of parking and crossings at once (dynamic programming, 0.5 s step). A second, when it is seen
+next to the CJ, is 2, a second in someone else's frame -4, in front of the CJ -3.5, further 3 m from the CJ
+-1.2 and more, the transition in the frame -3.5, behind the frame -3 (build weight 35). A man walking straight
+at him is worth -30. In plain sight, it only comes out if CJ has left (the same conditions as before) or if
+people are on it. Behind the scenes can move at any time: so he manages to the next plan. Partially closed by
+another person is considered a fraction of its visible part: over the shoulder it is visible. What is between
+the camera and the CJ is not considered a wall: outside the walls are not painted. Transitions with a stop
+shorter than 2 seconds are merged into one, a step shorter than 1.5 m is not made. While the CJ is under the
+scenery, the partner is waiting outside the frame (-0.8 per second in the frame). Each transition is checked
+along the entire length: if it goes through the CJ, through a person or through someone else's frame, it moves
+0-4 seconds or bypasses the path of the CJ, and if it interferes anyway and the CJ remains nearby, it is not.
+The interior number in the IPL is stored along with the flags (256, 512, 1024), so the lower byte is taken:
+otherwise the land of many streets was lost. The interior of the stage is taken from `main.scm`
+(`cs_areas.txt`). There's no route on dates so that your partner doesn't stand over the table. In BCRAS1 and
+BCRAS2, there is no land under the CJ in the map files, there is the previous choice of location. No game: the
+route is at 129 cutscene, the partner is visible next to the CJ 55% of the time when the CJ is visible
+(assembly routes 32 by the same yard of 28%), further 4 m from the CJ 1.4% of the time, in front of him 1.9%,
+2.2 passes to the stage, jumps 1.
+
+  Check assembly 33 (assemblies 34 and 35, 06.11). On 25 remarks to the first 67 cutscenes. A run without a game, a host log and a partner's log showed such reasons.
+
+  Turn. The course in the parking lot was counted from a point of 2 m in front of the CJ or between the CJ and
+the interlocutor. With each CJ move, that point went around the partner: 8 rads one way in SWEET5A, 26 rads
+per scene in BCESAR5. Now the parking lot has one course (`mean_heading`): the average direction for people
+near the CJ, and if the CJ is one, the same direction where he looks. The partner turns only if the scene has
+gone more than 63 degrees for a long time, and not more often than once in 4 seconds. The conversation leads
+the head (`Attention`, the course is taken from the current, not the last change of plan). The end of the
+transition immediately turns him to a new course. The turn on the spot is in steps (`WayAt`), because without
+them he was spinning on his heels. After the jump on the change of plan, the course is put immediately,
+otherwise it was already spinning in the frame.
+
+  Proximity. The penalty starts at 2 m from CJ (`W_NEAR`), from 3 m it is stronger, with the first frame partner
+next to CJ (`W_START`). Separately fined is another person’s seat (`W_OTHER`: for Truth in GARAG1B, Pulaski’s
+in SCRASH2), the wall between him and CJ (`W_WALL`), and a frame without CJ (`W_ALONE`: alien footage in
+SYND_4B). If the CJ is behind the scenery, at her door, the partner is standing next to him there and comes in
+next (TRUTH_1). Transition in sight and behind the scenes is more expensive: for the sake of the best shot, he
+no longer walks in circles (FARL_5A, BCESA5W).
+
+  Cutscene Objects. `CCutsceneMgr::SetupCutsceneToStart` lifts the stage by 1m. For people, this is the height
+of the root, and tables, chairs and cars in the calculation lay a meter below and under the floor did not
+interfere. Because of this, he was standing in a truck stand in TRUTH_2 and walking into the car in SYND_3A
+and BCESAR5. Now objects stand at their height, including where they will arrive at the end of the scene, and
+cars that don't drive enter the map. The transition through the CJ, the person or the driving car and a long
+round is not done: another start time or an adjacent place (`CONTACT`) is sought, free next 15 seconds and no
+further than 3 m from the CJ. If there is no other, and they go to it, the transition is still made: in
+SYND_4B CJ otherwise stood in it 9 s. Transitions of one plan go together and can bring it to place ahead of
+time. If in the first 4 seconds after coming to this place someone comes, the transition is considered to be
+interfering: in TRUTH_1 CJ otherwise 3 s went through it.
+
+  Camera (assembly 35). A place in the camera was considered outside the frame and cost nothing: a depth of less
+than 0.5 m fell out of the frame check. In assemblage 33, it stood 328 s, and in SMOKE2A, the 24 s camera was
+30 cm away from it and covered the entire frame. Now the `at_camera` is testing the same thing as the
+`AtCamera` in the game: the camera is closer than 1.3m and at the height of his body. Such a place is
+considered a hindrance, both when choosing a parking lot, and when checking the transition. If you do not walk
+away (CESAR1A: along the car, the camera behind the back), it is transferred on the nearest change of plan.
+
+  Together with the CJ (assembly 35). It had previously moved only when the CJ had already gone beyond 2.6m. Now, if the CJ takes more than 1.2 meters (`going`) in 3 seconds, the transition can be started in plain sight, and the transition from 2 meters costs almost nothing (`W_WITH`). A step or two CJ doesn't do that, otherwise it starts roaming again (BCESA5W). Request WOOZI1A and FARL_4A.
+
+  Paul. Catalina's cabin is painted without a floor: the CJ is 90 cm above the ground, and the scenes CAT_3 and CAT_2 were considered to be under the scenery. CJ up to 1.3 m above the map now stands on the floor, which is not in the files, and the floor around it rises to its level (`RAISED`) if there is no painted surface above this place at the height of CJ: on the porch of Sweet the floor does not rise, otherwise the partner would hang above the street. The CAT_3 didn’t have a route either because `cat_3.dat` contained a “7\t” and the camera file was not understood.
+
+  Stand. Two errors. `HoldMoving` took time to `Live`, the clip in `Live` put `checkedAt` later, the difference
+came out huge, and the clip just launched was considered non-playing and changed through the frame. The first
+clip of the scene, launched into the frame of the production, was not taken in any of the 67 cutscenes, and
+after half a second, another one began instead (a jerk at the beginning of each cutscene). The reason is not
+found. `Hold` runs the animation frame later, and it doesn't have this error, so `HoldMoving` does the same,
+clears the tasks at the beginning and checks the first clip after 150ms.
+
+  The first frame. `Analyse` is waiting for a drawn frame, and the partner's game is waiting for the word of the host, so he appeared already in plain sight. Now, up to this point, the route itself gives the place (`EarlySpot`): both games put it in the frame of the beginning of the cutscene. If the CJ is sitting in the car, the partner for the first frames stands near the route, under blackout, and then sits down.
+
+  The car. The CJ's output was only checked on a change of plan, and in BCRAS2, the 7-c partner sat in an empty car. Now `CjGotOut` watches the CJ's pelvis every 100ms and half a second out of the cabin considers it a change of plan. There is no way out as an animation: the partner is put next to the car.
+
+  Scene animations (`kSceneActs`). Players' requests for separate cutscenes are CAT_3 (`handscower` when the CJ steps away from the door) and W2_ALT (`Coplook_loop`, folded arms). Acts only in the parking lot, goes instead of clips, blocks are loaded in `Prepare`.
+
+  The city in the scenes of OG Loka disappeared only in `/cs`: the script puts `SET_AREA_VISIBLE 3` for STRP4B1, and the table attributed the interior 3 and STRAP4A, which goes on the street. The rest of the scenes with this recording after `LOAD_CUTSCENE` have been checked on `main.scm`, they are correct. The Burger Shot textures in STRAP1A were not found.
+
+  Check assembly 36 two (assembly 37, 06.11). Players watched all 147 cutscenes and sent 10 comments and a request for a smooth walk. The reasons were found on the logs and files of the game. What counts as a mistake, now counts `cscheck.py`: he converges with the remarks (transfer in the middle of the plan at exactly 30 and 10, without a floor at 39.0% in the frame at 13).
+
+  Items in parts. The root track of a table, sofa or chair lies well below the floor, the real place is set by the daughter bones (`chair`, `bench`, `kb_couch04`). The calculation put the whole mess in the root, and the table SYND_2A was 2.4 m under the floor: the partner was in it. Now `parts_at` collects each piece along the bone of her DFF frame (`World.parts`, frame names from the expansion 0x0253F2FE), with a stage shift and a rise of 1 m. At the table and chair, this gives exactly the height of the floor. Items with the number (`CsChair-2`) on the map did not fall at all, their model without the number (`model_of`). The `csstuck.py` had the same error, so it showed zero: the true build digit of 36 was 93 seconds inside the items.
+
+  Slit. Bypassing the floor went through any gap wider than the body, and the partner in RYDER1A started behind the yard fence and passed through a gap of 87 cm. Now the gap is already 90 cm (`WIDE` ) closed, unless the CJ itself goes through it, and spaces near the walls can still be occupied.
+
+  Move in the middle of the plan. Track CJ can jump to change place when it is not in the frame (STRAP2A: 80 s, in terms of one OG Lock). The beginning of the new part of the route was a transfer, and the partner disappeared in plain sight. He now stands until the next change of plan, and if he doesn't, until the end of the stage (`plan_scene`). The post-transition transfer was also waiting for the end of the transition and could go for the change of plan (SWEET2B): now the next shift is taken.
+
+  Half of Catalina's house. The floor of the room is not in the DFF, it is only in the boxes of collision `ce_catshack` (top 63.05 m with the ground 62.2 m). The previous rule raised the floor to CJ level in a 6 by 6m square around it, and the partner hung 55cm above the grass outside. Now the top of such boxes is considered to be the floor (`BOX_FLOORS`, `parse_col`), on the outside it stands on the ground, and on the step rises by CJ.
+
+  To CJ at the end of the scene. The crossing had to be completed before the end of the route, so no one moved in the final seconds. Now the transition to the CJ can be terminated (`going`). If the CJ leaves the stage and the partner is further than 2.6 m, he follows him without regard to the frame (`leaves`), and behind the scenery door, where there is no map, follows the trail of CJ (`walk_after`, BCESAR2).
+
+  See if he's there. The weight of the frame is one for all scenes, and in tight scenes it was more profitable to stand outside the frame: in SWEET4A 0%, in SWEET1C the first minute. If the scene shows it less than a third of the time with CJ or the first time later than 15 seconds (`SEEN_WANTED`, `SEEN_BY`), `plan_seen` considers it still with a frame weight of 2, 3 and 4 times more and takes the best option that does not put it in front of the CJ (+8% of the time), in an alien form (+5%) and in the camera. SMOKE2A is the same as it was when players asked not to close the view. There are scenes where there is no room at all: in FARL_3A close-ups in a cramped room.
+
+  Smoothness. The course followed the keys of the route in jerks up to 5 rad / s. Now `EaseHeading` leads it critically damped spring: in place 0.3 s, on the move 0.15 s, no faster than 2.5 rad / s, the same for any number of frames. The turn on the spot played walking on the spot, now it's the game `PED/Turn_L` and `Turn_R` (the root in them does not turn, the course sets the mod), they go until the course catches up with the route. Entrance to and exit from the step is 0.4 s (`kStepBlend`). In the routes, the corners of the transitions are rounded (`round_path`, only on the free floor), on the move the course is not faster than 2 rad / s (`TURN_WALK`), a turn more than 45 ° is made on the spot before the step (`turn_first`), and at the end of the transition, a turn more than 75 ° is postponed to the parking lot so that it does not go sideways.
+
+  BCRAS1 machine. The head bag (`csheadsack`) is skinned like a human, and took up a seat: 4 seats, 4 people, and the partner sat down only with 15.5 seconds. Man is now a skeleton of 20 bones (`HasBody`, `RpHAnimHierarchy::numNodes`).
+
+  Burger Shot textures. Building `burger01_law` in the IDE is in section `anim`: it needs file `LAw.ifp`. As long as the cutscene is running (`ms_cutsceneProcessing`), the game does not read IFP (`CStreaming::RequestModelStream`). In `/cs`, the player stood far away, the file was not in memory, and the entire scene was visible to the building’s LOD, on both screens and only in 29: the file request passes immediately after it, and the building is already loaded into 32. In a real game, this will happen to a partner if he is far from the host. Now `Prepare` loads the block before the cutscene (`kMapBlocks`, scenes with animated objects nearby).
+
+  Selection of routes. All scenes are counted, but the new route only gets into the file if the scene is in the notes, if the parking is the same, and only the form of the transitions has changed, or if it corrects the error of `cscheck.py` and does not worsen anything. The rest of the scenes were arranged by the players, and their route is the same.
+
+  Figures on 130 scenes, Assembly 36 and Assembly 37, no play: transfer in the middle of the plan in sight of 8 and 0, inside objects 93 c and 1.5 c, in the air 81 c and 2.4 c, stands while the CJ leaves, 125 c and 114 c, seen together with CJ 49% and 51%. The new route of the first partner is taken in 73 scenes.
+
+  The second and third partner are counted again around the new places of the first: with the old routes, two would stand closer to 0.7 m to each other 622 s. What to take in each scene, decides `cspick2.py`. The new route goes to the file if the old one, along with the other two, does not give less cause for complaints. The old one remained in 23 scenes for the second and 27 for the third, among them `CAT_3`, where the new 7.4 hung 80 cm above the ground.
+
+  The same figures for the second and third, assembly 36 and assembly 37: transfer in sight of 7 and 0, 12 and 0, inside objects 25.5 c and 1.5 c, 39.5 c and 3.5 c, in the air 5.8 c and 3.2 c, 30 c and 2.4 s, seen together with CJ 32% and 38%, 29% and 39%. Two closer 0.7 m to each other: 162 s and 146 s.
+
+  Verification of assembly 37. The frame weight of `plan_seen` bought what you couldn’t buy: an adjacent room visible through an open door (`SWEET1C`) and a transfer at each change of plan (`SWEET4A`). Now, along with it, fines for the wall (twice as fast), for transfer, for the face of the CJ and the appearance of someone else are growing. In the Catalina house, only collision boxes are considered gender: the flat ends of the logs of the logs lie 33 cm above the ground. The CJ passes through the wall of the model here, so on the steps the height is taken from his feet in both directions, and you can not stand on them and close to the wall (`s.steps`, `lattice`): the partner remained there 85 cm above the ground when the CJ already came out. `cscheck.py` counts the transfers in sight (`tele`) and the time behind the wall from the CJ (`wall`).
+
+  Figures of the same file before and after this check, no game. The first partner: transfers in sight 15 and 10, behind the wall 254 c and 213 c, visible 51% and 50%, stands while the CJ leaves, 114 c and 122 s. The second and third are recalculated in 44 scenes: transfers in sight 24 and 7, 38 and 9, visible 38% and 37%, 39% and 34%, two closer 0.7 m to each other 146 s and 174 s.
+
+  Second check of assembly 37. What the calculation doesn't know is handwritten: `cshand.py` rules the routes of individual scenes over the calculation and starts after each count. At `SWEET1C`, the open door is in the room from 21 to 66 seconds, the map does not contain it, and the place is behind the sash: now it stands behind the CJ, on the plan through the doorway one step to the side and exits before the CJ, because the door closes behind the CJ. At `CAT_2`, only the ground is painted under the front room of the house, at 63.05 there is one collision box: while the CJ is at the door, the partner is standing outside on the grass and cannot hang. At `SWEET4A`, he's walking off the porch behind everyone at their pace, no transfer. In `TRUTH_2`, the edge of the saucer was considered sex. At `INTRO1A`, he's walking next to the CJ on the right because the camera is behind the CJ. The frame measure of `cscheck.py` does not count people who close a partner: `csspots.py` counts with them, `csview.py` draws a shot from a cutscene camera based on game models.
+
+  Third check on assembly 38. Corrections only in the route file, `coop.asi` the same. Of the 1,155 passes, 514 ended in a reversal: `steer` left more than 1.3 rads for later, and `stand_keys` waited for a second, and the partner stood with his back to the people. Now `settle` in `cshand.py` passes along all routes: the last second of the step goes to turn at a speed of 2 rad / s, the speed by this time falls, so it does not go sideways, and the rest of the turn follows immediately. Only the courses change, the places are the same. After this reversal, more than 1 rad remained 52 of 491. While CJ is not on stage, there is no partner either: at `SWEET6A` to 28.55 s and at `RYDER3A` from 17.1 to 45.88 s, everyone is waiting at the same place where CJ, under the floor. It can only appear on a change of plan, so `RIOT_4C` and `GROVE1A`, where CJ appears in the middle of the plan, are untouched: `csearly.py` shows such scenes. At `TRUTH_2`, the door of the shed is ajar 54 cm, and the crew led the partner through it by a transfer of 10 m: now he enters behind the CJ, stands behind him, goes to the van and waits between the poles. The van from the 34th second is a meter further, this is also taken into account. At `FINAL2A`, the route goes beyond the end of the stage (`cut_at`), so it doesn't stop at the end. `csend.py` shows where the CJ is still walking at the end, and the partner is already standing.
+
+  Assembly 39, protocol 53. Everything that has changed in the first partner is done for the following: in 53 cutscenes, where the first, second and third were counted again around him (`cspar.py --ranks 3 --base`), and in scenes with manual routes written by hand. The old route is left where the new one was in another partner or person (`cspick2.py`). Transfers in plain sight in these scenes are replaced by walking or shifted to an adjacent plan shift where one side is not visible (`move_jump` in `cshand.py`). The route of the first one did not change. Both texts are stitched into `coop.asi` (`RCDATA` in `coop.rc`, `Embedded`, `NextLine`) as a microphone icon. Each game reads a route on its own clock, and it does not go over the network, so everyone should have one: the file can be lost or left from the old version, but the resource does not. The new route is a new assembly and the new `kProtocolVersion`, otherwise the different routes will connect. If there is no resource, the table is empty and the previous location selection works. The old file in folder `coop` does not read the game. `windows.h` in `ScenePartner.cpp` comes with `#undef near`, `far`, `STRICT`: these are the names in this file.
+
+  Seat (`Cabin::Holds`) is no further than a meter from the middle of the car. The open door extends what is
+drawn: CJ, pressed to the hood in `PROLOG3`, the mod considered sitting and put a partner in the air at the
+other wing. Now the mod believes the CJ is standing next to the car and the partner is walking along the
+route. Without the game, comparison with the assembly routes 33 on the same scenes: turns on the spot 102
+instead of 358 (82 rad instead of 636), in the camera 11.5 s instead of 328 s, inside objects 0 s instead of
+9.5 s, in people 5.5 s instead of 11 s, then 4 m from CJ 2.1% of the time instead of 2.5%, passes 305 instead
+of 282, 915 m instead of 851 m (it often goes with CJ). The partner is seen near CJ 49% of the time when CJ is
+visible (it was 53%), in front of CJ 2.2% of the time (it was 1.9%), obscures people 0.8% of the time (it was
+0.4%): it stands closer to CJ. The route has 130 cutscenes (CAT_3), BCRAS1, BCRAS2 and dates have the same
+choice of location.
+
+  Hands and gait (assembly 33). In `Hold`, the teammate and his copy of the hands are empty on the whole stage
+(`SET_CURRENT_CHAR_WEAPON` and `CPed::SetCurrentWeapon`: the team from the player only chooses the slot). The
+gun comes back from the owner's state until the game begins, so every frame is checked. `ReleaseAll` returns
+the weapon to its player, if he has it, the copy will return the owner's condition. The gait is one for all:
+the clip `coopwk02` goes by itself 1.06 m / s, this is the speed of routes. Random selection changed her
+inside the scene, and three quick clips (up to 1.45 m/s) at a step of 1.05 looked slow.
+
+  Walking now bypasses what stands on a straight line (table, sofa, stage man): if the straight is busy, the
+host looks for one turn away from the middle of the path (0.8, 1.4 or 2 m sideways, on a third, half or
+two-thirds of the way), both parts of which are free, and takes the shortest path. The pivot point goes to the
+partner along with the place (`CS_SPOT`, protocol 40), and both games lead him through it (`GoingAt`,
+`GoingWay`). If there is no bypass (the wall between the rooms, another floor, the street and the room), it
+moves to a new place on a change of plan, when the camera still shows another.
+
+  While the scene is on, the second CJ is lit as CJ cutscenes (`CPhysical::m_fContactSurfaceBrightness`,
++0x12C). The pedestrian takes his lighting from the ground only when it hits it
+(`CPed::ProcessEntityCollision`), and in the car from the car. After the night scenes of The Green Sabre and
+the transfer to Angel Pine, the partner stood indoors dark until he got in the car (02.11). Now, at the end of
+the scene, he gets his own lighting back.
+
+  If the plan does not show the CJ, but the people of the scene on another floor or further than 8 m from the
+CJ, and next to the CJ of the second CJ would not be visible, the place is searched next to them (`Elsewhere`,
+`ChooseAmong`). In "Nines and AKs," the CJ stands under the floor of Sweet's house for the first 10 seconds
+while the camera shows the others upstairs and all the seats next to him are discarded.
+
+  In the fourth check 31.10 of the second CJ in the first cutscene of "Nines and AKs" was visible only in 2
+plans out of 11: in conversation with Sweet all attempts failed five plans in a row, and he stood for half a
+minute where the camera did not look. Now, if it was not visible in the previous plan (`g_seenBefore`), after
+all the attempts there is another one (`g_lastChance`): the same last one, but the filling of the floor is
+with a margin of 10 cm instead of 20, and the place should be visible at least a twentieth of the plan. It is
+also found near people (`ChooseAmong`). If the CJ is clamped with furniture and there is no free cage within
+1.5 m of it, filling does not limit anything: before in this case, no place of the last attempt was suitable.
+
+- If CJ is sitting in the cutscene car, the partner sits in it in a vacant seat. Cutscene machines are loaded
+  with separate models with the prefix "cs" to the name of the transport ("csgreenwood" is Greenwood,
+  "cscopcarla92" police car), and there are no seat points in them. Therefore, the mod finds the real model of
+  transport by name and takes the number of seats on its doors
+  (`CVehicleModelInfo::GetMaximumNumberOfPassengersFromNumberOfDoors`). Doors game counts when the model is
+  loaded, so that the model is loaded once and released immediately. A large object of the scene, which is not
+  a transport (palm trees in CAS_3, a courtyard in STEAL_5), is no longer considered a car: before the CJ next
+  to him “was driving”, and the partner sat in the passenger position in the air. Motorcycles, boats and
+  planes don't count either.
+- In the car, the CJ is considered only if its pelvis inside the cabin: inside the painted size of the car with
+  a margin of 0.3 m on the sides and 0.6 m in front and behind. A CJ at the door or behind the trunk (BCESA5W)
+  is not considered a passenger. The people of the scene in the fashion salon consider the same. If there are
+  as many seats as there are (four in a four-door SWEET2B car, two in a Bravura in FINAL2B), the partner does
+  not sit down, but stands by the car. If the car leaves for the plan, it stays in the same place or out of
+  the frame. He was the fifth person to sit in a seat.
+- The partner sits on the second place of the CJ row, and if it is occupied, in the other row. Models of
+  cutscene cars are rotated by someone, and the hood is longer than the trunk, so another row is searched for
+  on the roof: both rows are under it, and the other row lies from the CJ towards the middle of the roof (the
+  roof here is all that is drawn 15 cm from the topmost point). The row, taken in the wrong direction in a
+  meter, was on the hood. Place occupied if the pelvis of someone from the scene is closer to 0.55 m sideways
+  and 0.6 m along. Place is not suitable if the camera is closer than 0.9 m to his body, or if he closes more
+  than a third of the CJ or actor from the camera: in SYND_3A, the camera shoots the CJ through the window of
+  the empty front seat, and the partner there closed the CJ. If only such places are free, the partner hides
+  on this plan, and then returns to his place, rather than transplanting.
+- Face partner sits at the front of the car. The cutscene models are turned around, and on the model axis, he
+  sat with his back forward in SYND_3A. The front of the mod takes on the shoulders of the CJ (bones 21 and
+  31: CJ in the car looks forward), and if the skeleton is outdated, on the hood: from the roof to the edge of
+  the car in the direction of the hood further than in the direction of the trunk. In a review of 15 cutscenes
+  with machines, both methods coincided everywhere.
+- In the car, he stands each frame in her coordinate system with passenger animation `CAR_sitp` and turns his
+  head to the one who is speaking (pose `POSE_CAR`, cutscene object number in field `act`). The place is
+  considered to be along the pelvis of the CJ and the actors (bone `BONE_PELVIS`), not their root: the root of
+  the CJ walks as he turns in a chair to the interlocutor. The skeleton is updated only while it is being
+  painted, so the bone further than 1.5 m from the root is considered obsolete, and then the root is taken.
+  The skeleton of his partner for landing is not readable: the old skeleton carried him from the car further
+  and further with each frame, up to thousands of kilometers. The chosen place is held until the end of the
+  cutscene until someone from the stage sits on it. In a review of 15 cutscenes with cars, the partner rides
+  in 36 plans (BCRAS1, BCRAS2, SMOKE1B, SMOKE2B, SYND_3A, RIOT_4B and prologue), in full cars SWEET2B and
+  FINAL2B is outside, and in the air and on the hood it is no longer.
+- If none of the seats fit, the partner stands next to the CJ at the level of his floor, where no one is
+  standing, with walls even if the geometry is already there. In the first seconds of the interiors of the
+  floor is not yet, and before the partner on these plans, too, hidden. Non-strict seats are searched for up
+  to 8 m from CJ, strict up to 6 m: in the crowd around CJ, free space in the frame is only behind it.
+- The partner now hides only when the cutscene is hand-marked (DATE6A: a date on a playground without a room
+  where he would hang in the void) or on a plan where the camera stands in the only vacant spot in the CJ car.
+  In a full review of all 145 CJ cutscenes (1359 plans, 8754s) it was tucked away 14s, only in DATE6A.
+  Previously, in one 38 cutscenes of Los Santos, it was 274 s.
+- How many partners are visible, the review counts for each plan: the middle of the body in the frame, and there
+  is no wall between him and the camera (`SeenShare`, "seen N%" in the log). Of the 8,225 seconds when he
+  stands on his feet, he is visible 35% (a review of the rules on seats in the car). The previous count gave
+  “out of frame 35%”, but took into account only plans where there was no room for a partner in the frame. He
+  did not notice that the chosen place was closed by a wall or that the camera for the plan was leaving him.
+  In 13 difficult cutscenes, an honest count was 8% according to the old rules and 37% according to the
+  current ones. The rest of the time falls mainly on close-up conversations and cramped rooms, where any place
+  in the frame obscures the speaker. On the set in SWEET1A, the camera is a meter or two from the actors, and
+  they pass through each vacant seat for 18 seconds.
+- The walls between the camera and the character are tested by the collisions of the world. The obstacle map
+  stores only the highest point in the cage, and the porch canopy covers everything under it (house in CAT_2,
+  Sweet's door).
+- The manually assigned seats are placed in `cutscenes.txt` near the routes and are also sewn
+  (`CUTSCENE_PLACES`): the line "CATSCENA x y z course pose [animation]" or "CATSCENA hidden." From such a
+  cutscene, the fashion takes only these places and also checks them on each plane.
+
+Downloading the cutscene itself drops the player out of the machine (`CCutsceneMgr::LoadCutsceneData_preload`)
+and back down the CJ planting the mission script. The partner does not have this script, so the mod remembers
+his car and place before downloading and after the cutscene, puts him back if the space is free. The pede, who
+is still sitting in the car, first drops the scene and only then puts it in place: the transfer of the sitting
+pede moves the whole car.
+
+The character is frozen. So that the game does not consider it falling (fall interrupts animation), it is
+marked with standing, and the lighting takes from the CJ: the frozen ped stores the light of the place where
+it was before. The animation is re-run after each transfer and if something interrupts it. While the screen is
+completely darkened, the game does not update the matrix of the view, so the analysis waits for the first
+drawn frame. The partner at the beginning of the cutscene is immediately transferred to its place so that the
+collision loads around him. After the cutscene, he returns to himself, and outside the mission, he also
+removes the blackout that the cutscene leaves at the end. If the end of one cutscene and the beginning of the
+next came in one frame, the first is still removed before the second one loads.
+
+There is a booth (test bot, outside the repository) and `tools/cs_map.py` to check places. Interior numbers
+for the stand give `tools/cs_areas.py`: the interiors lie in binary IPLs inside `gta3.img`, and the room is
+taken from the nearest objects around the cutscene point (interiors are close: DATE3A and DATE4A diners are 21
+m from each other). The booth includes interiors up to `LOAD_SCENE` as mission scripts, otherwise its
+buildings won't be loaded. The game saves the first and last frame of each plan, everything that the analysis
+saw, the path of the camera and the tracks of people before gluing and the geometry around the CJ, and the
+script draws next to the frames a plan from above. In addition, the stand records the camera of each frame,
+and the verification script draws the same plan in the Ariane map editor with a silhouette in place of the
+partner: so the places are checked with the map collected independently of the game (there you can see the
+interior itself without people and the props of the cutscene).
+
+The money that the host earns for the mission is also received by the partner (`G_MISSION_REWARD`).
+
+A partner who connects in the middle of the mission re-enters the mission state (`G_RESYNC`).
+
+Enemies who hate the player also attack the partner (Player 1 type). His death doesn't fail the mission.
+
+The mission of the host often takes it CJ script into or out of the room and immediately closes the door
+("Reuniting the Families": to the motel, then to the roof; Big Smoak Palace, Madd Dog's house, dam). The
+partner standing next to him stayed outside and couldn't get in. Now, if during the mission, the host was in
+another area, and the partner is no further than 40 m from the place where the host was, after 3 seconds, the
+partner is transferred to him. Through the door that the partner walks by himself, he manages earlier.
+Reviving a host in a hospital is not considered a mission (20 seconds after his death).
+
+The plot progress partner gets a fresh picture of the world of the host. The host notices that the mission is
+passed (`CStats::LastMissionPassedName`) and sends the world 30 seconds or immediately after the script
+follows: a call after the mission often opens something, such as a rocking cage after Sweet's third mission.
+The world used to leave twice, after the mission and after the call, and the partner booted twice. Playing a
+host at a quiet moment (not in the mission or in the car) captures the world with the tag "progress", and the
+server sends such a picture to partners who are already in the game. The download holds the frame for a second
+or two. After each mission it was passed, it fell at random, and players took it for a lag, and when there was
+a blackout in front of it, for nothing but a black screen. Now the partner loads the host world at the start
+point of the next mission, where the screen already darkens before the mission. If there was no mission in 10
+minutes, it loads the world in the first quiet moment, just like before. In both cases, it should be safe: on
+foot, alive, not in the cutscene, not in its mission, and not earlier than 5 seconds after the host mission.
+He must also manage himself, be busy with nothing (Pedestrian Task 0) and not have a wanted list. The casino
+table, the hairdresser's chair, food, exercise machines, basketball and dancing did not raise the mission
+flag, and the world loaded right below them, and the chasing stars the host world washed. Between the throws
+of basketball, the task is also 0, and on 01.11 the world loaded in the middle of the competition: the ball
+and the test of the partner disappeared. Therefore, the load is kept and classes, from which there is a
+competition (test basketball, dancing, casino tables, racing), and the competition itself, while the call is
+waiting for an answer or is going (`ContestActivity`). While the world is waiting to load or load, the
+partner's game tells the host (flags `PW_WORLD` and `PW_LOADING` in `G_MISSION_WAIT`), and the host trigger is
+waiting too. The partner, who is in the marker with an unloaded world, waits for up to 10 seconds, and the
+on-going load up to 15. The mission started during the boot was in a world that the boot was replacing. Before
+loading, the partner saves the profile, place, health, armor, weapons and the car he drove last, if it is not
+more than 60 m. The screen goes black in 0.3 seconds. After loading, the partner returns to his place, the car
+again stands next to him, and the screen smoothly opens. The game of the host, having received his `G_RESYNC`,
+forgets his former peds and machines.
+
+The world the server is storing may not be the world the host is currently playing. The server created from
+the game while the host is sitting in the machine takes `world.b` of the previous session, and the host can
+download another save. While the host is on the menu, the server keeps the partner waiting (`S_WORLD_NONE`)
+and gives him peace only when the host downloads the game. To the partner who got the stored world and those
+who played when the host downloaded another save, the server sends the next host upload, not just a “progress”
+snapshot.
+
+Side classes start their streams `main.scm`, and not story missions: rocking (`GYM`), racing and driving
+school tournament (`TRACE`), hothing (`HOTR`), Kick Start (`KICKS`), Blood Bowl (`BLOODR`), triathlon (`TRI`),
+schools of flight, bike and boat (`PSCH`, `BIKES`, `BSCHOO`), Ammu-Nation shooting range (`SHOOT`), freight
+(`TRUCKS`) and quarry (`QUARRYS`). `CanPlayerStartMission` responds to these streams as if it were a single
+player: the host always has a partner, until the host has a mission. The host isn't waiting for a partner at
+their markers. Part-time jobs in cars (stream `R3`: taxi, ambulance, firefighters, police, pimp, train),
+hidden races (`ODDVEH`: BMX, NRG-500, Chiliad) and house purchases the game does not check with this issue, so
+they have worked for both before. Cesar's races run the same streams as his story missions (`CESAR`,
+`BCESAR`), so they stay behind the host. The flow of trips around the country (`TRAINSL`) is also sideways.
+Side and Date Flow (`GFAGNT`): The host used to wait for a partner at a friend's door, and the partner didn't
+go on dates. Each game does not show a friend to another player, either in the car or in the car. The date tag
+(`LOCATE_STOPPED_CHAR_ANY_MEANS_3D`) also works on the passenger, so the two who arrived together had a date
+in both games. The general rule shows another game of a person scripting as soon as he gets into the car. A
+friend would get in the car in every game, and each player would have two (05.11). Now people streams `GF*`
+are labeled `MarkLocal(..., inCarToo)`. A partner without his date does not see a host girl and vice versa.
+
+**Smoak's courier** (`Courier.cpp`, 29.10). "Big Smoke's Cash" is run by two streaming scripts. `BCESAR2` is
+held in the afternoon on Mondays and Fridays: a Patriot with six bags of money, a bag flies off the car every
+time it is damaged, for a bag of $300. `BCESAR3` goes at night on Wednesdays and Saturdays: a motorcyclist
+with a parcel, after his death the parcel lies with a pickup (up to $2,000). Both run stream `MAIN`, and their
+`GOSUB` in code `main.scm` asks `CanPlayerStartMission`, so the partner they immediately run out, and the
+courier is only the host. He is shown as a host mission: the courier's texts (without a call prompt), his tags
+on the radar from the tags that were before it began (`g_courierBlips`), fallen bags as mission items
+(`Objects.cpp`, handle in `$33264..$33284`, the car bags are not shown) and parcel as a mission pickup
+(`Pickups.cpp`). When the script removes the parcel (`CPickups::RemovePickUp`), the copy of the partner also
+disappears. Checks “players nearby” in the courier scripts (`LOCATE_CHAR_ANY_MEANS_*` with `$PLAYER_ACTOR`)
+the host counts for the partner: the partner picks up the bags and does not let the courier leave. Each
+courier payment (`ADD_SCORE`) is received by partners 300 m from the host (`G_MONEY`). The courier's machines
+are only injured by the player (`SET_CAR_ONLY_DAMAGED_BY_PLAYER`) and the battering machine of the partner
+counts as a battering ram of the player (`CVehicle::CanVehicleBeDamaged`, 0x6D1280), as well as hits of the
+partner from weapons (`AsPlayersHit`). The fashion courier gives the courier people to the partner, like the
+rest of the host people. People of other side scripts each game keeps (`Peds.cpp`), because these scripts go
+to both, and the courier goes only to the host.
+
+The mission of racing, driving school and flight school is triggered by a sidestream
+(`LOAD_AND_LAUNCH_MISSION`) and the mod remembers who launched it (the team puts the mission in the mission
+buffer, 0xA7A6A0). It’s not just the missions that raise the “on-mission” flag: TRACE and PSCH first keep it
+dimmed, PSAVE1 on the save menu, and the parker and occasional phone calls all the time. Maud remembers who
+raised the flag. Such missions and flags for a partner are not the mission of the host: before he received
+timers and the prize of the race of the host, a black screen and a hint of a call that he did not have, and
+could not start anything of his own.
+
+The very missions of these classes (missions `main.scm` 3-10 and 113-133: games on the console and billiards,
+shooting range, gyms, schools, races, part-time jobs, cargo transportation, quarry) mod recognizes by the name
+of the script and the host missions for the partner does not count. In the past, a partner had their texts and
+rewards (host taxi fees) repeated, and his own classes while they were walking were banned.
+
+The teammate's lesson is only in his game, the second player does not see his markers and timers unless he is
+called (below). Money and skills for him remain in the profile of the partner. What the occupation changes in
+the world (school, trucking and quarrying as property) will disappear the next time the host world loads.
+
+Two can be in the same school at once: `DSKOOL`, `BSKOOL`, `BOAT` and `DESERT5` go to each of their own and
+put the lesson machine at one point. The script machine with a foreign mod player transmits as usual, and a
+copy stood inside our lesson machine: they were scattered, they burned and exploded, and the lesson failed
+(04.11). `ClearSpaceForMissionEntity` such a copy does not remove (`bIsLocked`). Now, while our player is
+going to school (`OwnSchool`), there are no copies of the machines that hold the script of another game for
+him (`Vehicles::SetApart`, collision copy see below `F_NO_COLLISION`): removed `m_bIsVisible` and
+`m_bUsesCollision`, so it does not hit our car and does not knock down the cones of our lesson. Without
+collision, it is not affected by gravity (`CPhysical::ApplyGravity`), and it still follows the states of the
+owner. Also not shown are those who sit in it: a copy of the player (`KeepApart`, without a signature
+overhead) and the driver of the demonstration race (`NetPed::apart`). The mark is still on the radar.
+Everything returns with the end of school, with the player gone, and when the copy becomes ours (`Release`).
+Those who did not go to school, see the car and the student as before. The only sign is ours: the story
+machine of the host at the school is also not visible to the one who is studying there. The sound of the motor
+remains in such a copy. In stadiums and races (U), both games are also played in the same place, this has not
+changed and the game has not been tested.
+
+Collisions of a copy of the machine follow the owner's car (`F_NO_COLLISION` in condition,
+`SET_CAR_COLLISION`). In Robbing Uncle Sam, while the CJ is on the forklift, the script freezes the van,
+removes the collisions and replaces it with a hollow box `FAKE_MULE_COL` into which the crates are driven. My
+partner's copy of the box was solid inside a replica van that had yet to collide. The box pushed the van out,
+and the boxes on it remained in the air where the van actually was (04.11).
+
+**Joint jobs and races** (`G_SIDE`) Part-time work in the car or race (missions `TAXIODD`, `AMBULAN`,
+`FIRETRU`, `COPCAR`, `PIMP`, `FREIGHT`, `BCOUR`, `MTBIKER`, `STUNT`, `CPRACE`, `BURGJB`, `TRUCK`, `TRIA`,
+29.10 still `KICKSTA`, `BLOOD`, `QUARRY`, `SHRANGE` and the change of the parking driver) can be done
+together. It's still in the game of whoever started it, whether it's a host or a partner. In the first 20
+seconds, he sees a box called "Call... for a shared assignment in a taxi?" and can press Y, and the second
+player gets a window called "...calls you to a joint assignment in a taxi" with the answer Y or N.
+Notifications in the chat call the task the same and do not put a verb in the past tense after the player's
+name: Nick does not say who is playing for him ("Nick accepts the invitation"). An unanswered invitation is
+rejected after 20 seconds, and rejected immediately by someone who is busy with their mission or the mission
+of the host. The owner’s game sends the same thing that the host sends to the partner during the story
+mission: texts and hints, radar tags (tags that were before the start of the lesson do not go), destination
+markers, checkpoints and spheres, timers and counters (`MissionSource` receives them from the owner). Her men
+and cars are visible to the second player and so, the fire on her cars and the damage on her people are also
+transmitted, so you can help immediately. When the class is over, the owner sends `SIDE_END` with the money it
+brought him, the second player removes his marks and receives the same amount. Levels of part-time work are
+received only by the owner: they are issued by the script in his game. Both receive the full award (see paras.
+"My own progression." His mission or his occupation with the second player takes him out of someone else's
+(`SIDE_LEAVE`), except for his taxi in someone else's (below). Tested by two games in both directions (tests
+c05a and c05b): a host taxi with a partner and a partner taxi with a reward host.
+
+The owner immediately agrees (`BoardSide`: 15 seconds, attempt twice per second). He used to get there himself
+(27.10). Further 30 m it carries 3 m to the right of the owner. In a taxi, ambulance, fire and police car, in
+a race, stunts, on Chiliad, at the courier and at the pimp (the only seat in his girlfriend's car), he gets
+the same car next to him and gets behind the wheel (`Players::VehicleBeside`: the same search for a seat as
+the partner's bike in the plot). The passenger in the owner's car first drops off next to him. In a robbery
+van and in a truck, he sits on a vacant passenger seat, to which the people of the mission do not go
+(`Peds::SeatClaimed`). If the owner is on foot, the second one is just standing next to him. The freight train
+does not take a passenger, and it does not carry anyone.
+
+Stadium arenas are interiors, and there the consenter carries the same (`StadiumJob`: Kickstart, Blood Ring
+and racing). The car that he is placed next to receives his interior (`SET_VEHICLE_AREA_VISIBLE`), otherwise
+it would not be visible in the arena. Kickstart starts on foot, and the stadium race puts the player in the
+car only after the marker, so try to put the second until the owner sits down (up to 60 seconds). In the
+quarry, the second receives a car only when the owner sits in a bulldozer or dump truck, and the same (up to
+120 seconds). While the second in his car 300 meters from the owner, it is not tolerated. At the end of the
+joint race, the second one leaves the arena at the exit of its script (`LeaveArena`, 2 m from it): there are
+no doors at the arena, and the stadium script only displays its player. The stadium marker is a few meters
+from the exit, and to stand directly on it would mean to start your race.
+
+**Both work** (`Jobs.cpp`, 27.10: “If a host calls a partner to perform a mission together, they must both do
+so”). The script of part-time work is in the game of the owner, and there a copy of the second player on his
+car is considered the second player of the task. Intercepting the owner's commands does this in two ways.
+Condition `LOCATE_*` of its player (`$PLAYER_ACTOR`) after the team receives the answer “yes” and when the
+second one is near (`jobs::Answer`, like billiards). And before a team takes a machine or a player from a
+variable, that variable gets a machine or a copy of the second command (`jobs::BeforeCommand`). The task
+reissued after the script command would be the second event of the script at the pede in the same frame, and
+which one will win is not determined.
+- `AMBULAN`. The patient, who was approached by the ambulance of the second (close 10 m, model 416), is
+  remembered for her. If the owner's ambulance is nearby, he goes to her as before. Place checks
+  (`GET_NUMBER_OF_PASSENGERS` / `GET_MAXIMUM_NUMBER_OF_PASSENGERS 34@`) and `TASK_ENTER_CAR_AS_PASSENGER 77@
+  34@` go with her number at `34@`. "He left the patient" (`NOT LOCATE_CHAR_IN_CAR_CHAR_2D $PLAYER 77@ 20`)
+  and "stands at the hospital" (`LOCATE_STOPPED_CHAR_IN_CAR_3D` without a crown) are measured on it while the
+  patient is sitting in it. The script keeps the patients further than 50 m from the player frozen without
+  collision (`FREEZE_CHAR_POSITION_AND_DONT_LOAD_COLLISION`), and this check responds "near" and for the
+  second. Delivery, time and money is further considered by the script itself.
+- `FIRETRU`. The burning cars are also frozen further than 50 m from the player
+  (`LOCATE_CHAR_ANY_MEANS_CAR_3D`), now from the second. The fire that the second extinguishes at its copy is
+  also extinguished by the owner (`Fire.cpp`, `FIRE_OUT`), and `IS_SCRIPT_FIRE_EXTINGUISHED` counts it.
+- `COPCAR`. The perpetrator goes out to fight when either of the two is near (`LOCATE_CHAR_ANY_MEANS_CHAR_2D`)
+  and `TASK_KILL_CHAR_ON_FOOT` gets the one closest to him (`$PLAYER_ACTOR` per team). The script moves the
+  stuck car of criminals to the road only when both are further than 90 m. Killed by the second offenders
+  count themselves: the script is viewed only by `IS_CHAR_DEAD`, and the damage of the second is transmitted
+  through them. Each of the 12 criminals is told to die sitting down (`SET_CHAR_FORCE_DIE_IN_CAR`, 0x2CDB55).
+  With this flag, the `CTaskComplexDieInCar` does not brake the car and does not release the body, and the
+  machine's AI does not look at whether the driver is alive: the car of the killed driver was driving further,
+  and in single-player play (player complaint 08.11, user decision: as with any killed driver). In the
+  network, the command is missed (`CriminalsDieSeated` in `Missions.cpp`): the car brakes, the driver's body
+  falls out after 2 seconds, passengers remain seated. A copy of the second player's killed does the same
+  thing: `TASK_DIE` pedas in the car give the same `CTaskComplexDieInCar`, and a copy also gives the script.
+  The copy does not receive the “die sitting” flag, so the peds, which are put on it by other missions
+  (`MUSIC3` two, `CASINO5` one), the body of the owner sits, and the copy falls out.
+- `BURGJB` (27.10: "Two people clean houses and put things in 1 truck"). Things in houses are picked up by the
+  game itself (`CPlayerInfo::FindObjectToSteal`, flag `bIsLiftable` 0x2000 in `CObject` + 0x140) and with the
+  thing in hand, the player leaves through the door of the house (`CEntryExit::ProcessStealableObjects`
+  carries it to the street area). The script only finds the nearest thing (`GET_CLOSEST_STEALABLE_OBJECT` does
+  not change anything in it) and when the player puts it with the entry button 6 m behind the van
+  (`GET_OFFSET_FROM_CAR_IN_WORLD_COORDS 50@ 0 -6 0`, squared 3.5 m), adds `48@` and removes the thing. Payment
+  at the garage is considered to be `48@` : 20 × N2. In the second player, his game opens the house
+  (`ENABLE_BURGLARY_HOUSES`, as `BURGJB` himself), with the thing at the rear doors of the van (`BOXBURG` 609
+  closer than 20 m) shows the window "Put the thing in the van?", after the entry button removes the put thing
+  and sends `SIDE_LOOT`. The owner's game adds `48@` (`jobs::Stashed`), plays the same sound and chats as many
+  things in the van.
+
+  The house is furnished with the grain of its place (`srand` in `Interior_c::Init`), so the furniture and
+things in both games are the same. Each item for theft has a record in `g_interiorMan` (`m_Objects[32]` to
+0x1C: object, model, interior, place, "stolen"), and the house in the new environment does not put stolen
+(`Interior_c::PlaceObject`). The thing that one player picks up (holds it up, and it has moved more than 0.3
+meters) goes out of the other’s house (`SIDE_TAKEN` with a model and a place): it becomes invisible, without
+collisions, it cannot be lifted, and the record is marked stolen. It cannot be removed: the house removes its
+furniture when the player leaves (`Interior_c::Unfurnish`) and the second deletion drops the game.
+
+  Half of the houses for theft are closed for the whole game: at the entrance with the flags `BURGLARY_ACCESS`
+(0x1000 ) and 0x400, the constructor `CEntryExit` when loading with a probability of 50% puts the opening
+hours 0-0 (never), and `CEntryExit::TransitionStarted` and the mark at the door (`CEntryExitManager::Update`)
+look at the clock. It falls in each game in its own way, and the house where the owner entered, the second was
+unmarked and did not let (28.10). While the robbery is joint, at such entrances in both games the hours are
+0-24 (`OpenAllHouses`), after the end - again 0-0. The exits from the inside are connected to the entrance
+(`LinkEntryExit`) and are always 0–24. Once the world is loaded, the inputs are recreated and there is nothing
+to return (`jobs::WorldLoaded`).
+
+  House doors appear and disappear with the building (`CEntity::CreateEffects`, `RemoveEffects`), and the clock
+falls out again each time it appears. Opened once at the beginning, the doors of the neighboring street and
+the street after the robbed house again were unmarked (30.10). Now, while the robbery is joint, the doors are
+inspected twice a second, and the open ones are remembered along with the middle of the door: the cell of the
+departed door is later taken by another, and only their own are closed.
+
+  `BURGJB` wears a balaclava to his player (`GIVE_PLAYER_CLOTHES_OUTSIDE_SHOP … "BALACLAVA" 17`) and the second
+player does not wear it (28.10). Now the game joins it in the same way, on top of its appearance, as the
+mission clothes of the host (`BurglaryLook`: its appearance is preserved in `g_ownKeys`, in profile he goes),
+and removes after the robbery immediately, even in a van, as `BURGJB` removes it to his player
+(`BUILD_PLAYER_MODEL` in the car also works). Previously, the withdrawal was waiting for the second to get out
+of the car, and after the cancellation of the robbery, the balaclava remained on it (29.10). The "host has no
+mission, its clothes back" check (`RestoreOwnLook` in `PartnerUpdate`) removed the balaclava 8 ms after
+putting on while the robbery balaclava is wearing, she is silent (28.10). Garage cache `BURGJB` opens when its
+player is 20 m from the garage and the van is there (`LOCATE_CHAR_ANY_MEANS_3D`), and takes the van with this
+player behind the wheel (`LOCATE_CHAR_IN_CAR_3D`). Both checks in the script once, and the owner's game
+answers "yes" when there is a second player, in the second case in the car (`jobs::Burglary`): the second
+brought the van and stood at the closed gate (28.10). Marks and entrance at the door of the house the second
+did not receive and with an open clock (28.10): at such a door, his game once a second writes to the magazine
+everything that checks the game before the mark and entrance (flags, clock, communication, area,
+`ms_exitEnterState`, `ms_bDisabled`, taken control, `CanPlayerStartMission`), the line "Joint burglary, a
+house's door by us".
+
+  The occupants of the house (`InteriorGroup_c::SetupHousePeds`: each brain `BURGLAR`, created as `PED_MISSION`
+without a script) appeared in both games, and a copy of the stranger stood in the same bed: the host was
+forked, one hung in the air. Now, outside the story mission of the host, each game leaves its own
+(`Peds::MarkLocal` in interception `CPed::SetCharCreatedBy`, if the peds are from the interior group:
+`GetPedsInteriorGroup`). In Home Invasion, the colonel's family is passed on as before.
+
+  Residents’ brains wake up at a full noise scale (`$21172` = 100) or from a shot and wound, and the person who
+wakes up calls the police or picks up a weapon (`$7172` = 1). The player's `BURGJB` scale is based only on the
+owner's. In the second player, his game is the same (`jobs::Noise`): the volume of sound in the player's place
+× 1.6, over 20 accumulates, 1% per frame goes away. This is its own strip `BURG25` (`ShowOwnCounter`, the
+scale of the owner from his block of meters is not taken). Full 0.2 seconds or awakened tenant: “the hosts
+woke up”, 10 seconds to leave the house, then 3 stars, and came out on time – nothing. Those who wake up in
+one house wake up residents of the same house in another (`SIDE_ALARM` with a place, the house is checked by
+distance up to 50 m: the interior of each house hangs above itself). The owner fills up a pile of noise `41@`,
+the second one has its own.
+- `STUNT` (Rings on a bike at a skate park): the ring takes `LOCATE_CHAR_IN_CAR_3D $PLAYER ring 2.5`, only by
+  its player, and the second ring does not count (28.10). Now the owner's game answers "yes" and when a copy
+  of the second player passes through the ring on a bicycle (`jobs::Stunt`): the ring is counted, time is
+  added. His assignment with the rings of the game joining, which his `ODDVEH` runs while he is on BMX, is
+  extinguished on the first team (`HookStartNewScript`). Before it, it was hanging among the scripts, and
+  `SideUpdate` output from the overall task into the same frame. The script, which stands at
+  `TERMINATE_THIS_SCRIPT`, is no longer considered an occupation (28.10). Rings `STUNT` rotates itself, 10°
+  each frame (`SET_CHECKPOINT_HEADING`, other scripts do not). The host had a new direction in each update,
+  and the game of the second set the ring again four times a second, so it was spinning in jerks (29.10). Now
+  the ring, which has changed only the direction, is not recreated, and rotates in the second in the same way,
+  at 10° per frame (`TurnMarked`).
+- `PIMP` (pimp). The girl is picked up by the player's car in which he started work (`40@`): the player in the
+  car is closer than 7 m to her (`LOCATE_CHAR_IN_CAR_CHAR_2D`), the car is standing, and the girl sits in it
+  (`TASK_ENTER_CAR_AS_PASSENGER … 40@`). Then the trip to the client goes with this machine and the player in
+  it (`IS_CHAR_IN_CAR $PLAYER 40@`, you can get out for 20 seconds), and the second player could not pick up
+  the girl (29.10). Now the car of the second, the first to arrive at the girl, becomes for this trip the
+  machine of work: `40@` - its copy at the owner, and checks "players in the car" and "player next to the girl
+  or client" are answered by the second player (`jobs::Pimp`). The next girl to be picked up by the owner's
+  car, `40@` is his again. Checks of the area (where customers appear) remain with the owner.
+- `TAXIODD`. Passenger at the taxi is one, and he gets out 88 meters from the player, so there is no common
+  passengers: everyone carries their own. His `TAXIODD` second player, started by the 2 key in someone else's
+  taxi, intercept the launch (`HookStartNewScript`) no longer extinguishes (`Side::parallel`). The second, who
+  was put behind the wheel of his taxi, did not press the 2 key, drove to the owner's passenger, and he sat
+  only to the owner (28.10). Now, after 1.5 seconds after getting behind the wheel of a taxi (`TAXI` or
+  `CABBIE`), your part-time work begins on your own, as it starts the flow `R3`: `$728` = 1, `PRINT_BIG
+  'TAXI_M'` and `LOAD_AND_LAUNCH_MISSION_INTERNAL 121` (`StartOwnTaxi`). While he is walking, the texts, tags
+  and timers of the taxi owner are not shown, and the money goes both ways (`SIDE_PAY`). What is received from
+  another (`Side::received`) is deducted from one’s earnings, otherwise the money would go in circles. When
+  the taxi runs out, the second sends `SIDE_RESYNC`, and the owner sends him all his own again (`ForgetSent`).
+  Next to the owner (about 60 m) passers-by creates only his game, so the second one appears when he leaves.
+- `KICKSTA` (Kickstart, 29.10). The crown is taken by a check of `LOCATE_CHAR_ANY_MEANS_3D $PLAYER crown 1.5`
+  and the next check of `IS_CHAR_IN_MODEL $PLAYER 468`. The owner’s game answers “yes” when the second player
+  passes through the crown (`257@` = 10, `jobs::Kickstart`) and the points for it go to the total score. The
+  rest of the model checks (the countdown when the player tears off the motorcycle) remain with the owner. The
+  corona script draws each frame (`DRAW_CORONA`), and the second one could not see them. Now the owner's game
+  sends them along with the task markers (`G_MARKER`, view `AREA_CORONA`: place, size and color; the number is
+  taken in place because the team has one for all the crowns), and the game of the second draws them
+  themselves (`CCoronas::RegisterCorona`). Markers in the message now up to 40, crown 33. The owner's
+  Kickstart and Blood Ring competition is cancelled when the other accepts the invitation: the score is now
+  shared.
+- `BLOOD` (Blood Ring). The control point (+15 seconds and +300 to the health of the owner's car) is taken by
+  one check `LOCATE_CHAR_ANY_MEANS_3D $PLAYER`, and the owner's game answers "yes" to it when the second car
+  passes through the point (`jobs::BloodRing`). The key in the arena and the owner's broken car remain with
+  the owner.
+- Racing in stadiums (8-Track and Dirt Track, `CPRACE` in Arenas 7 and 4) is two-way, like the rest of the
+  races: the second rides side by side in his car, and the result remains with the owner.
+
+  A two-man race (0.3.3, `features/story/race`). Previously, the second was driving nearby, but did not compete.
+Now the owner's game considers him another rider. It keeps a copy of the second on the route `CPRACE` (arrays
+`454@`, `536@`, `618@`, on a circle of `250@` points, circles `224@`, taking radii `322@` – `324@`) and puts
+it according to the rule of the script itself: first finished, then more laps, then further along the route,
+then closer to the next point. Four times a second, the second gets its seat, its owner's seat, and its next
+point (`G_RACE`). His game puts his checkpoint and tag there and draws a spot on the right. Checkpoints and
+markers of the owner’s route are no longer sent to him: they show where the owner is going. At the finish
+line, the second recognizes his place in the chat. If the race ended earlier (the owner finished and `CPRACE`
+closed), the place is counted by who was where.
+
+  Anyone who has not entered the race but is riding with or near the rider (no further than 150 m in the same
+area) sees the rider's seat on the right (31.10, Silent X request). The rider's game sends out a spot twice
+per second that shows her screen (`229@` + 1 of `256@`, `G_RACE` 3).
+
+- `QUARRY` (career). A copy of the world’s second-biggest bulldozer is a real machine: it pushes the owner’s
+  stones and bombs, and the script counts them where they lie. The owner's game counts two checks of his
+  player's distance for the second (`jobs::Quarry`). In the "Crash" (`34@` = 5), the stone in the pit is
+  counted only if the player is closer to 30 m (for two stones 50 m), now the second. In "Sabotage" (`34@` =
+  7), a bomb taken to safety explodes when both the player and the bulldozer are further than 21 meters from
+  it, and next to the second it does not explode. The ramming of the bomber dump truck ("Destruction", `34@` =
+  16, `91@` ) by the second machine is counted as a battering ram of the player (`QuarryTarget` in
+  interception `CVehicle::CanVehicleBeDamaged` ). Cargo transportation and crane remain with the owner. His
+  `QUARRYS` in the second, while he is in someone else's career, does not begin (`CanPlayerStartMission` for
+  sidestreams). On a marker at the office, he took control and turned off the screen, the mission launch
+  immediately ended, and the screen remained black.
+- Parker (`valet.scm`, streaming script). The shift is also a joint activity: it is recognized by the stream
+  `VALET` and the flag `$7480` (`jobs::ValetShift`). Her texts, tags and parking spot marker go second, like
+  other classes. The script drives one guest car at a time (`$43736`) and can be driven away by either of the
+  two. When a copy of the second is driving, `GET_DRIVER_OF_CAR` of this car in the owner's game gives it to
+  the player, otherwise the car was considered stolen and abandoned. `GET_CAR_CHAR_IS_USING $PLAYER` gives the
+  car to the second, and the script's parkers do not take it (`jobs::ValetAfter`). The machine counts itself:
+  the check `LOCATE_STOPPED_CAR_3D` is a copy of the car that stood where it was put by the second. Cleaning
+  the cars on the way and at the end of the shift, the second car does not touch (`IS_CHAR_IN_CAR` and
+  `LOCATE_CHAR_ANY_MEANS_CAR_3D`, `jobs::ValetAnswer`). His `VALET` while he is in someone else’s shift is
+  turned off: his check “players at the hotel” (`IS_CHAR_IN_AREA_2D`) answers “no”, otherwise guests and
+  parking attendants at the hotel would be in duplicate.
+- `SHRANGE` (Ammmu-Nation dashboard). The dash script is triggered as soon as the player enters the room and
+  waits for it in the marker (stage `$32280` = 0). Joint shooting becomes with the beginning of the set and
+  remains it until the loss, exit on the button or the end of all levels (`jobs::RangeWaits`: waiting shooting
+  range for the lesson is not counted). The script puts the player in the middle booth (track 1), two
+  opponents shoot on the sides, each track has its targets in 8 parts (`$32388`). In the first two rounds, the
+  track wins, which will first smash 3 targets, whoever smashes them. In the third, all three shoot at a
+  single mid-range target, and each broken piece goes to the one about whom `IS_CHAR_SHOOTING` says he shot
+  (the first one asks the opponent). He puts the owner in the booth, one step behind on the left
+  (`BoardSide`), and gives him the owner’s weapon: a pistol, shotgun, Uzi or AK level. His weapon from the
+  same cell returns afterward. Its copies of targets (`Props`) become solid, and the shot on the copy goes to
+  the owner's game (`G_PROP`, `OP_HIT`: item number, damage, weapon). She hits her part of the target as a
+  shot by her player (`RangeHit`, `CObject::ObjectDamage`). Part breaks only if it's now having collisions,
+  just like the gunshot from the owner himself. The broken part becomes invisible, and the copy of the second
+  hides with it. If the third round within 250 ms after such a breakdown asks `IS_CHAR_SHOOTING`, the owner's
+  player "shot" and the opponents did not. Repeated shots of a copy of the second in the game of the target
+  owner do not break, otherwise hits would be counted twice. The second shooter, while he is in someone
+  else's, does not begin: `$7452` = 1 (the seller does not respond with fire to shots), `$104` = 1 (the latch
+  of the flow `SHOOT`, which he removes on the street), and his waiting shooting range ends (`$32296` = -1, as
+  when leaving the room). After the joint approach, the second shooter will start only by going outside and
+  returning. Rivals remain the people of the owner's game, the second does not see them, and his hits on the
+  targets of neighboring tracks are not considered. The launch of his dash while the player is engaged in
+  someone else's activity is extinguished on the first team (`HookStartNewScript`). The mission flag `$1636`,
+  which `SHOOT` raised before launch, is now lowered: the game used to think it was a mission before
+  rebooting.
+
+  The script creates targets without a field (the object has 13, “seen everywhere”), and `Props` considered such
+objects to be street objects and did not send them to another player in the dash room: the second shot at an
+empty booth (#92). Now the targets of the joint round (`RangeTarget`) are measured by the area of their
+player. The agreed, moved to the booth from afar, the game holds in place until the floor of the room appears
+below it (no longer than 5 seconds): the floor is loaded several frames later, and the second player fell
+through under the first (30.10).
+
+**Delivery tag in freight.** Script `TRUCK` puts the delivery location label at `76@` at the beginning of the
+second stage when the player is seated in the tractor, and again when the uncoupled trailer is hooked. If at
+the time of landing the trailer is not on the coupling, the second stage begins with the “lost” trailer, and
+the hookup puts the label again on top of the live one. The first tag remains on the map forever, gets saved
+and with the world of the host goes to the partners. In a single game, this is rare, and two trailers are hit
+by the second player's car and his truck: his game puts his in the same place. The mod in front of
+`ADD_BLIP_FOR_COORD` script `TRUCK` removes the live label from `76@` (`ScriptCommand`). In a loaded,
+missionless world, he removes the tags left over from past games: a tag on coordinates without an icon, sized
+4 from `CHANGE_BLIP_SCALE` scripts, at one of 75 delivery points (`102@`, `103@`, `ClearTruckLeftovers`).
+
+**Competitions** (`Contest.cpp`, `G_CONTEST`). Basketball (point test), billiards, blackjack, roulette, wheel
+of fortune, club dance, competition at the meeting of lowriders, Kickstart, Blood Ring, racing (with 8-Track
+and Dirt Track) and triathlon can be played in competitions. Everyone plays at home, the mod only reads the
+result. The activity is visible by stream or side mission: `BBCHAL`, `DANCE` off-mission, `LOWGAME` inside
+`LOWR`, `POOL2`, `KICKSTA`, `BLOOD`, `CPRACE` (race number `$1408`), `TRIA` (`$7248`). The scripts of the
+casino tables work next to the table (the brains of the objects), so the game at the table is visible by their
+own flags: `$36868` for blackjack, `$37760` for the wheel, `$13956` for roulette. Result: Points (`$7696`,
+`$21184`, `$4072`, `$33048`), money won or lost at the table (a game without a bet does not count), time to
+finish and place. At `CPRACE` the finish is stage `49@` from 13, place `450@`, time from start is `$27840` (in
+the race against the clock there is time itself). The `TRIA` finish is his victory melody or "Loser!"
+(`RACES_8`) on the line, time from `767@`, place `942@`. At `BLOOD`, the win is `91@` = 1, the time from
+showing his timer. Local mission variables are read from `CTheScripts::LocalVariablesForCurrentMission` and
+are zeroed out by the mission launch. The challenge is made in the first 20 seconds (U), in the window of a
+joint race or triathlon next to Y. Consent binds to the competition the current game of the second player or
+the next game started within 3 minutes. Both games send the state of their game, and when both are finished,
+each announces the winner. Story dances and lowriders (`MUSIC1`, `SWEET6`) are not counted: they are led by
+`Minigames.cpp`.
+
+The scoreboard of the competition (`contest::Board`, draws `Overlay.cpp`) is at the top of the screen: the
+lesson, the score of both (who is in front, the green), and while your game has not started, how many 3
+minutes left and how to start it. After 10 seconds there is a big victory, defeat or nothing and the score of
+both. There used to be a single line, and the time and hint were only in the chat (29.10). The scoreboard is
+always in the center and not wider than 40% of the screen, the long hint and name are transferred. At first,
+the long scoreboard shifted to the right of the chat column and was not in the center, and then, sandwiched
+between the chat column and the same indentation on the right, looked compressed. Now the overlay is drawn
+after the chat, and the scoreboard covers the ends of the longest lines of chat while standing. The window in
+the center of the screen (call, wait) is under the scoreboard. For test frames, the scoreboard in any state
+shows `contest::Preview`.
+
+The challenger to a dance or basketball is transferred to the caller (`Players::GoTo`, room door as `/tp`): to
+his place on the dance floor, where the club (`BAR_AMBIENCE`) itself starts the dance when the player is
+standing in a marker, or one and a half meters away on the court. Everyone used to play where they were and
+there was no other player (27.10). The two on the same marker are dancing at the same point and the copy was
+inside their player. While we have `DANCE` and the copy is closer than a meter, it is shown at 1.2 m to the
+right of our player (`DanceSide`) and each game sees another to the right of its own. Someone who is already
+25 m from the caller, do not tolerate anywhere: the transfer with the ball in his hands knocked the partner
+out of the script of the court (01.11). The `BBALL` test starts only with the “Look Back” button with the ball
+in hand (`BB_09`, Script button 19). The teammate threw the ball for three minutes, the test never began, and
+the competition was canceled (01.11), and on 03.11 the challenger again did not know about this button. Now,
+the challenger begins the test as soon as he has the ball in his hands: to the question `BBALL` about the
+button 19 (`IS_BUTTON_PRESSED 0 19`) his game answers "pressed" until the test begins (`contest::Answer`, the
+answer after the team, like a billiard). The camera doesn't get that button. Another `BBALL` creates the ball
+only when its position is not visible on the screen (`NOT IS_POINT_ON_SCREEN`, so that the ball does not
+appear in front of the eyes). The second player watched the first player play at the same ring, and he didn't
+have the ball until he turned away (03.11: "the ball is not" 20 seconds). In the session, the ball's placement
+for the `BBALL` is considered off-screen.
+
+**Billiards together** (`Pool.cpp`, `G_POOL`, Protocol 23). In `POOL2` (Mission 8), there is a two-player mode
+from the split-screen game: on the second-down START bet screen (`IS_BUTTON_PRESSED 1 12`) puts `178@` = 1,
+the beats go in turn on the pad of `180@`, and the opponent from the bar (`214@`) becomes the second player. A
+billiards call (U on the bet screen) now means a game at that table. When the second player accepts, the table
+owner's game answers "yes" to this test (`pool::Answer` in interception of teams), and the game goes together
+without a bet, and the competition is removed: the winner is called by the game itself (`PL_08` / `PL_09`). If
+the bet has already been made or the owner has left the table, the second receives `OP_FAIL` and plays his old
+way.
+
+The owner's game hides the opponent from the bar and puts a copy of the second player in his place
+(`RemotePlayer::avatar`: a copy takes the place, turn and animation of this pedal). The animation is selected
+by `anim::Main`: first the animation of the script, then the strongest on the whole body. `TASK_PLAY_ANIM`
+runs the animations of the table (block `POOL`) by name, without a group, and all of them are partial (flag
+0x10). Previously, only full-body animation was taken, and the copy stood right with the cue while the
+opponent aimed and beat (28.10). 20 times per second, the owner's game sends the second his camera, the
+opponent's seat and animation and the objects of the game: objects from `MissionCleanUp` (balls, the
+opponent's cue, the aiming cue), except for his cue, which is visible in the hand of the owner's copy. The
+game of the second takes him to the bar, puts his CJ in the place of the opponent with the same animation,
+creates copies of the balls without collisions and holds the owner's camera (`SET_FIXED_CAMERA_POSITION`, then
+each frame `m_vecMoveLinear`, `m_vecTrackLinear`, `m_fFOVNew`). Each frame she sends its own buttons, a
+gamepad sign and mouse movement. The subject rotation is read by the command `GET_OBJECT_QUATERNION` only at
+the object with the model in the world (`m_pRwObject`): the team takes the model matrix
+(`CEntity::GetModellingMatrix`), without the model it is zero, and `CQuaternion::Set` dropped the owner's game
+at the beginning of the game (0x0059C3E4). Without the model, the rotation is taken from the direction, and
+the object in the second one is not shown, as well as the owner. `SET_OBJECT_QUATERNION` in the second one is
+safe: it puts the matrix through `CPlaceable::SetMatrix`, which creates it itself. The view comes once in 50
+ms, and the ball during this time rolls up to half a meter: the second each ball smoothly travels from the
+shown place to the new in 60 ms (`MoveMirrors`, turn too, with normalization), and the new or moved beyond the
+meter is put immediately. Copies stand in the area where the second player himself is now (`CGame::currArea`):
+the area from the owner's view is the area of his opponent, and the script person can hold the area of the
+street, and the created and "visible" balls in the bar were not drawn (28.10, twice). His opponent, the second
+player from the bar (he is held by the script table `POOL` in `1@`), hides wherever he waits: in the pictures
+he stood in the frame in the place of the opponent. The second query asks for ball models with priority: a
+request without flags lives one streaming update (`CStreaming::PurgeRequestList` at the end of
+`CStreaming::Update` shoots everything that the game does not need, the mission and not priority), and there
+were no balls for 20 seconds (28.10).
+
+The opponent's cue (`107@`) passes into the hand of a copy of the second player. The hidden opponent lost and
+cues: `CTaskSimpleHoldEntity::SetPedPosition` each frame makes the object in the hand as visible as its owner,
+and the invisible pede (`PreRender` is not called, bones are not updated) puts the object not in the hand, but
+in the point of the pedal. Both had a second player aiming and hitting empty-handed (28.10). Now the owner's
+game takes the cue away from the opponent (`DROP_OBJECT`) and gives it copies (`TASK_PICK_UP_OBJECT`: right
+hand, no animation, as does `POOL2`). When asked by `POOL2` whether the opponent is holding his cue
+(`IS_CHAR_HOLDING_OBJECT 214@ 107@`), she answers “yes” and the script does not take the cue back, and her
+animation cue (`POOL_*_O`) still puts on the time of the opponent’s animation. At the end of the game, the cue
+returns: the copy drops it, and `POOL2` again gives it to the opponent. In the list of items, this cue is
+marked, and the second game holds a copy of it in the hand of his CJ, playing the animation cue from the view
+of the table (time goes on at the same speed as the animation of the opponent). Copies of the balls are placed
+like other copies of objects (`Props`, `Objects`): the object is removed from the world, receives a matrix
+from the quaternion (`Quat::ToMatrix`) and returns (`CWorld::Remove` / `Add`). The owner sends a quaternion of
+his matrix (`Quat::FromMatrix`). With `SET_OBJECT_QUATERNION` and a transfer without a new place on the world
+lists, the second had balls created and "visible" but none on the table (28.10, three checks). A copy of the
+second in the owner and the CJ of the second in itself frozen, and the angle of rotation itself in the matrix
+did not fall: CJ beat across the table. The rotation is now placed in the matrix (`CPlaceable::SetHeading`).
+
+`Props.cpp` does not transmit such a copy (`PoolTableCopy`): the owner already owns the cue. The second
+player's weapon is hidden (`HIDE_CHAR_WEAPON_FOR_SCRIPTED_CUTSCENE`) as `POOL2` hides it from both players.
+Protocol 28.
+
+The second player stands in the place of the opponent, that is, next to the opponent from his bar. The script
+of the table of his game (`POOL`, the brain of the object) on F ran his `POOL2` on top of the party of the
+owner: his balls, his camera, his animations at the copy (“crooked by animations”, “balls do not beat”,
+28.10). While the second one is at the other’s table, the game responds to this script “not next to” at
+`LOCATE_CHAR_ON_FOOT_CHAR_3D` (`pool::Answer` now sees commands of all scripts, not just missions), and the
+prompt and launch of its game in the second one does not appear. In the course of the second (`180@` = 1), the
+owner's game responds to checks on the buttons of the second drop (`IS_BUTTON_PRESSED 1 …` ) and
+`IS_PC_USING_JOYPAD` on his pad, and after `GET_POSITION_OF_ANALOGUE_STICKS 1` and `GET_PC_MOUSE_MOVEMENT`
+writes on the weekend variables of his sticks and accumulated mouse. If the second leaves in the middle of the
+game, his punches pass to the owner's pad, and the opponent from the bar is seen again. Without a table view
+for 10 seconds, the second one leaves the game on its own.
+
+During the game, `POOL2` lowers his table by 10 cm (`SET_OBJECT_COORDINATES` tables `163@`, at the end raises
+back) and puts the balls on it. At the second table was at the height of the map, and copies of the owner's
+balls (both the batch and the batch alone of `Props.cpp`) lay inside the table: created, visible and on the
+screen, they were not visible (28-30.10). Now the game, where the `POOL2` is, sends the table position to
+everyone at every shift and once a second (`OP_TABLE`). Others put their table of the same model within a
+meter, and after 3 seconds without news return it to its former place. As long as the player has his `POOL2`,
+his table does not move. `WorldObjects.cpp` billiard tables no longer transmit: the lift of the table at the
+end of the game is not a change for him (the subject is again where the card puts it), and the table lowered
+could remain lowered.
+
+The second player leaves the game in the same way as `POOL2` lets his two at the end: his CJ is placed on the
+floor at the opponent's waiting place (shift from the table 0, -1.8, as `225@`), and the freeze is removed
+only when a floor is found under this place (`CWorld::FindGroundZFor3DCoord`, not lower than 2.5 m, wait no
+longer than 5 seconds). He used to be let go where the opponent was in the last form of the table, and the
+partner fell through the floor of the bar and fell to the ground under the interior (29-30.10, twice). If the
+CJ's own area does not match the visible one, it aligns: Interior collisions are loaded across the player's
+area (`CColStore::LoadCollision`) rather than the visible one.
+
+The two parties are going for money (0.3.3). In the Two Mode, `POOL2` returns the bet when the second drop
+presses START, and in the end pays no one. Previously, the mod was responsible for the second START drop
+immediately after the consent of the second player, and the bet could not be chosen. Now the owner selects the
+bet on his betting screen and confirms it (`0 16`). Maud responds to this “no” press and the next in the same
+START cycle, the second “yes” drop, and the game starts with a bet of `155@`. The bet goes to the second
+(`G_POOL` 9). If the second has less money, the bet becomes everything that he has, and the owner learns about
+it. At the end, each game withdraws or adds a bet to its player.
+
+While the owner chooses a bet, the second player does not offer his own game table: after agreeing to the
+call, he waits (`pool::Expect`), and the check of the place at the table (`LOCATE_CHAR_ON_FOOT_CHAR_3D` script
+`POOL`) receives a “no”, as during the game. In the first betting test, the second player in those seconds
+started his game at his table. The party together then gave his CJ cue to the owner over the cue of his own
+`POOL2`, and that cue disappeared from the world: the task of "holding the object" after finishing with the
+object in hand puts him `m_bRemoveFromWorld` (`CTaskSimpleHoldEntity::~CTaskSimpleHoldEntity`). His `POOL2`
+fell on his next call to the cue (31.10). If the second player still has his own game, he does not get up to
+the other person’s table (`G_POOL` 10), and the second player is hit by the owner. Before you give the cue in
+the hand, the mod releases what was in it (`CPed::DropEntityThatThisPedIsHolding` 0x5E0360 without removal).
+
+The `POOL2` line of sight consists of ten small bits (`347@`, `SET_OBJECT_SCALE 0.3`) that are created anew
+each frame. When the owner's game sends items, they don't have models yet, and with the "there's a model"
+test, they leave unseen: the second aimed without a line (30.10). Now visibility is taken only from the flag
+of the object, and the size is in bits 2-7 of the view field in 32 parts (old games read only bits 0-1 and put
+copies in `CObject::m_fScale`). The previous batch of `POOL2` leaves on the table temporary objects, if you go
+on the bet screen, and removes them only the next batch. When the table was lowered under someone else's
+party, a second triangle of balls hung over it. Now, before moving the table, temporary objects 2 m away from
+it are removed (`CObject::DeleteAllTempObjectsInArea`), as does `CLEAR_AREA` at the beginning of `POOL2`.
+
+The screen of the host mission (blackout, timers and counters) does not lie on top of the partner’s class:
+before the timer of his class was replaced by the host timer, and the passengers of his taxis left in the
+dark. The weather that his occupation sets (flight school, boat school) does not rewrite the weather of the
+host. Items in the hands of his occupation (whom in billiards) show `Props.cpp`, and the subjects of the plot
+mission of the host - `Objects.cpp`. The side mission of the host, which passes the plot step (flight school
+is DESERT5, driving school is DSKOOL), also sends partners the world it has discovered.
+
+Purchased house General (`Property.cpp`). When a player buys a pickup truck for sale, streams `BUY_PRO` and
+`BUY1` – `BUY3` trigger BUYPRO1 with the house number at `$6940`, and the latter shows the house with the
+camera and applies the purchase. The buyer's game notices the launch of BUYPRO1 and sends `G_PROPERTY` with
+the number. The Ordinary House (3–31) is another game that uses quietly, like BUYPRO1, but without a camera:
+the purchase flag `$2912`, pickup removal, radar save icon, door (`SET_CLOSEST_ENTRY_EXIT_FLAG`) and garage.
+Three story purchases (Wang Cars, Zero Store, Verdant Meadows) launch a chain of missions. The host repeats
+the purchase of a partner by BUYPRO1 himself, when he is on foot, not indoors and he has no mission, and the
+host gives his purchase to the partner in peace. After each download of the world, the partner applies his
+purchases again, because the purchase before the snapshot of the world would not hit him. BUYPRO1 is not a
+mission for a partner: its texts and wide screen do not repeat. The "on task" flag (`$ONMISSION`) can come
+from a save raised when no one lowers it. Keeping it in the house keeps it raised too, but PSAVE1 lowers it a
+second after loading. Quick preservation of the build or saving at the time of death leave it forever: mission
+icons and save floppy disks disappear, the plot does not start, and the partner sees the host “on the mission”
+without end. If a minute after loading the flag is raised, and the mission is not, the mod lowers it. For the
+same reason, at the start of the game, the mod removes the retention of scripts if the download went past
+`CGame::InitialiseWhenRestarting` (it could be intercepted by another plugin): otherwise, no script was
+running.
+
+The dimming of the host and the subsequent opening of the screen, which came to the partner in one pack, lost
+the opening: the alpha dimming shifts only at `CGame::Process`, after the messages, and the “dark screen”
+check has not yet seen it. The partner's screen remained black until the next load of the world (the host
+skipped the station stage in "Wrong Side of the Tracks"). Now the screen is also considered dark, the dimming
+of which is only requested. The dimming state of the host sends when changing and every 2 seconds, not every
+200 ms.
+
+The partner leaves only the cutscenes of the plot missions of the host. The host's cutscene (date: `DATE6A` at
+the bar, buying a house) was played at the partner's side where he stood: CJ in the air on a white background,
+with no girlfriend (#100).
+
+The partner who connected in the middle of the cutscene leaves both the loaded, but not yet begun cutscene
+(its beginning used to come one thing and was lost), and the beginning with the interior in which it goes.
+Voting for a pass does not wait for a partner, whose cutscene never went: after 3 seconds of voting, his game
+agrees on its own. The partner in the plane, helicopter or boat, parachute or with a backpack does not load
+the cutscene of the host: the loading drops the player from the car
+(`CCutsceneMgr::LoadCutsceneData_preload`), and after the cutscene he was in the air or in the water without
+it.
+
+`DELETE_CHAR` removes anyone given it (`CTheScripts::RemoveThisPed`). A mission that frees up seats in a
+player's car for its people removes its passengers. In "Sweet's Girl," the host rode as a passenger at a
+partner's, his CJ was removed, and the host's game fell. Player, own or copy, this team is now just landing.
+If the host has left in the middle of the mission and the server remains (dedicated server), the partner
+removes the dimming, cutscene, and host tags.
+
+The landed host was out of the car, and Sweet and the girl (host group, `SET_GROUP_MEMBER $44`), whom the
+mission puts in places 0 and 1, followed the leader. The host sat down again, the mod sat down the group, and
+it was repeated: "Nps did not sit down, but left" (28.10). Now, the team transfers its player, who is sitting
+as a passenger, to an empty seat from the end (`HookDeleteChar`: a back seat that the mission does not touch),
+and drops off only if there are no seats available. In addition, the player who is travelling as a passenger
+with another player gives way to the seat occupied by the person of the mission (`Players::YieldClaimedSeat`,
+once in 0.5 seconds): a copy of the person of the other game is already sitting or sitting on that seat
+(`Peds::SeatClaimed`), or the person of his game is going to him (task `TASK_ENTER_CAR_AS_PASSENGER` with this
+door). The player is transferred to a place that no one has occupied or exits. So missions where a host drives
+its car with mission people work when a partner drives the car and the host rides with it. If the mission has
+as many people as there are seats (three in Drive-Thru), the host has no place, and he has to sit behind the
+wheel himself.
+
+The weapon that the host mission gives to the partner used to wipe out his own type, and when the mission took
+him, it disappeared. Now his partner's weapon returns, and if the mission left him fewer rounds, there's more
+left. The plot purchase of the host (BUYPRO1 for Wang Cars, Zero store, Verdant Meadows) sends the partners a
+new world, like a past mission. Preservation homes and homes sold on radar are also contact points, but they
+are no longer considered to be mod mission markers: a host standing by such a house is waiting for no one.
+
+The mission often transports the CJ immediately after the cutscene, sometimes for miles ("Smoke1B",
+"Synd_2B"), and the partner after the scene was returned to his former place. Now the host reports such a
+transfer (`CS_FOLLOW` to `G_CUTSCENE`) and the partner stands next to it and enters the interior through the
+same door. The distance to the host is not important: in 0.3.0, only the partner was 60 m from the host (when
+changing rooms) or 300 m, and he remained out of town after The Green Sabre, in the Reuniting the Families
+motel and outside the aircraft at Stowaway. The hold there is room 9, where the script carries the host
+motorcycle command `SET_CAR_COORDINATES`: it moves only the machine, the CJ matrix catches up with it during
+processing, and `HookScriptProcess` did not see the transfer, so that the teared partner remained on the lane
+(#106, disassembled 04.11). In the room is now considered and the transfer of the car in which the CJ sits. A
+partner who sits with a host does not remove such a transfer from the motorcycle: while the host is driving,
+he is driven by a car (`Players::ApplyState` changes the area with it). The parachute in the plane is one, and
+the mission asks only if the host has one: in the mission, the host who took it parachutes both (Pickups.cpp).
+Only his own occupation, shop or mini-game (`CTheScripts::bMiniGameInProgress`) and death can not tolerate a
+partner, and each such refusal is written in the log. During the mission, host `/tp` also lets you into the
+host room. If the mission has transferred the host to a car or plane (at the end of Freefall CJ is already in
+the air), the partner sits down with him as soon as he has a copy of this machine (up to 3 seconds). It used
+to be placed next to the host, and it fell in the air.
+
+Usually, `CS_FOLLOW` leaves when the host is back in control. If the scene on the engine is immediately in a
+new place, and the CJ of the host is on the ground or sitting in a ground car, the message leaves at the
+beginning of the scene. Otherwise, the partner, who remained in the same place, did not see the scene. In
+INTRO1, the mission takes the host 1.6 km, and after the INTRO1B cutscene, there is a 19-second scene ("Ah
+shit, here we go again"), with the partner standing on Grove Street with his camera all the time.
+
+The transfer is shorter than 150 m (but longer than 30 m) also goes to `CS_FOLLOW` if the partner was 60 m
+from the previous place of the host or if before the transfer the CJ was attached to the machine
+(`m_pAttachedTo`). In The Da Nang Thang, the script places the CJ out of the water on the deck of the ship
+(about 50m up and sideways), and after a helicopter crash drops it into the water near the ship. The partner
+stayed in the water or in the city (28.10).
+
+The scene on the engine, which began immediately after the transfer of the partner to the host, the host can
+end in another place, leaving by car: in Fender Ketchup, he leaves the garage and closes it, and the partner
+stayed inside (30.10). The trip is not a script transfer, and the second `CS_FOLLOW` is not. Now, if the scene
+began no later than 2 seconds after the transfer, and the host to its end is further than 10 m, the partner
+stands next to him: the car on the right is 2.5 m, the pedestrian is 1.5 m.
+
+Missions with typewriters on radio control keep the CJ in frozen transport outside the world: in the New Model
+Army (`ZERO4`) it is a BMX in the air in area 10, in the `ZERO2` van under the Zero store.
+`FREEZE_CAR_POSITION` puts `bDontApplySpeed` (+ 0x40, 0x2000), the game itself does not freeze. The transfer
+there dropped a partner in the bay with 4 stars of the closed city (30-31.10). While the host CJ is sitting in
+such a transport, `CS_FOLLOW` is waiting, the /tp request is refused, and /tphere is not executed.
+
+Mission tracing restrictions (`SET_MAX_WANTED_LEVEL`, police not intervening, `SET_WANTED_MULTIPLIER`) apply
+to the partner while the mission is underway (`G_MISSION_POLICY`), but only near the host. About 30 missions
+put a multiplier or a maximum of 0, and many shoot stars (`CLEAR_WANTED_LEVEL`), and the partner at the other
+end of the map was not wanted while the host mission was on (04.11). Further than 150 m from the host or on
+the street, when the host is indoors, he has his own rules of search, and the removal of stars by the mission
+does not affect him (`KeepOwnRulesFar`, `FarFromHost`). War zones stay on the host. After the mission, he has
+his own again. With them come the density of people and machines (`SET_PED_DENSITY_MULTIPLIER`,
+`SET_CAR_DENSITY_MULTIPLIER`: "Home Invasion" puts 0 in the house, and the partner's game filled the house
+with its people while the host carried out the box), the level of open cities (stat 181, `STAT_CITY_UNLOCKED`)
+and the reset of the wanted mission (`CLEAR_WANTED_LEVEL`), and war zones (`SET_DISABLE_MILITARY_ZONES`,
+`CCullZones::bMilitaryZonesDisabled`): "Black Project" turns them off to its player, and the partner in Area
+69 `CCullZones::Update` gave 5 stars, and it was impossible to pass the mission together quietly (#106). Stars
+that the mission gives CJ (`ALTER_WANTED_LEVEL`, `ALTER_WANTED_LEVEL_NO_DROP`), and receives a partner 150
+meters from the host: previously they received only the host (#100). The same value goes away no more than
+once per second: The Da Nang Thang repeats the command every frame of the entire mission, and it was 190
+reliable messages per second. The partner's world is older than the end of "The Green Sabre": without the open
+suburbs, he received 4 stars for forbidden territory
+(`CGameLogic::SetPlayerWantedLevelForForbiddenTerritories`), and with them the new host world never loaded.
+The world of the host, which waits only because of the stars, now loads in a minute anyway, and what prevents
+the loading, the log writes once in 30 seconds. During a gang war, the game doesn't give stars for any crime
+(`CWanted::ReportCrimeNow` asks `CGangWars::GangWarFightingGoingOn`). Host warfare is only for the host. The
+host reports it (`G_GANG_WAR`, on a change and every 3 seconds), and the partner's game 300 meters from the
+host considers the war to be his own wanted. In the past, a partner was awarded a star for every murder in a
+host war (#56). His partner's war (see para. "Gang Territory" is in his game, and he doesn't get any stars for
+it. The host game marks the attackers in the host war on radar (`CGangWars::StartOffensiveGangWar`,
+`CPed::bPartOfAttackWave`, + 0x474 bits 12), while the partner did not have tags (#100). This feature is in
+the pedal state (`X_WAVE`), and the copy of the attacker receives the same mark while alive and while the sign
+is standing.
+
+The partner remembers his density of people and machines at the first rule of the host mission, and it comes
+while the partner has the first cutscene of the mission. The Katscene keeps both densities at zero, and the
+real ones are stored at `CCutsceneMgr::m_fPrevPedDensity` and `m_fPrevCarDensity`. The remembered zero
+returned at the end of the host mission, and the partner had no people or machines until the world rebooted
+(30.10). Now, when the cutscene is loaded, the values stored by it are taken, and its rule returns after the
+cutscene is removed at the end of the mission.
+
+Most story missions put densities at 0 for the location of their scenes, some for most of the mission. The
+density is one across the map, and the partner traveled through empty streets away from the host until he
+returned to it (04.11). Now on the street further than 150 m from the host or when the host in the room at the
+partner have their own densities (`KeepOwnRulesFar`). 150 m is a little further than how many copies of people
+(120 m): its population does not fall into the scenes of the host. Indoor host rule always remains ("home
+invasion"). Densities are written only when changing places, so your partner's classes do not lose their
+values. As long as the cutscene is loaded, they don't move.
+
+Cutscene subtitles are taken from the mission text table: from `CS_LOAD` comes the name of the host table, and
+the partner downloads it (`CText::LoadMissionText`). A copy of the cutscene from the partner prints its own
+lines, and the host string comes also over the network along with its moment in the cutscene (`G_TEXT`, view
+`TXT_CS_LINE`). The partner shows the host string only when his copy passed this moment by 0.3 seconds and did
+not type such a line: his copy can go seconds later (in the 6 s test). In 0.2.7, the host of the cutscene line
+did not forward it so that it did not go twice, and the partner who did not find the key (another translation)
+was left without subtitles (#55). Blackouts of host scripts that are not mission are no longer sent to the
+partner.
+
+Mission commands are seen by the host where `CRunningScript::Process` is called by the command handler from
+the table (0x469FF2:`push ecx; mov ecx, esi; call edx`, the call goes through the stub
+`CoopScriptCommandStub`). Up to 0.3.1, the mod intercepted `ProcessOneCommand` (0x469EB0), but no one calls it
+in 1.0 US: its code is built into `Process`. That interception saw only the commands of the fashion itself
+(`Cmd` performs them through it), and everything that was kept on the mission commands was silent: map edits,
+freezing of the partner's car, resetting of the wanted list, clothes and Home Invasion drawers. The CLEO only
+changes the address of the table (0x469FEE).
+
+The people of the stage move like a host. Animation files loaded by the mission (`REQUEST_ANIMATION`) are also
+stored by the partner (`G_MISSION_IFP`): earlier, the gesture per second ran out before the file could be
+loaded. Facial Conversation (`START_CHAR_FACIAL_TALK`, `STOP_CHAR_FACIAL_TALK`) is repeated on a copy of the
+speaker (`G_MISSION_FACE`). The mod looks for the landing and landing of its player in the whole task tree: in
+the scene it is the step of the sequence of the script, and the copy used to be on the seat without the
+animation of the door. For the same reason, walking on a task (the copy comes from the joystick that the mod
+substitutes) the mod recognizes by the simplest active task, and not only by the top: in the scene, a copy of
+the host slid to the van standing. The head turns of the scene (`TASK_LOOK_AT_CHAR`) are repeated on copies
+(`G_MISSION_LOOK_AT`). Animations of the person who gets in or out of the car don’t go through copies: the
+copy makes it a task, and the animations of the door went twice (Rider from the van). A person whom the scene
+moved further than 2 m, while he has animation with his whole body, the copy carries immediately, and does not
+pull after him.
+
+The replica got into the car before its owner: missions force their men to walk (`SET_NEXT_DESIRED_MOVE_STATE
+4` in front of `TASK_ENTER_CAR_AS_PASSENGER`), and the copy task runs. The mode considered the sitting copy in
+the state of the owner to be thrown out of the car and carried out outside, and when the owner sat down, he
+transferred it back to the seat: “They first sit down, then teleport” (ambulance, Drive-Thru, 28.10). Now the
+copy that is already sitting in the car, where its owner sits, and sits. Passenger at any seat
+(`TASK_ENTER_CAR_AS_PASSENGER … -1`: sick ambulance) the game chooses the door only at the car, and the mod
+sent the place 0, and the copy went to the front door, and then moved back. Now, the passenger is not
+transferred until the owner has a door (`m_TargetDoor` or the door of the approach task): a copy follows him,
+and sits in his place.
+
+Copy models are requested from `KEEP_IN_MEMORY` (`RequestCopyModel`) as the game streams its machines and
+people. Every frame `CStreaming::StreamVehiclesAndPeds` releases models of the police, FBI and army that are
+not required by our wanted list, and for an unloaded model it is a withdrawal of the request, and
+`PRIORITY_REQUEST` does not save from it. The "Robbing Uncle Sam" soldier was not seen at all by his partner,
+their Patriots driving without drivers (disassembled on 04.11). The flag `MISSION_REQUIRED` is not suitable
+here: it would have to be removed, and you can remove it from the script that requested the same model.
+`KEEP_IN_MEMORY` is not necessary to remove, the downloaded model becomes normal.
+
+The partner requests a human mission model with a priority (`PRIORITY_REQUEST`): a request without flags lives
+one streaming update (`CStreaming::PurgeRequestList`), and a model that the partner does not have anywhere
+else had to wait for luck. The drug dealer in Clearing the Hood (`BMYDRUG`) was not seen by his partner for
+almost a minute (28.10). Also now requested is a script machine model (`VehicleSpawn::script`) and a human
+mission weapon: in Running Dog, the partner did not have a vagos, and in Mike Toreno, a van with Mike and
+bikers (people in the car wait for their car to appear). Passers-by and regular cars go without priority.
+
+If the mission allows a person to pass through the nearest object of the model
+(`SET_CHAR_USES_COLLISION_CLOSEST_OBJECT_OF_TYPE`: Colonel "Home Invasion" lies in his bed), the copy gets the
+same (`G_PED_NO_COLLIDE`) as soon as it appears: the bed pushed it out, and a copy hung over the bed. The
+person the mission pinned to the machine (`ATTACH_CHAR_TO_CAR`: the girl at the lowrider meeting sits next to
+the CJ), the copy attaches to the copy of the machine the same way (`G_PED_ATTACH`) when both are in place and
+the copy has already left the seat. While it is attached, the machine puts its position, and the animations go
+as usual. It used to be inside a car, pushed out and thrown into the air. The game attaches a copy of the
+player (CJ of the host as an arrow on a helicopter or in a car) for the duration of the team as an ordinary
+person (`m_nPedType` 4). For the player, `CPed::AttachPedToEntity` switches the camera of his game to shooter
+mode (`CCamera::SetNewPlayerWeaponMode`), and the partner has a host sight ("The Da Nang Thang", "Reuniting
+the Families", 28.10).
+
+When the CJ host shoots the mission (the team has a weapon: the minigan in the door of the helicopter "The Da
+Nang Thang", the machine in "Reuniting the Families"), the partner becomes the second shooter (`GunnerUpdate`
+in `Missions.cpp`, 0.3.3). His CJ is attached to a copy of the same machine with the same weapon, on the other
+hand: sides 1 and 3 are switched, the shift of x changes the sign, and the place in the middle (x about 0) is
+shifted by 0.7 m to the right. He has his own camera, shooter. The attachment goes to the host by the same
+`G_PED_ATTACH`, and the host game attaches a copy of the partner. When the host is removed, the partner is
+removed immediately, before the transfer of `CS_FOLLOW`, which follows. The weapon of the machine is taken
+away, the weapon of the same slot and the weapon in his hands are returned, and his own is written in profile
+for this time. The landing key removes the partner to the end of this part and returns to where he was
+standing like a Zero machine gun. While the CJ host shooter, his car remains online at any distance
+(`ScanTraffic`): "The Da Nang Thang" in one frame carries the helicopter at 840 m, a copy of the partner was
+removed directly below him, and the new received a different number, and the second shooter on it no longer
+sat down (04.11). If the machine still disappeared under it, the game resets `m_pAttachedTo` without
+disconnection: collisions remain off, so there is no gravity, and the shooter's state is not removed. It was
+hanging in the air and couldn't walk. `GunnerOff` now causes `CPed::DettachPedFromEntity` itself, which brings
+back collisions. `CPed::AttachPedToEntity` gives the machine's weapon, whether its model is in memory or not,
+and the weapon animation unit (the machine gun has `flame`, `default.ide`) comes only with the model. Shooting
+without him dropped the partner's game at `CAnimManager::BlendAnimation` 25 ms after landing (05.11, output by
+code and log, `crash.log` no). Therefore, the landing of your CJ and a copy of the host is waiting for the
+model (`GunModelReady`), like the Zero turret. After the scene, the partner is no longer placed next to the
+host, if he is on a machine gun or flying.
+
+If the person is not yet mutual (created and attached in one frame away from the partner: Johnny on the hood
+in Fender Ketchup), there is nothing to send, and before that it was lost: a copy of the partner ran after the
+car, went into it or stood on the roof (30.10). Now the host remembers such people while they are on the
+machine, and sends the mount as soon as the person becomes common. If a person disembarks without
+`DETACH_CHAR_FROM_CAR` (at the end of that mission, `TASK_DIVE_FROM_ATTACHMENT_AND_GET_UP` is filmed), the
+disconnection goes away.
+
+The mission of the host changes the map in its game: opens the gates of Chinatown (“Mountain Cloud Boys”), the
+safe of the bank (“Small Town Bank”), changes the construction (“Deconstruction”) and the factory (“Yay
+Ka-Boom-Boom”). The same commands (`SET_USES_COLLISION_OF_CLOSEST_OBJECT_OF_TYPE`,
+`SET_VISIBILITY_OF_CLOSEST_OBJECT_OF_TYPE`, `SWAP_NEAREST_BUILDING_MODEL`) are executed by the partner
+(`G_MAP_EDIT`) when he is closer to 150 m. He who has gone beyond 300 m performs them again: the map is
+unloaded in the distance and returned the way it was built.
+
+Airport Gateway (`WS_APGATE`) puts main.scm `APCHECK` stream, and each game has its own. As long as the player
+of this game is closer to 65 m to the goal, the flaps are controlled by `APGATE`. The flap opens when the
+player is 10m away from it (only with a flight skill of 180 outside) or approached from the inside, and closes
+when he is 20m away. Each game opened the gates only to its player, so the host had them open, and the partner
+closed, and vice versa (29.10). Now these checks count another player (`AirportGateAnswer`), and the hint of a
+license at the gate outside is left only to its own. Mission host Mike Toreno (`DRIV3`) raises `$7200`, and
+`APCHECK` immediately opens the main gate of San Fierro Airport, with the guard lying dead. The teammate
+didn’t raise that flag, and now his game keeps `$7200` raised while the host has `DRIV3`. The gates, which the
+player is 65 meters away, are still closed and a copy of the other player passes through them.
+
+Parts of the map that the mission loads or removes (`REQUEST_IPL`, `REMOVE_IPL`, `REMOVE_IPL_DISCREETLY`:
+cannabis field in Are You Going To San Fierro?, `TRUTHSFARM`) are loaded and removed from the partner
+(`G_IPL`). He used to have an empty field, and his fire didn't burn anything. Three calls `CIplStore` from the
+script (0x46B6ED, 0x46B715, 0x46B73D) are intercepted, the partner's game searches for the same part by name
+(`CIplStore::FindIplSlot`). After resynchronization, the host sends them back.
+
+The mission moves, turns, or freezes the CJ's vehicle and is driven by its partner. The host has a copy, and
+the owner's fortunes immediately canceled the command ("Home Invasion" freezes the van at the warehouse). Now
+`SET_CAR_COORDINATES`, `SET_CAR_HEADING` and `FREEZE_CAR_POSITION` for such a car go into the game of its
+driver (`G_VEH_SCRIPT`).
+
+The mission asks only about its player: who hit its people, who shoots, who is aiming, who approached the
+thing. Analysis of scripts of all missions 04.11 showed that the partner in all this was not counted
+(`features/story/mission-rules`, mission list in parsing `missions.md`). Now, this line is asked again for a
+copy of each other: the handler of the same command starts again, and `$PLAYER_ACTOR` at this time is equal to
+a copy, so the rules of the game are decided. There can be as many players as you want. For all missions,
+`HAS_CHAR_BEEN_DAMAGED_BY_CHAR`, `HAS_CAR_BEEN_DAMAGED_BY_CHAR`, `IS_CHAR_SHOOTING`, and
+`IS_CHAR_SHOOTING_IN_AREA` work with the mission player. `IS_PLAYER_TARGETTING_CHAR` looks at the target
+reported by the partner's game (`G_PLAYER_AIM`): `m_pTargetedObject` or the target at the mouse's sight. The
+individual rows are in Table `kSpots` with the address `main.scm` and the command number: in the changed
+mission, the address will not match, and it will remain as it is. The table includes only rows, after which
+the script does not move the CJ and does not take control: such a row would do this with the host, wherever it
+was. The Ice Cold Killa phone, Interdiction smuggling, Green Goo bank, and Black Project gates are taken by
+the partner. Guards of the aircraft carrier in Vertical Bird also notice the partner
+(`HAS_CHAR_SPOTTED_CHAR_IN_FRONT`, four lines: the script changes only the states of the guards). The package
+in T-Bone Mendez and the booths in Deconstruction are more complex, where the entire piece of script goes for
+that player (`Stretch`): for the duration of these commands, `$PLAYER_ACTOR` is equal to his copy. In
+"Deconstruction," players in machines are checked in turn, one pass each.
+
+The `DONT_REMOVE_OBJECT` command removes the item from the mission list (`CTheScripts::MissionCleanUp`) and
+`HostScan` reads the list. Objects created and shot in one frame (deconstruction, Small Town Bank doors) did
+not reach the partner. This item is now announced immediately (`AnnounceKeptObject`). `main.scm` is also
+announced before `ROTATE_OBJECT`, `SET_OBJECT_HEADING`, `SET_OBJECT_ROTATION`: the ship's door in The Da Nang
+Thang was opened only at the host.
+
+Dam and Blast charges, the Amphibious Assault bug, the Black Project panels, and the Cop Wheels motorcycles
+are similar: a piece of script goes for the partner, and the `SET_PLAYER_CONTROL` inside it is skipped so that
+the host does not lose control. The landing key is the partner's game telling the host (`G_PLAYER_AIM`)
+`ATTACH_CAR_TO_CAR` of the machine the partner is driving goes into his game. In Catalyst, the partner is on
+the train: each game has its own car, so `G_PED_ATTACH` only speaks “on the train”, and the partner’s game
+looks for his car next to the copy of the host. The fire accumulates throw power, and the box creates a host
+game (`HostThrow`) in the next free place of the mission array, so that the mission catches and considers it
+as its own.
+
+The effects of the script (`CREATE_FX_SYSTEM` and its variants on a person, machine, object) are repeated by
+the partner with the same commands (`G_MISSION_FX`): the name of the effect, the place and what he is sitting
+on. There are no more than 24 effects at the same time, there are 32 in the game array. At the end of the
+mission, they're extinguished.
+
+What the mission does with its game, sends the partner a message `G_MISSION_ENV` and returns at the end of the
+mission: SAM installation Area 69 and aircraft carrier (otherwise they fired on the partner), darkness
+`SET_DARKNESS_EFFECT` and the siren of the aircraft carrier (events 1161 and 1162 of the team
+`REPORT_MISSION_AUDIO_EVENT_AT_POSITION`, the bank of sounds comes with the mission speech; then both are only
+if the partner is next to the host and in the same interior) and the damage multiplier from the fire CJ.
+One-time pickup of weapons in the story mission (fire extinguisher, rifle, rocket launcher, glasses,
+parachute) takes and another: the mission then asks if the host has weapons. A partner receives his plane or
+helicopter in any story mission if there is no space in the host car. The second arrow on the turret is
+invulnerable, like a CJ host.
+
+Photos of the partner are counted on the host mission (Badlands, Photo Opportunity, Architectural Espionage).
+His camera only marks copies, so after a snapshot, his game tells the host which people and host items he has
+taken off (`G_PHOTO`) and the host puts them a "photographed" flag.
+
+Musical mini-games of the plot are played in two (`Minigames.cpp`, `G_BEAT`, `G_BEAT_SCORE`). The notes and
+their buttons are in the music file itself, so two games with the same track get the same notes. The dance is
+judged by its playback, the lowriders by the playback of the host (below). Network latency only shifts when
+the points reach the host.
+
+- The Lowriders ("Cesar Vialpando"). When the host mission prepares the track (`PRELOAD_BEAT_TRACK`, host in the
+  car), the partner in the 60 m puts his hydraulics car next to him, 4.5 m to the right, or, if he does not
+  have one, Savanna with hydraulics and sits in it himself. On `PLAY_BEAT_TRACK` host, he runs the same track
+  and arrows (`BDISPLY`), and his movements judge mode according to the rules of `LOWGAME`: a window of
+  35/50/100 ms, a word after every four notes (the combo gives tenfold points), vibration. The points of each
+  note are added to the host score (`$4072`) once against the same opponent. The arrows and the judge of the
+  partner follow the position of the host track: the host sends it 10 times per second (`BEAT_TIME`, position
+  of `CAEStreamThread::GetTrackPlayTime`), and the partner substitutes it in `CAEAudioHardware::GetBeatInfo`
+  (call of 0x4D8FEF), smoothing out the network surges. His path partner starts with the same delay as the
+  position of the host, so the arrows coincide with his music. Previously, each game went on its own playback:
+  the arrows of the two players diverged, and the game whose stream of music hung, froze. Like a CJ host, a
+  partner’s girlfriend (HFYPRO) sits in their car: on the door of a Savanna, in another car as a passenger. A
+  copy of it is also attached to a copy of the machine (`G_PED_ATTACH` runs in both directions). It moves
+  according to the rules of `LOWGAME`: the mood rises to a level for six good notes and falls for two bad
+  notes, for every new movement it jumps, after a missed note it stumbles. At the meeting point, the partner
+  has the same cameras as the host, shifted to his car: the first frame, then five points in a circle every 5
+  seconds or on the camera button. The HUD and radar are hidden like a host.
+- Dance ("Life's a Beach") When a host mission launches `DANCE` without an opponent, the 40m partner runs the
+  same script at its 1.8m to the right of the host, with the same track and with five stationary host cameras
+  shifted to its place (they are set by the mission, but the partner does not have one). Its current account
+  goes to the host, and the gain is added to the host’s account (`$21184`, to pass 2500). The new thread is
+  recognized immediately after the command: at the top of the list, with the name "noname"
+  (`CRunningScript::Init`) until it is executed `SCRIPT_NAME 'DANCE'`. The mod used to wait for the name
+  "dance." The script number (35) is taken from the bytes of the command itself: the game reads the arguments
+  of the new stream through the same `CTheScripts::ScriptParams`, and after the command there was the last
+  dance argument (-1), rather than the number. Because of these two mistakes, my partner didn't dance. The
+  distance to the place of dance is considered on the plane: at this point z is -100 (the script itself finds
+  the ground).
+- The end of the mini-game host holds up to 3 seconds until the last points of the partner arrive (`$4068` for
+  lowriders, beat 31 `$21180` for dance). If the mission of the host is over, the partner's dance ends on its
+  own (`$21192`). Without a partner, it's like a single player game.
+
+The boxes in Home Invasion are also worn by a partner (`Objects.cpp`, `G_OBJ_HOLD`). The host will tell you if
+each mission object can be picked up (`bIsLiftable`) and if it is in the hands of the host. The partner picks
+up a copy of the box with the usual car entry button. The lifting, carrying and stowing animations (CARRY
+block) for both players go to the other as normal player actions (`Anims.cpp`). At the host, a copy of the
+partner takes the real box with the same task as the player (`CTaskComplexGoPickUpEntity` with the CARRY
+group, as in `CPlayerInfo::Process`), and a copy that does not pick it up in 2 seconds holds it in front of it
+(`ATTACH_OBJECT_TO_CHAR`). The partner has a box in the hands of the host hanging on the chest of a copy of
+the host. The host puts the box where the partner put it, and the copy that still holds it releases it in
+place (`DROP_OBJECT`). The object of the mission is visible only in its interior, so along with the position,
+the interior is transmitted: a box taken out of the house, the partner disappeared in the hands of the host.
+The host box in the hands of the partner goes into the interior of a copy of the partner. If both took the box
+at the same time, it stays with the host, and the partner drops the copy. The mission of the host considers
+the partner box to be its player’s box: the responses `IS_CHAR_HOLDING_OBJECT` and
+`LOCATE_CHAR_ON_FOOT_OBJECT_3D` for `$PLAYER_ACTOR` are swapped through `CRunningScript::UpdateCompareFlag`,
+so that `NOT` and the chains `AND` / `OR` work as usual. The truck in GUNS1 the box is loaded by the one who
+carries it: the place check (`LOCATE_CHAR_ON_FOOT_3D` on the team signature) looks at the copy of the partner,
+and then the button is checked by the push of the partner in the last second.
+
+The noise and the noise of each player is different. The clue (`CHud::SetHelpMessage`) of the host's story
+mission is no longer received by the partner: it is about what the host player is doing ("click ... to take
+the box" from his drawer). The exceptions are mini-games, where the rules are general, and scenes on the
+engine: a hint during the scene refers to the fact that the partner is watching with the host (the
+hairdresser’s tips after the haircut). The partner sees his clues: at the drawer that can be taken, his game
+shows GUNS118 once, and when he carries the drawer to the back doors of the van, the host sends him RYD1_30
+(`G_MISSION_HINT`). The noise of "Home Invasion" (`$26820`, GUNS1_5) in a partner is his counter
+(`COnscreenTimer::AddCounter`), which is visible while the partner is in the house, and not while the host is
+there: the partner does not take the host strip from his counter block. The host block comes 4 times a second
+and wipes the counters, so the recording of your counter is transferred through it as is, to the same slot.
+The newly added counter game shows with a blink of the first appearance, and the strip blinked constantly. The
+value of the partner considers himself, as GUNS1 considers for his player: the sound level where he stands
+(`GET_SOUND_LEVEL_AT_COORDS`) multiplied by 1.6. Anything above 20 accumulates, and every frame goes out 1%.
+The value of the host for this strip is not written to the partner. If the partner's strip is full, it reports
+to the host (`G_NOISE`), and the host's play immediately after the mission has counted its strip
+(`CSET_VAR_INT_TO_LVAR_FLOAT $26820`) makes it full for the next check: the colonel wakes up from the noise of
+the partner.
+
+The doors of the mission vehicles (the back doors of the van in Home Invasion) are not transferred in the
+state of the vehicle. Therefore, mission commands `OPEN_CAR_DOOR`, `CLOSE_ALL_CAR_DOORS`, `POP_CAR_DOOR`,
+`FIX_CAR_DOOR`, and `OPEN_CAR_DOOR_A_BIT` are repeated on a copy of the machine (`G_CAR_DOOR`). The host
+remembers the last commands for each door until the end of the mission and checks the network id of the
+machine once a second: the machine that was not in anyone’s interior ceases to be a network and then appears
+at the partner again, under a new id and with closed doors (van while the host was in the house). A new copy
+of the team leaves again.
+
+While the host has a story mission, the game of the partner of his people in the interiors does not add: the
+interiors of the mission contain those who set its script. No people doors (`PopulateInterior`), no people at
+the furniture: the TV and chairs at home the game fills the population density (`CPopulation::Update`), and
+Home Invasion returns density 1 while the host is outdoors. A partner in the house saw people the host didn't
+have. The people at home (`InteriorGroup_c::SetupPeds`, his family by the furniture) are created by the game,
+and when the player is standing under the house on the street. During the host mission, the partner's game
+does not create them (call 0x59690F), and the host does not give the partner such people an interior in which
+he is not himself (zone 0 and height more than 500): the host they appeared while he loaded the van under the
+house, and the partner in the house saw copies of them.
+
+Clothing that the mission wears on the CJ host is also worn by the partner (`G_MISSION_LOOK`). In Home
+Invasion, it is a balaclava, and with it, the game itself includes the gait of the groove
+(`CPlayerPed::ProcessAnimGroups` chooses group 69 if `CPedClothesDesc::GetIsWearingBalaclava`). Before the
+first mission clothing command (`GIVE_PLAYER_CLOTHES_OUTSIDE_SHOP`, `GIVE_PLAYER_CLOTHES`), the host remembers
+the clothes of its CJ, and after each `BUILD_PLAYER_MODEL` sends keys that are different from the ones
+remembered. The partner puts them on top of his appearance and reassembles the model (in the car later,
+already on foot). When the mission removes the thing or ends, the partner returns to his appearance. The
+profile of the partner is his own clothes, not the things of the mission.
+
+## Shared world: pickups, objects, fire, territories, and cheats
+
+** Pickups** (`Pickups.cpp`). Both worlds are loaded from the same save, so the pickups match in model and
+location (the position is stored in eighths of a meter). Gathering by your player catches an interception of
+`CPickup::Update`, and another game repeats it the way the game itself does:
+- The pickup truck that returns (arms, first aid kit, armor on the street) disappears at the same time.
+- The rest are deleted (`CPickup::Remove`) and recorded as collected (`AddToCollectedPickupsArray`) so that the
+  script waiting for them, such as a host mission, goes further.
+- horseshoes and oysters are counted in statistics there, as do `PickedUpHorseShoe` and `PickedUpOyster`
+  (counter, and horseshoe also luck), but without $100 and messages: the money gets the one who found;
+- The photo taken by the camera (`CPickups::PictureTaken`) is counted there as a picture, and the proceeds of
+  the asset taken here are zeroed there.
+- The graffiti painted over here (call `CTagManager::SetAlpha` out of `CWorld::SprayPaintWorld`) is painted over there.
+
+The host sends the world as it is: painted graffiti and horseshoes, oysters and pictures that are still lying
+(`EV_STATE`). Its preservation could be older (during the mission and in the car, a picture of the world is
+not taken), and after reset, the partner’s graffiti was again clean and the collected was in place. Graffiti
+partner paints silently, without “tags x of 100”, and collected by the host removes without statistics: it
+counted the finder. `SET_TAG_STATUS_IN_AREA` mission of the host (`CTagManager::SetAlphaInArea`: “Tagging Up
+Turf” erases its graffiti) is performed by the partner (`EV_TAG_AREA`).
+
+The mission erases the graffiti of each couple when it comes to it and erases what the partner has already
+painted over. One player painted over the next graffiti while the host mission was still on the first one, and
+the graffiti was clean again, and the tags x of 100 score was one less (player comment, 02.11). Now, graffiti
+painted over by the partner while the story mission of the host is underway, after erasing, is painted back
+silently, in both games (`g_partnerTags`). The mission sees it painted over and moves on. The list is cleared
+when the host’s mission is over, so when it is repeated, the initial erasure cleans everything up. After a
+failure, the partner's graffiti remains painted over until repeated.
+
+Pickups that appeared in only one game are announced (`CPickups::GenerateNewOne`): dropped from the dead,
+dropped backpack, pickups of the mission host. The pickups of scripts that go on in both games are not
+announced: they are already there. There are no save floppy disks, i icons and houses for sale: each game
+reacts to their scripts. Conservation points are served by stream `PSAVE1`. Maud sees it as a side job, like
+gyms: everyone keeps their game, no one is waiting for anyone in a marker. The "on task" flag that he raises
+for the duration of the menu is not considered a mission for a partner, so the partner no longer goes out the
+screen while the host is saved. Keeping a partner at that point sends his profile to the host.
+
+** Mission objects** (`Objects.cpp`). The host game knows that it created the script for its mission:
+`CTheScripts::MissionCleanUp` lists this, Type 3 objects. She announces them to her partner, sends them their
+movements and ends. If such an object is already in this place with the partner (he came with the host world),
+he becomes a copy, and the second one is not created. Copies of the partner are frozen and nothing in his game
+damages them: his player's kick goes to the host (`G_OBJ_DAMAGE`), and the host applies
+`CObject::ObjectDamage` to his object on behalf of his player, because the mission counts the player's hits.
+When a host object crashes (without visibility and without collisions), the copy is broken in the same way. So
+the shot bottles are visible to both, and anyone can break them. The object of the mission, attached to the
+host to the car (box in the van, tarp on the train), this machine does not touch. His partner had a solid copy
+of it lying inside a copy of the car and lifting it (in "Robbing Uncle Sam" the van hovered). Now, as long as
+the object is attached to the host, the copy has no collisions, and the size of the object
+(`SET_OBJECT_SCALE`) goes along with it.
+
+Objects of the main.scm itself, which he creates at the start of the game (`DONT_REMOVE_OBJECT`), are not
+included in the mission list: the garage gate in Fender Ketchup (`$10632`), the warehouse shutter in You've
+Had Your Chips (`$10656`), the gate of Area 69. The mission of the host shifted them at home, while the
+partner kept them closed (30.10). Now, when the host's story mission moves such an object (`SLIDE_OBJECT`,
+`SET_OBJECT_COORDINATES` with a global variable), it is announced immediately, before the shift, at the place
+where the partner is standing, and the partner's game takes its own (`FindTwin`). Then its movement is the
+same as that of the mission objects. The partner's game is looking for its object in 15 m (flag `OBJ_SCM`),
+and not in 25 cm: its world could not yet be the host world. The shutter in "You've Had Your Chips" opened
+with a copy, and his own remained in place, and he hit an invisible wall (31.10). It is written in the log at
+what distance he found his own.
+
+Flags of the object go along with it (`G_OBJ_CREATE`, `G_OBJ_SYNC`): no collisions (`OBJ_NO_COLLISION`,
+`CEntity::bUsesCollision`) and it is aimed at (`OBJ_TARGET`, `CObject::bIsTargetable`, 0x200 in + 0x140).
+Small Town Bank turns off collisions at ATMs (`SET_OBJECT_COLLISION 72@ 0`) so that bullets pass to the object
+in front of them (`MAKE_OBJECT_TARGETTABLE`, Health 1000): on its health mission and breaks the ATM. The
+copies of the collision remained, the partner's bullets stuck in the ATM replica, and he could not break them
+(31.10).
+
+** Objects in the streets** (`WorldObjects.cpp`) Lanterns, signs, fences, urns, hydrants, trees, boxes and
+glass each game creates from the same map records (`CDummyObject`), so the subject is recognized by the model
+and place of its recording. The game every 100 ms looks at such items 150 m away from its player
+(`m_nObjectType` 1, with a card record) and reports (`G_WORLD_OBJ`) when the subject:
+- broken: another model (`m_bRenderDamaged`), cracked glass, broken into pieces (no visibility or collisions).
+  Another game breaks its own in the same way (`CObject::ObjectDamage` with the same weapon, glass `CGlass`)
+- He is shot down and moves: until he freezes, his posture and speed go through an unreliable channel, and the
+  copy in another game moves its physics between them, and on the spot where he lay down, freezes. An object
+  that hardly moves (swings on a slope, sways on water, and the game no longer makes it static) went into the
+  network ten times a second all the time while it was lying. That one's gone once a second now.
+
+The item created again (left the zone and returned) more than 2 seconds after the record of the breakdown,
+simply remains broken: invisible and without collision. The recording used to be `ObjectDamage`, and the
+flashlights that had been broken a few minutes earlier would crumble again in front of a driving car (30.10).
+The breakdown that just came from another game is shown completely as before.
+
+The record lives until its subject is 150 m away from its player (`seenMs`), and only then for another 5
+minutes. It used to run out 5 minutes after a break, even if the broken flashlight was lying next to the
+player. Then the game considered it a new breakdown and sent it again, and the lantern of another game,
+already whole, crumbled itself: in the host log, one lantern “breaks” exactly once every 5 minutes (31.10, the
+fourth check).
+
+Lanterns in SA fall to pieces (the effect is 200 in object.dat), urns and parking machines fly away intact.
+The subject is usually pushed by both games: each has a copy of the second player, and a copy of the machine
+goes slightly ahead of the real one and touches the subject earlier. Therefore, the movement considers the
+game of the player who is closer to the object, and if both are approximately equally close, the game of the
+host; movement from the other game is then not accepted. Records live for 5 minutes: the game that creates
+such an object later (it was far away or gone from memory and came back) will get it the way it was left. No
+items are involved that are moved by the game itself (`m_pControlCodeList`: garage gates, crossings, cranes),
+doors and explosive: explosion `CObject::Explode` records the player of this game. Checked by the bot: the
+flashlight, hit by the host machine, is also broken at the partner, and the parking machine lies at both at
+the same point (his flight was considered a host game, 33 messages).
+
+Only the game of the machine or the person who really hit it breaks the object. Damage from a copy of someone
+else's car or someone else's pedal (`CObject::ObjectDamage` with such a copy as the culprit) the subject of
+the card does not accept. A copy of the car goes a little away from the real one and touched the poles, past
+which the real one drove. Her game sent out a breakdown, and the driver's poles fell on their own. A no-damage
+push (a pillar or traffic light overturned, and `ObjectDamage` was not caused or caused without a culprit) was
+not cut off by this, and the pillars fell again (28.10). Now the object that was changed in this game for the
+first time, when the closest thing to it (a car 8 meters, a pedestrian 2 meters) was a copy of someone else's
+car or someone else's person (`CopyNear`: a car that is now being played by another game, a copy of another
+player, a person from another game), is not sent out at all (`Thing::byCopy`) and remains here as it is. If
+there was a hit in that game, she'll report it herself.
+
+**The garage gates at the house** open only to the player of their game (`CGarage::Update` looks at
+`FindPlayerCoors` and `FindPlayerVehicle`), and the gates that rise up become a wall as soon as they begin to
+close (`m_bDoorClosed`, `CObject::ProcessGarageDoorBehaviour`). At the beholder, the gate was closed, a copy
+of the other player's car was pushed out, and the synchronization was pulled back, and she was shaking
+(29.10). Now, while the other player is at the gate the way the game requires his (in the car closer to 10 m,
+on foot closer to 4 m), they are open here: the closing go back, the open do not close, and the closed only
+rise, without issuing and cleaning the storage machines.
+
+** Garages by houses** (`Garages.cpp`) Garage shelter removes the cars left inside when it closes behind the
+player (`CGarage::StoreAndRemoveCarsForThisHideOut`) and exposes them when the player comes back
+(`RestoreCarsForThisHideOut`). Storage (`CGarages::aCarsInSafeHouse`, four cars per house) is part of the host
+world and its preservation. The world of the partner is loaded again and again, so the game of the partner of
+the machine does not remove and does not expose itself: before both games exhibited the same machines
+(doubles), and the machine that the partner removed disappeared with the next load of the world. When the
+garage closes with the partner, his game asks the host to pick up their cars that are left inside
+(`G_GARAGE`). The host game puts them in storage (`CStoredCar::StoreCar` per copy), and the partner game
+deletes them. When the garage opens with the partner, the host game gives him the storage records and clears
+its seats, and the partner’s game puts the cars at his place: where the partner stands, the ground is loaded.
+It loads the models before that (`RestoreCar` does not create anything without the model), and what it failed
+to put back to the host. The host partner's world image is also saved, and `CGarages::Save` closes open
+garages and removes cars before saving it. For the picture, it is disabled, otherwise the gate slammed in
+front of the host. Checked by the bot: the machine from the vault of the test world exhibited at the partner,
+along with the bot machine went to the host, returned, and in both games one copy at the same point.
+
+Garages shared (player selection 02.11). Previously, the host machines only came out of the host, and the
+partner’s car only from the partner, and the car left by another could not be taken away. Now, when the garage
+opens with the partner, the host game gives him all the storage records, and his own too. When the garage
+opens at the host, the partner's cars come out: interception `RestoreCarsForThisHideOut` no longer removes
+their recordings from the locations. The partner’s entries list (`g_partnerCars`) is now only needed to clean
+the host: it cleans all four places and fills them with machines that are inside, and the recording put by the
+partner while the host gate was open was erased. The poster goes off the list, otherwise the next cleaning
+would return it to the vault while the car is in the garage, and the car would come out twice.
+
+After driving up to the closed garage, the partner's game counts the occupied places by its copy of the vault
+(`CGarages::CountCarsInHideoutGarage`), and this is the host world at the time of booting. On the copy, the
+garage was full, and the gates did not open with the inscription "You cannot store any more vehicles in this
+garage!!", although the host had seats (01.11: "Partner can't keep cars in the garage"). With shared garages,
+this would almost always be the case: a partner picks up the host cars, and a copy still counts them. Now, the
+host game tells you how many machines are in each home’s vault (`GARAGE_COUNT` with each change), and the
+partner’s game takes that number.
+
+While the garage is open at the partner's, his cars are in the partner's game, and they are not in the host's
+vault. If the host at this time was saved and left the game, they disappeared, and with shared garages among
+them and the host machine. Now, while saving the host, copies of these machines are also recorded in storage,
+and immediately after recording the garages (call `CGarages::Save` to `GenericSave`) are removed from there.
+If the record of such a machine has already come from a partner, and the copy has not yet been deleted, the
+second time it is not written (the same model is closer to 2 m).
+
+** Workshop doors** (`Garages.cpp` ). `CGarage::Update` moves the door of Pay 'n' Spray, a bombshop or tuning
+studio only for the player of his game: Pay 'n' Spray of the other game stood open while the player inside was
+closed, and the tuning studio did not open in front of the second player's car. Now the door in both games is
+controlled by the player who uses the garage: whose car is inside, and if there is no one inside, then who is
+closer within 30 meters (first in the car, then on foot, with equal host). Both games come to the same answer.
+The other game moves its door like a script garage (type 19): with sound and collision, but no paint, bomb,
+board, fugitive reset, and taken control (`G_GARAGE_DOOR`).
+
+Doors that the script opens and closes (mission garages, theft warehouse `BURG_LK`, garages running the
+script) during the story mission of the host belong to its mission and move with the partner in the same way.
+“Home Invasion” opens a warehouse for the van: the partner’s warehouse was closed, a copy of the van was
+driven into the gate, and the partner fell through. Outside the mission, each game moves them with its own
+scripts, and during the general part-time they move behind the game of the one who leads it (`SideLeader`): in
+the theft, the warehouse gates were not opened when the van was led by a partner (01.11).
+
+The car inside the workshop belongs to the player only if he is driving: `FindPlayerVehicle` counts the
+passenger. A passenger's Pay 'n' Spray would repaint a copy and charge $100, a bomb shop would put a $500
+bomb. The menu of the tuning studio also belongs to the driver: the passenger of the other player’s car
+received his own, both paid, and the parts of the copy instantly became the same as the owner’s. The script
+atelier of such a passenger does not go. Without it, the passenger had the camera of the car, and in a cramped
+room the walls of the studio pressed it inside the car (02.11). While the driver-other player is standing in
+the studio (his camera `MODE_FIXED`, the car in his area), the passenger sees what he is: the camera is in
+place and direction from his state (`PassengerShopCamera`).
+
+** Fire** (`Fire.cpp`). Fire on the ground from explosions and Molotov cocktails lights up in each game
+itself: these events are transmitted. Only fire is transmitted on the player, pede, or machine that is owned
+by this game, and the fire of the mission of the host (`START_SCRIPT_FIRE`). Another game lights the same fire
+on its copy or at the same point, of the same force (`CFireManager::StartFire` at the point lights any with a
+force of 1, so the force and flame are put after: `CFire::CreateFxSysForStrength`). It does not spread, does
+not injure the copy (copies are refractory, protection is removed only for the time of arson) and goes out
+when the owner's fire goes out. The copy that the player of this game extinguished (from a fire engine or fire
+extinguisher, no further than 30 m), the owner's game is also extinguished (`FIRE_OUT`). That's how a partner
+helps a host on a firefighter's side job.
+
+The fireman’s part-time machine is set on fire by `START_CAR_FIRE`: it is a script fire (`CFire` bits 1), it
+does not go out on its own. A copy of the fire on the car was lit by a regular one (`CFireManager::StartFire`
+on the target removes this bit), and in ordinary fire on the car, the game does not look at the time and gives
+it 3-4 seconds, and then 60 m from the camera extinguishes immediately (`CFire::ProcessFire`). The part-time
+machine is refractory and with full health, it does not light up itself, and the partner had it standing
+intact (28.10). Now `FIRE_START` carries the sign of script fire on the machine (Protocol 27). With one bit,
+the copy was still not visible (28.10), and now such a copy is lit by the same feature as the owner's game
+(`CFireManager::StartScriptFire(pos, vehicle, 0.8, 1, 0, 1)`). The copy of the fire of the part-time job, which
+went out on its own, without `FIRE_STOP` and without our player’s water, is lit again (up to 20 times), and
+the magazine writes how long she lived and what happened to the slot. The extinguished copy of the script bit
+saves, and the game does not give such a slot to a new fire, so the bit is removed when the copy leaves
+(`Drop`), and at the end of the session: copies of machines remain in the world of ordinary machines.
+
+** Explosions, shells and water cannons (`Fire.cpp`) An explosion (a grenade, a rocket, a Rhino projectile, a
+bomb, a mission explosion) takes place in the game of the person who staged it, and another game arranges the
+same on behalf of its copy of the creator (`CExplosion::AddExplosion`, `G_EXPLOSION`). The game misses its
+explosion of the same breed from a copy of an alien creator (a rocket that was released by a copy of our
+partner): the real one will come. Cars, boats, planes and objects explode in each game in their
+synchronization, and a cocktail flash lights its fire. Projectiles (garnets, cocktails, gas, rockets, homing
+missiles, bombs, missile traps) are visible in flight: another game releases the same one from the same point
+at the same speed (`CProjectileInfo::AddProjectile`, `G_PROJECTILE`), and its explosion is missed as any other
+alien. The anti-aircraft missile is on behalf of the player who was shot so that its explosion was missed. The
+explosive charge flies in the same way and lies with the other player where it fell, until a copy of the
+thrower detonates it with a detonator (this explosion is missed) or a real explosion comes. Previously, the
+other player saw the charge only in the hand. The jet of the fire truck and SWAT van
+(`CWaterCannons::UpdateOne`, `G_WATER_CANNON`) also hits from a replica machine, extinguishes the fire and
+knocks it down there. A police helicopter machine gun fired only in a helicopter game
+(`CHeli::ProcessControl`, call `FireOneInstantHitRound` to 0x6C7773) and the other player saw no tracers or
+hits. Now, each queue runs over the network (`G_HELI_SHOT`: machine gun point relative to the helicopter and
+target) and is repeated from a copy with a flash, tracer and sound. The shot is not recorded on anyone, so
+each game only hurts its own: copies of people and machines of the other game are missed, and each bullet hits
+once.
+
+** Trains** (`Trains.cpp`). The train belongs to the game where it appeared (accidental or missionary), and it
+sends its view, path, direction, rail distance and speed. The other game holds the same mission train
+(`CTrain::CreateMissionTrain`) and each frame gives it distance and speed. The type of train is not stored in
+it, so the mod remembers it when it is created: the `CreateMissionTrain` makes random trains. Cars are locked
+and the cockpit is open until the train is controlled by the player and the host has a story mission.
+Previously, all copies were locked, and the partner could not get on the train at all (29.10). The cockpit
+replica drives it in his game with his buttons, and the owner's game puts his train its distance on the rails
+and speed (`TRAIN_DRIVE`) and keeps the train as a mission train so that `CTrain::DoTrainGenerationAndRemoval`
+does not remove it away from his camera. Random trains next to the host give the game host: the partner does
+his game only as long as he is further than 600 m from the host (`CTrain::DisableRandomTrains`). A copy of the
+train goes to the nearest node of the same path as the owner. `CreateMissionTrain` without a node took the
+nearest node of all four tracks, and path 3 goes a few meters from the main line through Los Santos: the copy
+went to another path, where the same distance on the rails is another place (“Catalyst”: the partner saw only
+the tarp). Car models are loaded in the background, and a copy appears with one of the following states.
+Previously, six blocking loads in a row (with a full streaming queue clearing) gave a frieze every time the
+train came closer than 300 m.
+
+The game only makes a screeching train brakes for its player behind the wheel:
+`CAEVehicleAudioEntity::ProcessVehicle` calls `ProcessPlayerTrainBrakes` (on the brake of the drop 0) only at
+`m_IsPlayerDriver`, and for someone else's train only `ProcessDummyTrainEngine`. The partner didn't hear the
+host slow down (30.10). Now, for the head car, which is ruled by a copy of another player, after
+`ProcessDummyTrainEngine`, the game considers the same creaking as its formula with the buttons of that
+player: the drop and the status of the train are replaced by one call. The sounds lie in the player's engine
+slot (40), so while the player is driving, this is not done.
+
+**Gang territories** (`Zones.cpp`). The map of territories follows the host. When the gangs, color, or radar
+changes in his game (blinking during an attack), his `CZoneInfo` changes his partner, except for the drug
+counter, which each game turns itself. The host is playing next to the host of the war, and the killing of the
+partner is in its provocation (see para. "Damage." `StartDefensiveGangWar` - The partner does not start the
+defense. He starts his attack himself (`G_TURF_WAR`) if the host is further than 100 m, the host has no war
+and mission, and the plot of the war allows: interception `CGangWars::StartOffensiveGangWar` in the game of
+the partner asks about it what the host reports in `G_GANG_WAR` (flags "wars are allowed", "the plot holds the
+war", "the mission is going"). The host at this time nullifies his provocation so that the second war does not
+start at him. The war is led by the game of a partner: waves, victory, the capture of the area. The host
+receives the beginning, the area during the battle (bytes `CZoneInfo`, which are checked: only the gangs and
+the color of the area can be changed) and the end, and in the chat writes who started the war and whether the
+area was recaptured. If the host starts a mission, the partner's war ends (`CGangWars::EndGangWar`) and if the
+partner exits, the host returns the gang-colored area (`FillZonesWithGangColours`). The partner at the
+entrance to the world of the host throws off the inherited from the preservation of the state of war.
+
+**Chit codes** (`Cheats.cpp`). Cheats that change the overall world (weather, speed, traffic, passers-by,
+themes, machine behavior) operate in both games. The game where the cheat is entered finds it in the same way
+as `CCheat::AddToCheatString`: the hash of the keys dialed, from the longest chain of new to short
+(`CKeyGen::GetKey(str, len)`), the moment it counts the matching cheat (a call `CStats::IncrementStat` within
+this function), and sends the number and the new state. The beginning of the function itself is not
+intercepted: GInput reads from its first command the address of the cutscene flag and fell, receiving an
+intercept jump instead. The other game uses it (`CCheat::ApplyCheat`) and the switch only if its state is
+different. Personal cheats (guns, money, health, tracing, cars, body, skills) remain where they were
+introduced. Themes (beach party, ninja, “Love Conquers All” costume, “Funhouse”, village) change the clothes
+of the person who used them, and the ninja also gives the katana. The second player returns his clothes
+(`CPedClothesDesc` and `CClothes::RebuildPlayer`) and his melee weapons.
+
+** Objects** (`Props.cpp`). A game where a person has an object in his hand (`CTaskSimpleHoldEntity`: tray
+from a diner, a can from a machine gun, a cigarette) or is attached to it (`CPhysical::m_pAttachedTo`: open
+parachute), reports the model, bone and displacement, visibility, size and animation of the object itself. The
+other game makes a collision-free copy, and each frame puts it on the same bone of its copy of that person.
+The released item, his game lasts another 30 seconds. There are also barriers and burning frames of police
+cars (`CRoadBlocks::CreateRoadBlockBetween2Points`): they are created only by the player's wanted game, and
+another saw the police behind an empty road. These objects have an area of 13 ("visible everywhere"), and the
+distance to another player is counted as outdoors. Copies are created with type `OBJECT_MISSION2` as external
+script objects: for the game it is a mission object, but `CPools::SaveObjectPool` saves only `OBJECT_MISSION`,
+and copies no longer fall into host saves.
+
+** Speech of the People (`PedSpeech.cpp`) The game whose person speaks
+(`CAEPedSpeechAudioEntity::LoadAndPlaySpeech`) sends the bank and sound number, while the other plays the same
+replica of his copy of that person in one of his speech slots. They don’t say copies of their own words. The
+bank that this game does not have (other sound files) is not played. The loudspeaker of a police helicopter or
+boat (`CAEPedlessSpeechAudioEntity`) speaks only in the police logic of his game, and the copy does not
+perform it: the other player did not hear the pilot (29.10). Now the machine's game sends the context of the
+replica, while the other one says a replica of the same context from its copy (`CAudioEngine::SayPedless`).
+
+While the partner is not in the world of the host (the host passes the prologue, the world is not yet loaded),
+rebounds, graffiti, pictures, cheats, purchases of houses, territory and doors between their games do not go:
+these are events of different worlds. The door of the interior, which the host mission closed while the
+partner is inside (the dens in Clearing the Hood), the partner remains open from the inside: the exits of the
+area in which he stands are always open.
+
+Fire, objects and mission objects of the player whose game has started anew or who has come out, the other
+game removes. She recognizes a copy of the fire by the slot, the purpose and the place: the extinguished flame
+gives the slot to the next fire (Molotov cocktail lights several), and a copy was considered someone else's
+fire.
+
+Trains do not synchronize cars: the player who sat in the cockpit declared the train a car, and another game
+created a car off the tracks. Rail distance and speed from the network must be finite:
+`CTrain::ProcessControl` returns the distance to the track one length at a time and hangs on a huge number.
+The partner creates his random trains further than 220 m from the host (at this distance, the host game
+deletes its own), and the game sends the train only when the other player is closer than 300 m.
+
+Side-objects (billiard balls, dash targets, quarry stones) are only in the game of the person who is engaged
+in them: they are created by his mission script, and another player saw a game of billiards on an empty table.
+Now items from the mission list of this game (`CTheScripts::MissionCleanUp`) go to another game in the same
+way as those thrown from their hands: no collisions and where the original lies (`Props`, the view "lies"),
+while the other player is closer to 150 m. Items of the host's story mission still go through `Objects.cpp`.
+The targets of the joint shooting range of the second player are solid (`RangeCopy`): his shots on them go to
+the owner's game (`PropCopyHit`, see). "Joint jobs and races."
+
+The bar and dumbbells of the gym each game creates itself on its bench and counter when its player approaches
+them: these are the brains of objects `GYMBENC` and `GYMDUMB` of `script.img` (`CREATE_OBJECT`,
+`ATTACH_OBJECT_TO_OBJECT`, on approach `TASK_PICK_UP_OBJECT`). A copy of the barbell or dumbbells of another
+player in the hands of his copies and his on the counter were seen by two: two barbells at the bench, four
+dumbbells (08.11). Now its projectile of the same model (`KMB_BPRESS`, `KMB_DUMBBELL_R`, `KMB_DUMBBELL_L`),
+which lies on a rack closer than 3 m from the visible copy, is hidden (`HideOwnWeights`). It is again visible
+when the copy is not near or when our player picks it up himself: the script first removes it from the rack.
+The copy, which the owner put back on the rack (the released object his game leads another 30 seconds), the
+game does not show if next to his projectile of the same model. If two are engaged on the same bench, each in
+his own game, the copy lies on the same bench with the barbell: it is not corrected.
+
+## Individual progression
+
+Each player on the server has a profile in each host game (`profiles/<game>/<nickname>.bin`): muscle, fat,
+endurance, lung volume, weapons and driving skills, combat style, money, clothing, hairstyle, tattoo, maximum
+health and armor, as well as part-time rewards: running without fatigue, fast recharging, fire resistance,
+getting out of prison and hospital without losses. The host’s world brings the host’s rewards, and the profile
+returns the host’s own.
+
+The host is swinging in its preservation. The partner after downloading the world gets his profile on top of
+it. Changes are sent to the server every 30 seconds. When the host saves the game through the save menu
+(`C_PcSave::SaveSlot`), the partner immediately saves his profile and remembers his weapon (`G_HOST_SAVED`),
+and the server gets a fresh world. The profile server records with a reset to the disk (in case of a power
+outage), and before the network stream waited for the disk: sending all states stood up every time the partner
+sent the profile (every 30 seconds), and players saw jerks. Profiles are now written in a separate thread.
+
+Profile is the partner's last state, not the preservation: he died after saving the host, the host booted, and
+the partner was left empty-handed, and the host with a weapon (11c). User Decision 04.11: Only the weapon is
+rolled back. On `G_HOST_SAVED`, the partner writes his weapon to `coop_saved_guns.bin` in his user folder: the
+file is needed because the download happens on another day. The host takes a new download number and sends it
+(`G_HOST_LOADED`, again every 15 seconds). If the number is different from the file and the game is the same,
+the partner receives the weapon from the file when he is on foot, alive and no mission
+(`BackToWeaponsOfSave`). Reconnecting to the same boot does not change anything. Dead partner doesn't rewrite
+the file. If the file is not there or it is from another game (the host is saved until the partner arrives),
+the weapon with which the partner came comes into the file: otherwise, the death and download of the host did
+not return anything.
+
+The profiles of each host game have their own. Previously, the new game moved all profiles to
+`profiles\old\<date>\`, and the partner who returned with the host to the old save started from scratch
+(01.11). The host game is known by its client: the downloaded save slot is taken from the file name
+(`ms_LoadFileName`), and which game is in which slot is recorded in `coop_games.ini` next to the saves. The
+new game (its prologue comes from the first seconds) receives a new random number, and when saved through the
+menu, the number is written to the slot. The host reports the server number (`C_GAME_ID`, protocol 34), and
+the server sends the connected partners a profile of the game. Savings made up to or without a mod are
+considered Game 0, and have the same place as Game 0: `profiles\<nickname>.bin`. The profile comes with the game
+number, the partner returns it with each save of the profile, and the server does not record the profile sent
+for the previous game of the host.
+
+The wardrobe is on the list of purchased (`CShopping::ms_bHasBought`): `wardrobe.scm` picks up the goods of
+stores through `HAS_PLAYER_BOUGHT_ITEM`, `clothes.scm` notes what has already been purchased. There are no
+other real readers in this team. The list is in the save (block 22), so each download of the host world puts
+the host list to the partner: the host’s clothes were in the wardrobe, and there were no own ones (04.11). The
+version 6 profile stores the list with keys, because `shopping.dat` can be different for games, and after
+downloading the world replaces the list with the list of the world. Host things don't get to your partner. If
+there is no list in the profile (first parish, profile older), the partner brings the list of his game in the
+same way as his CJ: from memory, from `coop_own_bought.bin` next to saves, from the newest save. The block in
+the file is determined by device (price modifiers, number of goods, bytes for goods, then the block label),
+another number of goods means another `shopping.dat`, then the list is not read. There is no game left, there
+is a list of the world. What a partner wears, in this case, is always marked by the purchased: otherwise the
+wardrobe will not return him to these things, and the host purchased in the world has never been recorded
+before. In the new host game, nothing is brought in, the list starts with the starting clothes.
+
+The new host game starts partner profiles anew: connected partners get an empty profile and use it in the
+world of the new game. The teammates who were playing in the old world at the time are also waiting for the
+end of the prologue and move on to a new game. In the new host game (`IsFollower`, or an empty profile came
+after the present), the CJ is not worn on the partner from a single game: he starts with the clothes and body
+with which the game begins. Previously, an empty profile was considered the first arrival, and a partner
+brought old clothes, fat and muscles to the new game (31.10).
+
+The game takes the jump in stats after the profile for rising respect and shows a hint of "Respect -
+Upgraded," even on top of the cutscene. This mod prompt is removed in the first seconds after the profile
+(`Progress.cpp`, GXT key with hash 3B797709).
+
+Appearances (clothes, fat, muscles) are sent to other players, and the character is rearranged
+(`CClothes::RebuildPlayer`). During this call, the focus is a copy: Cheat Menu replaces the call
+`ConstructPedModel` inside it (0x5A834D) with his, which builds clothes `FindPlayerPed()`, and each saw the
+other in his own clothes, and skins were shown (#106, disassembled 04.11). Each new ped of the remote player
+(after downloading the world, death) is rebuilt anew. Poole often gives the new pedal the address of the old
+one, so the applied appearance remembers the handle pedal, not the address. Previously, after the reboot of
+the host world, a new peda with the same address remained with the body that had been assembled last.
+
+Each player has his own personality. The host world comes to the partner along with the host’s CJ, so the
+partner puts on his CJ. It is taken from the game in which the partner was before the connection (the game
+started by the partner, that is, the world of the host, is not considered his after leaving the session). If
+the partner connects from the menu, the CJ is taken from the newest save: block 2, pedal player,
+`CPlayerPedDataSaveStructure` size 0x84 with clothing from displacement 8. At the first visit, fat and muscles
+are taken along with the clothes, and then the body comes from the profile statistics. The profile of version
+3 remembers whether it has its own look. Alien appearance (from the profile of the old version or CJ host,
+when your CJ is not) once concedes to his, if the partner during this time did not change his clothes. The
+profile is tied to a nick, and with a new nickname, money and skills begin anew.
+
+The progress of side activities is stored in the global variables main.scm, that is, in the world. The world
+of the host brought its own values with each download: lessons, medals and partner levels began anew, and
+unique tricks were paid again. The profile of version 5 stores these variables by list (`kSideGlobals`:
+driving school, boat and motorcycle schools, trucker, quarry, taxi, courier, service jobs, pimp, freight
+train, gym, theft) and returns them after each download. The profile comes from the server, so only variables
+from the list are recorded. The flight school profile returns only if the host world has already passed
+"Learning to Fly" (`$87`): before that, the school is part of the plot.
+
+In addition to variables, the profile stores what lies in the engine itself. These are unique stunt flags
+(`CStuntJump` + 0x40 "made" and + 0x41 "found"), school award machine generators and career and business
+revenue pickup trucks. The trick is recognized by its start and finish zones: after rebooting the world in the
+same game, the pool distributes tricks to other cells. The generator is turned on if the partner has earned a
+reward, and in the host world it is turned off. A pickup of income is created where it is not
+(`CREATE_PROTECTION_PICKUP`, as in the script work). Like other pickups of partner scripts, it gets into the
+world of the host, so income accumulates between reboots, and either of the two can take it, as well as the
+host’s income.
+
+Story variables, object numbers, work-on flags, and girlfriends remain from the host world. The script of
+friends, seeing a date that is not in the world, after each download would move the statistics of dates anew.
+
+The list of exports in the port of Easter Basin is general (`features/story/exports`). Script `IMPEXPM` keeps
+it in global variables: list number (`$4196`) that is delivered (`$4240`), import table (`$4304`), end
+(`$4736`). Previously, everyone had their own list in their profile, and the car was crossed out and paid only
+for the game of the person who passed it. The second game did the same only if its player was in a marker: its
+script took a copy of the machine (`GET_RANDOM_CAR_IN_SPHERE_NO_SAVE`) for its own, so both were paid nearby,
+and one from afar (04.11). Now the list belongs to the host world and is not included in the profile. The
+counter of handed over cars (stat 213) is also world-wide: premiums for 10, 20 and 30 cars depend on it. The
+game, where the change flag rose, sends `G_EXPORT`: the number of the car, the amount of `29@` and the entire
+list. Another game crosses the machine, pays the same amount, turns off the machine generator, and if its
+player is at the board, translates the script to its board setting, as after surrender (address `0x1D8D5`,
+only from the idle cycle `0x1DCAF`). The completed list she translates to the next. The host also sends a list
+every 15 seconds when it changes: the partner’s world is older than the host’s. If the player is now renting
+the car (`16@` is more than 0), the message of another person waits for the end of the change, but not longer
+than 15 seconds. The machine already crossed out here is not counted and paid again, so two of the tokens get
+paid once. The game progression (`PLAYER_MADE_PROGRESS` in cells 16, 28, 40 import) is only in the host world.
+
+Part-time work and testing are counted both (`G_SIDE_DONE`). When one player has a completion flag
+(`kDoneFlags`: taxi, ambulance, firefighters, police, couriers, pimp, freight train, trucker, quarry, theft,
+schools, Blood Bowl, and others), the other receives the same flag and the same reward that a game would give
+him: income, increased health or armor, running without fatigue, fire resistance, a car or a pickup of
+property. Flags of the world (shared for two) are placed only by the host. When connecting, players exchange
+flags from profiles, so that what they have passed before is also counted.
+
+Taxi counts trips twice: in global `$720` (variable 180) and in statistics 150, and nitro gives when at the
+end of the trip `$720` is more than 49. The statistics for both are common, and `$720` each game has its own:
+the two scored 50 trips, and nobody received nitro (02.11). Now, once a second, `$720` is no lower than 150.
+Nitro arrives on the next trip, and the flag of 1491 gives it to the second player. Theft: Running without
+fatigue is given for 10,000 stolen in `$7160` (variable 1790), and the same amount is accumulated by the total
+statistics 41.
+
+Trucks and quarries count the completed tasks at `$32636` (8159) and `$32684` (8171). The next task is
+selected on this counter, and the reward is given for everything (8 and 7). Now the tasks of both players are
+counted together (player selection 02.11, `kSharedCounters`): the game sends an increase in its counter to
+`G_SIDE_DONE`, and the other game adds it to its own. The first person to finish is rewarded, and the flag of
+part-time work is awarded to the second. Everyone misses tasks done by others.
+
+Statistics and important skills are common (`G_STAT_SYNC`, `kSharedStats`). Each statistic has its own rule:
+the amount (kilometers traveled, murders, money spent), the maximum (driving skills of a car, motorcycle,
+bicycle and aircraft, excitement, part-time levels, records), the minimum (best time) or the value of the
+host. Once a second, the game compares statistics with the previous shot and sends changes, and after
+downloading the world, profile or connection of the player, the picture is taken again and the parties
+exchange all the statistics. The sum adds only the difference, so the same thing is not counted twice. The
+statistics tab on the menu for both shows the same thing. Body (fat, muscles, endurance) and weapons skills
+each own and live in the profile.
+
+## Localization
+
+The F9 window, chat, tips and mod messages are available in Russian and English. The language is stored in
+`coop.ini` (`[player] language`), switched in the F9 window and immediately saved. The new installation takes
+the Windows language, and configs without this key, made by the previous versions, remain Russian.
+
+Each client text is written in both languages where it is used: `TR("Подключиться", "Join a game")`
+(`shared/config/Config.h` ). `Format` is declared as `printf` , so the compiler checks both lines of the pair
+with arguments. `tools/i18n_check.py` in CI searches for the client's Russian text without English, except for
+the journal and comments `coop.ini` . The server does not know the languages of the players: it sends its
+messages in the chat, reasons for refusal and greetings in two languages at once, and the client shows the
+desired one. The ASI bootloader takes the Windows language.
+
+## Chat and voice
+
+The chat opens with the key `T`. The symbol of this click, which Windows has already put in the queue ("t" or
+"e" in the Russian layout), when you open the chat, is removed from the queue. If `T` is pressed immediately
+after the other letters and continues the cheat code with them (the game stores the last clicks in
+`CCheat::m_CheatString`), it leaves the game, and the chat does not open: otherwise codes like `NINJATOWN` or
+`AIWPRTON` were not typed. The list of such codes (64, with the letter T not the first) is checked against the
+hash table `CCheat::m_aCheatHashKeys`. The letter before `T` should be pressed no earlier than in 1.5 seconds,
+and if it is one (`ST...`), then in 0.4 seconds: S with a T in a row can also go back before the chat. Codes
+that start with `T` can not be distinguished from opening a chat, for them the chat key can be changed to
+`coop.ini`. `Enter` sends a message, `Esc` closes the chat, PgUp and PgDn leaf through the history. Teams:
+`/help`, `/players`, `/pm`, `/me`, `/tp` (to a partner) and `/tphere` (to a partner to himself). `/kick` and
+`/say` are available to the host. `/tp` and `/tphere` are requests (`Teleport.cpp`, `G_TP_ASK`, 29.10): the
+second player sees a window with Y and N for 20 seconds, and only after his consent does the player's game do
+what the team used to do immediately, with the same rules for buildings (`Players::TeleportAllowed`). The host
+can ban partners from both teams by ticking when creating the game (`partner_teleport` in `coop.ini` and
+`server.ini`, comes in `Welcome`, protocol 29).
+
+The F2 window (`pages/players-menu`) shows players with a role, money and ping and picks up the mouse and
+keyboard like the F9. The money of other players is reported by their games (`Money.cpp`, `G_MONEY`): with
+each change, no more than twice per second, and once every 10 seconds. A button with a $ sign from the HUD
+money font (pricedown) opens the transfer bar. The money goes away from the giver immediately and is added
+from the receiver when his world is loaded and the receiver's game responds that it has come. If the recipient
+leaves before the answer, the money is returned to the donor. The profile of the partner is saved immediately
+after the transfer. Previously, F2 had only a list on top of the game. Chat is drawn in its render on D3D9 in
+Windows font, so the Cyrillic alphabet in it is full. The input is intercepted through a replaced window
+procedure.
+
+Next to the $ button, the pistol button transmits weapons (0.3.3, `features/weapon-gift`, `G_WEAPON_GIFT`). In
+the transmission line, your weapon and number of ammunition are selected, and melee weapons, flowers, glasses
+and a parachute go entirely. The weapon goes away from the donor immediately and is given to the recipient by
+the usual command (`GIVE_WEAPON_TO_CHAR`: cartridges of the same weapon are folded). In one slot, one weapon:
+if the recipient has another in this place, the gift is returned to the donor, and the recipient sees in the
+chat that the place is occupied. A gift that is not answered before the recipient is released is also
+returned. The detonator doesn't pass; it's coming with the explosives already thrown.
+
+The F9 window and other cursored fashion windows take the mouse away from the game: while they are open, the
+`CPad::UpdateMouse` does not give the game any movement. In the full-screen game, she has a mouse in the
+DirectInput monopoly mode, and the Windows cursor stands still (issue #66: the cursor freezes on the window
+with the invitation code). Then the cursor of the mod moves along the same mouse movement that the game reads,
+and the button and wheel are taken from there. Previously, the mod put the game mouse in general mode for
+window time and back, but after closing the window, it remained uncaptured, and the camera stood up to Alt +
+Tab, including after entering the host.
+
+The window buttons are triggered by pressing, and the window closed by clicking gave the mouse to the game
+with the button still clamped. The game considered it a new press: “Enable” in the U window gave first a
+punch, then an animation (03.11). Now, after the window, the mouse buttons reach the game only after they have
+been released (`HookUpdateMouse` in `Patches.cpp`).
+
+The voice is transmitted while `B` is pressed (the key can be changed). The sound from the microphone is
+captured via WinMM (16 kHz, mono), compressed by the IMA ADPCM codec (4 bits per countdown, 64 kbit / s) and
+passes through the jitter buffer. WinMM devices poll a single mod stream every 5 ms, and the game stream only
+encodes, sends and queues what has come. The WinMM call sometimes holds a second (`waveInAddBuffer`, even when
+no one is talking), and when questioned in the game stream, the whole game got up by the same amount: in the
+host log, it was five times in eight minutes, and this is the 1-2 seconds lag that players complained about.
+Loudness may depend on distance. While the player is talking, he has a badge over his head and in the list of
+players, and on the left screen it says who can be heard now. While the key is pinched, there is also a “●
+Microphone” on. The icon is a microphone image from the resource `MICROPHONE`, which the renderer draws as a
+font symbol (U+E000). All three places take it through `ui::TalkingMark()`: previously in part of them
+remained "(.)" (27.10). If you can’t read the picture, instead of it, “(•)”, and in the magazine a line about
+it.
+
+Mod keys (chat, sit down, player list, microphone) and voice mode change in the window F9, the button "Keys"
+(0.3.3). The next key is pressed, and Esc cancels the choice. If the key is already occupied by another mod
+action, the actions are changed by the keys. Voice: While the key is pressed, the press turns on and off
+(`[voice] toggle`), always on or off. Everything is immediately recorded in `coop.ini`, and the voice module
+picks up on and off without reconnecting.
+
+If the microphone does not open, the mod writes about it in a chat and tries again while the key is clamped.
+Every 5 seconds, the magazine writes how many frames were sent and what level they have. If Windows does not
+give access to the microphone, it records pure silence, and this message also comes to the chat. The test tone
+(`[debug] voice_test_tone`) of the microphone does not require: frames with it are sent by timer, so that the
+network path of the voice is checked on one machine.
+
+## Crashes
+
+The machine that the game deleted, and in its pool cell in the same frame put a new model, checking a live
+copy missed: the pointer led to a live machine of the same model. But the saved number (`handle`) found
+nothing, and `GET_CURRENT_VEHICLE_PAINTJOB` of the `ApplyLook` gave the game an empty car. Host play dropped
+at `CVehicle::GetRemapIndex` (0x6D0B73) in Small Town Bank (#93, 30.10). The car, whose number no longer finds
+her, is now considered missing (`Vehicles::OnPreProcess`).
+
+A copy of another mod player is removed by herself (`Players::DestroyRemote`) and what she was holding was
+removed from the world along with her task of "holding the object." The host had a copy of the partner holding
+the opponent's cue of his `POOL2`. The partner's game fell, his copy was removed, and the host's `POOL2` fell
+after 6 seconds on `GET_OBJECT_COORDINATES` of this cue (0x47D582, empty pointer address +0x14, 31.10). Now,
+before being deleted, the copy releases the item (`CPed::DropEntityThatThisPedIsHolding` without deletion) and
+it remains with the script that created it.
+
+When departing, the handler (`CrashHandler.cpp`) writes in `coop\crash.log` exceptions, registers and return
+addresses from the stack. If no one processed the exception, then the Windows error report went on, and his
+window at the full-screen game may not appear: the game was no longer there, and the process remained, and the
+server he launched held the port. The next game connected to this old server and received an “incorrect
+password.” Now, after writing the report, the process ends on its own, and the game that creates the server
+first stops the remaining `coop-server.exe` from its folder.
+
+Some of the departures are errors of the game itself, which happen more often with fashion or depend on the
+build. The mod closes them where they occur (`Patches.cpp`, engine protection section):
+- The mission can create a model machine that it requested long ago without checking that the model is still in
+  memory: a chase in OG Loc asks Manana while loading the track records, then releases and creates three on a
+  timer. The model dropped `CVehicleModelInfo::CreateInstance` (0x4C9691) on the host. Intercept
+  `CCarCtrl::CreateCarForScript` first loads it.
+- High quality shadows at map objects: `CStencilShadows::RenderForObject` only checks the number of triangles of
+  the shadow grid, and `CCollisionData::RemoveCollisionVolumes` (the collision file is unloaded) frees the
+  grid and leaves numbers. The object, which was still on the shadow list, dropped the game (0x40F64C)
+  immediately after the rockets exploded. A shadow without a net is missed.
+- The sound stream (`CAEStreamThread::Service`) begins the track from the position on the module of its length
+  (0x4F1464). A track whose decoder opened but did not report lengths (broken or empty build sound file) was
+  divided by zero for both players at once (the barbershop in Ryder). Now this track starts from the
+  beginning: division is replaced by a transition to a short insert on the assembler, which skips it at zero
+  length.
+
+The weapon, phone and jetpack in the hands of a copy of another player, as well as a block of his animations
+downtime mod requests from streaming and puts through frame-to-two when the model is already in memory. They
+used to be loaded at once (`CStreaming::LoadAllRequestedModels`), and this feature loads the entire streaming
+queue, and each change of a partner's weapon could stop the game for a second or more (issue #43).
+
+Models, details of tuning, painting, weapons, speech sounds and names of special characters that came over the
+network, the mod checks before giving the downloader. Players with different mods may not have the other model
+number, and the bootloader fell (`CStreaming::RequestModel` unchecked, `CPickup::GiveUsAPickUpObject`,
+`CStoredCar::RestoreCar`). The machine from the host’s garage, which this game can’t assemble, returns the
+host untouched. Before creating a copy, the reserve in the game pools (12 pedestrians, 10 cars, 20 objects) is
+checked: on a filled pool, `CREATE_CHAR` falls, including at the host mission itself.
+
+The limit adjuster (fastman92) transfers the model state table (`CStreaming::ms_aInfoForModel`) and corrects
+the places where the game reads it. The mod takes the address from the same place, from `HAS_MODEL_LOADED`
+(0x47EFFF, `ModelLoadState` to `Game.cpp`): in the old place, no model was considered downloaded, and there
+were no copies of people, cars and items of the other game (#82). Special characters (`SpecialModelFor` in
+`Peds.cpp`) were bypassed by this fix: their slots (290-299) mods were still read in the old place. The slot
+always looked empty, the character was requested again every 100 ms, and copies of Big Smoak, Ryder and other
+special characters from the partner did not appear (#105, in the log line "The streaming table is at ... a
+limit adjuster moved it"). Now the slots are read through `ModelLoadState`.
+
+A pointer to a copy of another mod player is registered in the engine (`CEntity::RegisterReference`). The
+machine that the mission deletes is removed by the game along with the people in it, and the handlers of the
+network of the next frame touched the released copy. Before changing the model, the copy exits the machine and
+resets the tasks: the tasks held the animations of the old model. Before removing the car, everyone who gets
+into it stops (the same departure MTA closes at 0x646026).
+
+Reports on the first exceptions the handler writes only for the game code and mod, separately from the raw
+ones: the exclusion of drivers and plugins, which they process themselves, ate the limit of reports. Plugins
+downloaded after the mod (CrashInfo.SA, modloader, SilentPatch) put their filter on top. The mod on the first
+frame returns its top and summons them after itself. The hover detector works for everyone, not just
+`verbose_log` (29.10): black screen hover reports (#86, #87) came in without a place where the game was
+standing. It copies the stack of the stopped stream and writes the file after the stream went again: the
+recording at the stopped stream, which held the block of the heap or downloader, hung forever. To the stack,
+he adds both download channels `CStreaming` and a model that everyone reads: a reading that fails, the game
+repeats without end (`CStreaming::RetryLoadFile`), and on the outside it looks like a hover. So we found the
+25575, the PED animation block: it's not in `gta3.img`, but in `anim\ped.ifp`, and its query
+(`REQUEST_ANIMATION "PED"` in the test bot) reads the archive from the garbage position. Falling after leaving
+the main cycle (`RsGlobal.quit`) mods do not count as a departure: a bundle of MixSets (SkipShutdown) and
+GPS-mode removed the CJ after unloading textures, and in the report of one player there were ten such
+“departures”. The log of the last launch stays nearby, at `coop.old.log`. The folded game is in a cycle of
+`WinMain` and does not draw frames, so the detector considers it to be hovering: such a record it marks “its
+minimized window” (`IsIconic` windows out of `RsGlobal.ps`). Unmarked in #97, the curled-up game looked like a
+hover.
+
+Commands `LOCATE_CHAR_..._2D/3D` (0x00EC - 0x00F1, 0x00FE - 0x0103) the game performs in
+`CScriptThread::actorNearPoint` (0x486D80) and does not check whether there is such a character: the flags of
+the non-existent she read by zero pointer (0x486DDF). The player from #97 had his save script held a character
+number that wasn't there, and the game dropped, barely loading the save to create the game
+(`DoGameSpecificStuffAfterSucessLoad` → `CTheScripts::Process`). The mod in front of such a command looks at
+its first parameter (`CRunningScript::CollectParameters` with the return of the command pointer). If the
+character is not there, he takes all the parameters as the team picks them up, and answers "not there"
+(`UpdateCompareFlag`). The first five of these cases are written in a log with the name of the script.
+
+`GET_CHAR_IN_CAR_PASSENGER_SEAT` (0x0432) the game does not check either: the handler (0x489EBC) takes the
+number of the person sitting in the seat, and on empty space `CPool<CPed>::GetRef` reads the memory far below
+the pool. Two of the #99 players had their game fall seven times when they got into the same car: their build
+script (at `main.scm` at the Badlands start there are none) asked who was sitting in the empty seat. Mod also
+looks at the parameters. If there is no car or the seat is empty, the command answers -1 as
+`GET_DRIVER_OF_CAR` for a driverless car, and the first five cases are written in a log with the name of the
+script (`PassengerOfEmptySeat` in `Missions.cpp`).
+
+Part-time work in the car starts stream `R3` of `main.scm`: the player in the car of the desired model and the
+button pressed (2 on the keyboard). `IS_CHAR_IN_ANY_CAR` and `IS_CHAR_IN_MODEL` are true for the passenger,
+and in a single game the player does not ride as a passenger. In the koop, an ambulance passenger pressed 2,
+and part-time work began in his game. `AMBULAN` at the beginning drops off everyone who sits next to his
+player (`GET_CHAR_IN_CAR_PASSENGER_SEAT`, `TASK_LEAVE_CAR_IMMEDIATELY`) and lets them go
+(`MARK_CHAR_AS_NO_LONGER_NEEDED`). The released mission character (`CTheScripts::CleanUpThisPed`; the player
+and a copy of the other player are created as mission characters) becomes a regular passerby with the task of
+getting out of the car and wandering around. The passenger's CJ exited and left on its own, without control
+(Player comment, 02.11). Now, while the player is not driving, `R3` sees him outside the car: the part-time
+job does not begin and there is no hint about the button (`PassengerJobButton`). The scripts of this game no
+longer release the player or a copy of the other player, and a copy is not dropped from the machine
+(`ReleasesPlayer`). When the ambulance was started by the driver, a copy of the passenger left and left the
+driver, although the passenger himself drove further in his game. The place of the copy is decided by the game
+of its owner.
+
+Procedural objects (rocks, bushes and debris, which `CPlantMgr` lays on the ground, `ProcObjectMan_c`) are
+removed only by their manager: when the earth leaves the radius, `ProcessTriangleRemoved` (0x5A3F70) removes
+the object from its list and removes it. The object removed by someone else remained on the list, and the
+manager called `DeleteRwObject` of the dead object through a table `CPlaceable` that the destructor left
+behind. The host of #99 has had this five times at launch with Angel Pine, each time with a `rockbrkq`
+breaking stone, seconds after downloading. Who removed it is not yet known: the game itself does not remove
+such objects (`OBJECT_TYPE_DECORATION`), the mod, too. The mod replaces the first address of the table
+`CObject` (removal destructor, 0x5A2BD0). In an object with `m_bIsProcObject`, he searches for it in the
+manager’s lists and shoots it in the same way as the manager (in free, with `nNoTempObjects` counters and
+matrices), and the address of the code that deleted the object writes to the log (`ForgetProcObject` in
+`Patches.cpp`).
+
+The object, which worked the destructor, and the slot in the pool remained occupied, dropped the game in the
+same way: his table is already `CPlaceable`, and `CPopulation::ManageObject` → `ConvertToDummyObject` →
+`CWorld::Remove` caused debris from it (0x42480000). The player with the build with mods had this eight times
+in the gym (02.11) and once at boot, at `CObject::DeleteAllMissionObjects`. On the same day, his game fell to
+`PLAY_OBJECT_ANIM` (0x075A) of an object that no longer exists: the handler reads the flowering at an empty
+pointer (0x46EA84). Who leaves such an object is not yet known. The mod catches it in `ManageObject` and
+before `DeleteAllMissionObjects`, returns the slot in the same way as `CPool::Delete`, and writes the model,
+type, and location log (`FreeIfDead` in `Patches.cpp`). If the deleting destructor `CObject` is called without
+releasing the slot, the log goes to who called it. `PLAY_OBJECT_ANIM` object, which is not, the mod passes
+along with the parameters (`AnimOfNoObject` in `Missions.cpp`).
+
+A long frame (processing longer than 0.5 seconds or more than 0.7 seconds from the last frame) of the mod
+writes in the log with a breakdown: how many its modules took up before processing the frame with the game and
+after it (and the longest of them), how much processing of the game itself (streaming, scripts), how much went
+between frames (drawing, loading the world). A pause in the menu is not considered a long frame. So complaints
+about lags in 1-2 seconds can be seen in the usual log of the player, without detailed.
+
+## Client frame
+
+In the pause menu session, the game does not stop (`no_pause_menu`): the other player's world goes further.
+The menu stops the radio when it closes and when it leaves the sound page, hoping for a pause in which
+`CAERadioTrackManager::StopRadio` radio machines do not touch. Without pause, the radio stopped until the next
+landing, so while the car is playing the radio, this stop is skipped (calls 0x576C55 and 0x5737A5).
+
+WinMain only processes the frame (`RsEventHandler(rsIDLE)` → `Idle`) while the window is in the foreground.
+The mod keeps the game running in the background (`run_in_background`), and in full-screen mode after the
+alt-tab, she drew in a lost D3D9 device: after returning, the picture was spoiled, and later the game flew out
+in d3d9. While the device is lost, the frame is considered without drawing (`Idle` without an argument comes
+out before drawing, call 0x748D9B), and the RenderWare device recovers on the first drawn frame, as after a
+normal pause.
 
 ```
 Idle (0x53E920)
- ├─ CGame::Process  ← перехват (вызов 0x53E981)
- │    ├─ Coop::PreProcess    входящие сообщения → зеркала, кнопки удалённого игрока
- │    ├─ CGame::Process      мир; удалённый CPlayerPed обрабатывается с подменой контекста
- │    └─ Coop::PostProcess   сбор локального состояния → отправка
- └─ CDebug::DebugDisplayTextBuffer ← перехват (вызов 0x53EBE4, в меню 0x53E86C)
-      └─ Coop::Render        чат, ники, значки голоса, уведомления
+ ├─ CGame::Process          Hook at call site 0x53E981
+ │    ├─ Coop::PreProcess   Apply incoming messages to replicas and remote input
+ │    ├─ CGame::Process     Update the world and process remote CPlayerPed in a switched context
+ │    └─ Coop::PostProcess  Collect and send local state
+ └─ CDebug::DebugDisplayTextBuffer  Hook at 0x53EBE4 (in menus, 0x53E86C)
+      └─ Coop::Render       Chat, player names, voice icons, and notifications
 ```
 
-Начало игры мод замечает до входящих сообщений кадра: сообщения первого кадра создавали копии, которые
-`OnGameStarted` модулей тут же забывали. `G_RESYNC` после загрузки мира уходит раньше, чем модули объявят свои
-машины и людей: обработчик другой игры удаляет всё, что пришло до него.
+The beginning of the mod game notices before the incoming messages of the frame: the messages of the first
+frame created copies that `OnGameStarted` modules immediately forgot. `G_RESYNC` after loading the world
+leaves before the modules announce their machines and people: the handler of the other game deletes everything
+that came before it.
 
-Оверлей рисуется из последнего 2D-вызова кадра (`CDebug::DebugDisplayTextBuffer`). Плагин, который забирает этот
-вызов себе и не передаёт дальше, оставлял игрока без чата, окна F9 и кода для друга. Если в кадре этого вызова не
-было, оверлей рисуется перед `RwCameraEndUpdate` того же кадра (в `Idle` и в `FrontendIdle`). В 0.2.7 запасным местом
-был `IDirect3DDevice9::Present`, но там у RenderWare нет камеры, и на экранах загрузки игра падала в отрисовке
-текста.
+Overlay is drawn from the last 2D call of the frame (`CDebug::DebugDisplayTextBuffer`). The plugin, which
+takes this call to itself and does not transmit further, left the player without a chat, an F9 window and a
+code for a friend. If this call was not in the frame, the overlay is drawn in front of `RwCameraEndUpdate` of
+the same frame (in `Idle` and `FrontendIdle`). In 0.2.7, the spare space was `IDirect3DDevice9::Present`, but
+there RenderWare does not have a camera, and on the download screens the game fell in the rendering of text.
 
-F7 прячет интерфейс, второе нажатие возвращает его (`core::InterfaceHidden`). Мод не рисует подписи над игроками,
-чат, строку состояния и табло соревнования (тот же `Renderer::SetHidden`, `OnRender` модулей при этом вызывается).
-Окна F2, U и F9 рисуются, если их открыть, а чат, открытый клавишей T, виден, пока в него пишут. Худ игры прячется
-так, как его прячет она сама: на время `CHud::Draw` мод снимает флаг меню «HUD» (`FrontEndMenuManager.m_bHudOn`),
-ставит `bScriptDontDisplayRadar` и `bScriptDontDisplayVehicleName` и потом возвращает все три. Сам вызов идёт дальше:
-в нём работают меню магазинов (`CMenuSystem::Process`), подсказки, таймеры миссии и прицел. Название района так же
-прячется на время `CHud::DrawAfterFade` (`bScriptDontDisplayAreaName`), а название радиостанции не рисуется
-(`CAudioEngine::DisplayRadioStationName` из `Render2dStuff`). Пока открыт чат или окно, F7 не работает, а клавиша
-окна F9, назначенная на F7, остаётся своей.
+F7 hides the interface, the second press returns it (`core::InterfaceHidden`). The mod does not draw
+signatures over players, chat, status bar and competition scoreboard (the same `Renderer::SetHidden`,
+`OnRender` modules are called). Windows F2, U, and F9 are drawn when opened, and the chat open with the T key
+is visible while it is written. The hood of the game hides as it hides itself: for a time of `CHud::Draw` mods
+removes the menu flag "HUD" (`FrontEndMenuManager.m_bHudOn`), puts `bScriptDontDisplayRadar` and
+`bScriptDontDisplayVehicleName` and then returns all three. The call itself goes further: it runs a store menu
+(`CMenuSystem::Process`), tips, mission timers, and a sight. The name of the district is also hidden for a
+time of `CHud::DrawAfterFade` (`bScriptDontDisplayAreaName`), and the name of the radio station is not drawn
+(`CAudioEngine::DisplayRadioStationName` out of `Render2dStuff`). As long as the chat or window is open, F7
+does not work, and the F9 window key assigned to F7 remains its own.
 
-Для записи видео `clean_screen` прячет всё, что рисует мод: рендерер отбрасывает свои прямоугольники и текст
-(`Renderer::SetHidden`), а `OnRender` модулей всё равно вызывается. Из него идёт и расстановка напарника в
-катсцене (`Missions::OnRender` → `scene::Analyse` у хоста и `scene::Follow` у напарника). `borderless` снимает с окна
-рамку (`WS_POPUP`), и окно размером с экран может закрыть и панель задач. `window_title` даёт окну свой заголовок:
-по нему захват игры в OBS находит нужную из двух копий. Скрипт записи катсцен лежит в репозитории тестов
+For video recording, `clean_screen` hides everything that the mod draws: the renderer drops its rectangles and
+text (`Renderer::SetHidden`), and `OnRender` modules are still called. From it comes the placement of the
+partner in the cutscene (`Missions::OnRender` → `scene::Analyse` for the host and `scene::Follow` for the
+partner). `borderless` removes the frame from the window (`WS_POPUP`), and a screen-sized window can also
+close the taskbar. `window_title` gives the window its header: it captures the game in OBS finds the desired
+of two copies. The script for the cutscene recording is in the test repository
 (`scripts\record-cutscenes.ps1`).
 
-Две копии игры на одном компьютере (`multi_instance`) читают один геймпад. Игра берёт его через DirectInput только
-в активном окне, но GInput читает XInput, а XInput отдаёт кнопки любому окну. Персонаж второго окна прыгал и шёл
-вместе с первым. Поэтому при `multi_instance` окно без фокуса обнуляет кнопки геймпадов сразу после их опроса
-(`CPad::UpdatePads`, вызов 0x53BEE6).
+Two copies of the game on the same computer (`multi_instance`) read the same gamepad. The game takes it
+through DirectInput only in the active window, but GInput reads XInput, and XInput gives buttons to any
+window. The character of the second window jumped and walked with the first. Therefore, at `multi_instance`, a
+no-focus window resets the gamepad buttons immediately after they are polled (`CPad::UpdatePads`, call
+0x53BEE6).
 
-Пока открыт чат или окно мода с полем ввода (`Input::KeyboardCaptured`), там же обнуляются кнопки и стики своего
-игрока. Нажатия клавиш до игры и раньше не доходили (их съедает оконная процедура), но игроки прыгали, переключая
-раскладку (Shift и Alt) или ставя пробел в сообщении, когда прыжок назначен на эти клавиши (30.10). Персонаж,
-пока игрок пишет, стоит, машина катится сама, а копия у другого игрока получает пустой геймпад.
+While the chat or the mode window with the input field (`Input::KeyboardCaptured`) is open, the buttons and
+sticks of your player are also reset there. Keystrokes before the game and before did not reach (they are
+eaten by the window procedure), but players jumped, switching the layout (Shift and Alt) or putting a space in
+the message when the jump is assigned to these keys (30.10). The character, while the player writes, stands,
+the machine rolls itself, and a copy of the other player gets an empty gamepad.
 
-Повтор последних секунд (F1, а с F3 повтор с диска, `CReplay::TriggerPlayback`) в совместной игре отключён. Он
-останавливает только свой мир, а копия другого игрока для него второй CJ, у которого нет записи одежды: на
-воспроизведении игра падала (`CReplay::RestoreClothesDesc`, 0x45C7D4, 29.10).
+Last-second repetition (F1, and F3 replay from the disc, `CReplay::TriggerPlayback`) in the joint game is
+disabled. He only stops his world, and a copy of another player for him is a second CJ who has no clothing
+record: on playback, the game fell (`CReplay::RestoreClothesDesc`, 0x45C7D4, 29.10).
 
-Архивы IMG игра открывает мимо файлового кэша Windows (`CdStreamInit` ставит `FILE_FLAG_NO_BUFFERING`, если сектор
-диска не больше 2 КБ). Одежду CJ `CClothesBuilder` собирает из кусков player.img: до 10 моделей и 18 текстур читаются
-по одной, сразу и без хранения. Копию другого игрока мод пересобирает при каждом его новом облике и каждом появлении, и
-каждый раз всё читалось с диска: на жёстком диске игра вставала на секунду-две. Мод убирает этот флаг (0x406BC8), и те
-же куски приходят из памяти.
+The IMG Archives game opens past the Windows file cache (`CdStreamInit` puts `FILE_FLAG_NO_BUFFERING` if the
+disk sector is not more than 2 KB). CJ `CClothesBuilder` clothing is assembled from pieces of player.img: up
+to 10 models and 18 textures are read one at a time and without storage. A copy of another mod player is
+reassembled with each new appearance and each appearance, and every time everything was read from the disk: on
+the hard drive, the game stood up for a second or two. The mod removes this flag (0x406BC8) and the same
+chunks come from memory.
 
-Ожидание чтения в самой игре написано с гонкой. `CdStreamSync` (в этом exe перенесена в 0x156CD80) видит, что канал
-ещё читает (поле `+4`), ставит флаг «жду» (`+0x0D`) и засыпает на семафоре канала без срока. Поток чтения, закончив,
-обнуляет `+4` и будит ждущего, только если флаг уже стоит. Если чтение кончилось между проверкой и флагом, будить
-некому, и игра ждёт вечно. Из кэша чтение кончается быстрее, и окно гонки, видимо, стало попадаться чаще: в 0.3.1
-игроки писали о намертво зависшей игре на чёрном экране катсцены (после затемнения сцена синхронно грузит свои
-модели), о карте в меню паузы, которая так и не появлялась (при открытии карта тем же путём грузит все видимые плитки
-радара), и о зависании при загрузке сохранения. Мод заменяет ожидание без срока ожиданием по 100 мс в цикле (вызов
-в 0x156CDAE): после каждого среза он смотрит, читает ли ещё канал, и отпускает игру, когда чтение кончилось. Такой
-случай и чтение дольше 5 секунд он пишет в лог. Чтение через кэш отключается в `coop.ini` (`[game] stream_cache = 0`).
+Reading expectation in the game itself is written with the race. `CdStreamSync` (in this exe moved to
+0x156CD80) sees the channel still reading (field `+4`), puts a "wait" flag (`+0x0D`) and falls asleep on the
+channel semaphore without a deadline. The reading stream, when finished, resets `+4` and wakes the waiter only
+if the flag is already standing. If the reading is over between the check and the flag, there is no one to
+wake up and the game waits forever. From the cache, the reading ends faster, and the race window apparently
+began to get caught more often: in 0.3.1, players wrote about a dead game on the black screen of the cutscene
+(after darkening, the scene synchronously loads its models), about a map in the pause menu that never appeared
+(when opening the card in the same way loads all visible radar tiles), and about hovering when loading save.
+The mod replaces the wait without a deadline with a wait of 100 ms per cycle (call in 0x156CDAE): after each
+slice, it looks at whether it is still reading the channel, and lets go when the reading is over. This case
+and reading for more than 5 seconds, he writes in the log. Cache reading is disabled at `coop.ini` (`[game]
+stream_cache = 0`).
 
-Пул моделей столкновений (`CPools::Initialise`, `push 10150` в 0x551106) мод поднимает до 20000. Карта занимает его почти весь навсегда,
-и ещё по записи занимает каждая модель машины (`CCollisionPlugin`) и человека (`CPedModelInfo::CreateHitColModelSkinned`), пока она в
-памяти. У двух игроков таких моделей больше, чем у одного. `CreateHitColModelSkinned` не проверяет свой `new CColModel`, и с полным пулом
-игра падает в `CColModel::AllocateData` на чтении `this` (C0000005 в 0x156173D: игра напарника 05.11, полицейская подработка вдвоём). Из
-всех вызовов `AllocateData` нулевой `this` возможен только здесь, но `crash.log` того вылета нет, так что это вывод по коду. Лог пишет,
-сколько записей занято (`Diagnostics`, «Col models: N of M», при росте на 50). Если пул уже изменил другой мод, мод его не трогает.
+The pool of collision models (`CPools::Initialise`, `push 10150` in 0x551106) raises to 20,000. The map
+occupies him almost forever, and still takes up each model of the machine (`CCollisionPlugin`) and the person
+(`CPedModelInfo::CreateHitColModelSkinned`) while it is in memory. Two players have more of these models than
+one. `CreateHitColModelSkinned` does not check its `new CColModel`, and with a full pool, the game falls to
+`CColModel::AllocateData` on reading `this` (C0000005 at 0x156173D: partner's game 05.11, police part-time
+work together). Of all the calls, `AllocateData` is zero `this`, but `crash.log` is not, so it's code output.
+Log writes how many records are occupied (`Diagnostics`, Col models: N of M, with an increase of 50). If the
+pool has already changed another mod, the mod does not touch it.
 
-Катсцена начинается, только когда все её модели в памяти: `CCutsceneMgr::LoadCutsceneData_loading` проверяет их
-каждый кадр и ждёт. Модель, которая так и не пришла, держит миссию на чёрном экране, хотя игра идёт. Так же ждут
-модели тир (`SHRANGE` ставит маркер, только когда загрузит мишени и звук) и карта в меню паузы. У хоста из сообщения
-27.10 не было ни катсцен, ни карты, ни маркера тира, а у напарника в том же мире маркер был. Если катсцена ждёт
-дольше 10 секунд, мод пишет в лог, каких моделей нет и в каком они состоянии, сколько памяти стриминга занято,
-сколько моделей запрошено и что делают оба канала (`Diag.cpp`). У того хоста, судя по скриншотам, кончилась память
-стриминга в его сборке игры (то же потом было и на других его сохранениях): карта в меню показывала только плитки
-3×3 вокруг игрока, которые держит радар, а по Сан-Фиерро ездила сельская полиция, потому что новые модели не грузились.
-В таком случае занятая память в строке лога близка к пределу. Предел мод не меняет. Без сессии он почти ничего не
-держит в памяти, а в сессии держит блоки анимаций копий: все 133 блока игры вместе занимают около 11 МБ.
+The cutscene only begins when all of her models are in memory: `CCutsceneMgr::LoadCutsceneData_loading` checks
+each frame and waits. The model, who never showed up, keeps the mission on a black screen, even though the
+game is on. Also waiting for models of shooting ranges (`SHRANGE` puts a marker only when it loads targets and
+sound) and a map in the pause menu. The host on message 27.10 had no cutscene, no map, no dash marker, and the
+partner in the same world had a marker. If the cutscene waits longer than 10 seconds, the mod logs what models
+are missing and in what condition, how much streaming memory is occupied, how many models are requested, and
+what both channels are doing (`Diag.cpp`). That host, judging by the screenshots, ran out of memory streaming
+in his game assembly (the same thing happened later on his other saves): the map in the menu showed only 3×3
+tiles around the player, which is held by the radar, and the village police drove around San Fierro, because
+the new models were not loaded. In this case, the occupied memory in the log string is close to the limit. The
+fashion limit doesn't change. Without a session, he holds almost nothing in memory, and in the session holds
+blocks of animation copies: all 133 blocks of the game together take up about 11 MB.
 
-Миссия тоже может встать на модели: «Architectural Espionage» после снимка чертежа запрашивает полицейских (282),
-медика (275) и бизнесмена (147) и в цикле ждёт `HAS_MODEL_LOADED`. У двух игроков из сообщения 01.11 она дальше не шла,
-хотя люди и машины снаружи у хоста грузились, а сам мод таких запросов не трогает. Если модель, которую спрашивает
-миссия, не загрузилась за 10 секунд, мод запрашивает её ещё раз вместе с её словарём текстур (без него модель не
-грузится) и вперёд остальных (`STREAMING_MISSION_REQUIRED | STREAMING_PRIORITY_REQUEST`): потерянный запрос встаёт
-снова, отложенный идёт первым. Сразу мод ничего не грузит: файл, который не читается, игра читает снова и снова, и
-загрузка сразу повесила бы игру. Через 15 секунд он один раз пишет в лог номер модели, её состояние и состояние её
-словаря и те же числа стриминга (`NoteModelWait` в `Missions.cpp`).
+The mission can also stand on the model: Architectural Espionage, after the drawing, asks for police officers
+(282), a medic (275) and a businessman (147) and waits for `HAS_MODEL_LOADED` in the cycle. Two players from
+the message 01.11, it did not go further, although people and cars outside the host were loaded, and the mod
+itself does not touch such requests. If the model the mission asks for doesn’t load in 10 seconds, the mod
+requests it again, along with its texture vocabulary (without it, the model doesn’t load), and forward the
+others (`STREAMING_MISSION_REQUIRED | STREAMING_PRIORITY_REQUEST`): the lost request rises again, the delayed
+one goes first. Immediately, the mod does not load anything: a file that is not readable, the game reads over
+and over again, and downloading would immediately hang the game. After 15 seconds, he once writes the model
+number, her condition and the state of her vocabulary, and the same streaming numbers (`NoteModelWait` in
+`Missions.cpp`).
 
-Две копии игры на одном ПК (`multi_instance`) получают свои именованные объекты ядра: к имени добавляется
-`#sacoop<pid>` (семафор `CdStream` игры, общая память modloader). Суффикс получают только вызовы из модулей папки игры.
-Чужие хуки внутри игры (захват игры в OBS, оверлеи) открывают свои объекты по имени из собственного процесса, и с
-суффиксом OBS не находил `CaptureHook_*` и писал чёрный кадр.
+Two copies of the game on the same PC (`multi_instance`) receive their named kernel objects: `#sacoop<pid>` is
+added to the name (semaphore `CdStream` games, total memory modloader). The suffix receives only calls from
+the game folder modules. Alien hooks inside the game (capture game OBS, overlays) open their objects by name
+from their own process, and with the suffix OBS did not find `CaptureHook_*` and wrote a black frame.
 
-Перед новой игрой и загрузкой сохранения мод проверяет текущую папку процесса. Игра открывает свои файлы по
-относительным путям, и папка, которую сменил плагин или диалог, роняла её на экране загрузки (`CGame::Init2` не
-находил `ANIM\PED.IFP`). Мод возвращает папку игры (`CFileMgr::ms_rootDirName`) и пишет об этом в журнал.
+Before a new game and downloading a mode save checks the current folder of the process. The game opens its
+files in relative paths, and the folder that the plugin or dialog changed dropped it on the download screen
+(`CGame::Init2` did not find `ANIM\PED.IFP`). Mod returns the game folder (`CFileMgr::ms_rootDirName`) and
+writes about it in the magazine.

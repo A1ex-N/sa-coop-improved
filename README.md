@@ -3,6 +3,15 @@ Each teammate joins the same world with their own character, money, clothes and 
 
 ![Playing together in Los Santos](docs/images/hero.jpg)
 
+## How this fork differs
+
+This fork builds on [Karimov-Akbar/sa-coop](https://github.com/Karimov-Akbar/sa-coop) and adds:
+
+- A named skin picker with previews, persistent choices, and the selected skin's movement animations.
+- Controller shortcuts and navigation for the co-op menus.
+- A downed state and teammate revives when shared lives are disabled.
+- Camera-targeted ping beacons that use the sender's radar blip colour.
+
 ## Install and connect
 
 Requires **GTA San Andreas 1.0 US on Windows**. Downgrade Steam or Rockstar Games Launcher editions first.
@@ -127,7 +136,7 @@ Edit `coop/coop.ini` for these options.
 
 ## Bugs and support
 
-Report issues through [GitHub Issues](../../issues/new/choose) or the [Telegram group](https://t.me/sacoop_forum).
+Report issues through [GitHub Issues](../../issues/new/choose).
 Include the mod version, game build and steps to reproduce. The issue form accepts English answers.
 
 Attach `coop/coop.log` from the affected player, `coop/crash.log` for crashes, and the host's
@@ -148,7 +157,7 @@ The release archive is written to `dist/SA-COOP.zip`. GitHub Actions also produc
 releases for version tags.
 
 Sources are split across `src/client`, `src/server`, `src/loader` and `src/common`. Each application follows
-Feature-Sliced Design. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for implementation details in Russian.
+Feature-Sliced Design. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for implementation details.
 
 ## Third-party code
 
