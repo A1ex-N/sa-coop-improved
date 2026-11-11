@@ -272,6 +272,7 @@ void SaveConnectSettings() {
     ini.SetInt("keys", "chat", cfg.chatKey);  // the keys page
     ini.SetInt("keys", "enter_as_passenger", cfg.passengerKey);
     ini.SetInt("keys", "player_list", cfg.playerListKey);
+    ini.SetInt("keys", "revive", cfg.reviveKey);
     ini.SetInt("voice", "push_to_talk_key", cfg.voiceKey);
     ini.SetInt("voice", "enabled", cfg.voiceEnabled);
     ini.SetInt("voice", "always_on", cfg.voiceAlwaysOn);

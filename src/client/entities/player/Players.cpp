@@ -14,6 +14,7 @@
 #include "entities/ped/Peds.h"
 #include "entities/session/Flow.h"
 #include "entities/vehicle/Vehicles.h"
+#include "features/downed/Downed.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "shared/game/Anim.h"
@@ -2233,7 +2234,8 @@ void Players::SendLocalState() {
                (me->InVehicle() && me->Vehicle() && me->Vehicle()->IsTrain() ? OnFootState::F_IN_TRAIN : 0) |
                (Field<int32_t>(me, 0x740) == kCellphone ? OnFootState::F_PHONE : 0) |  // CPed::m_nWeaponModelId
                (TaskWalks(me) ? OnFootState::F_TASK_WALK : 0);
-    st.flags2 = Ref<int32_t>(0x96A7CC) != 0 ? OnFootState::F2_DOOR : 0;  // CEntryExitManager::ms_exitEnterState
+    st.flags2 = (Ref<int32_t>(0x96A7CC) != 0 ? OnFootState::F2_DOOR : 0) |  // CEntryExitManager::ms_exitEnterState
+                (downed::IsDown() ? OnFootState::F2_DOWNED : 0);
     st.area = me->AreaCode();
     st.moveState = (uint8_t)me->MoveState();
     st.wanted = WantedLevel(me);

@@ -32,6 +32,7 @@
 #include "entities/player/Players.h"
 #include "entities/session/Flow.h"
 #include "entities/vehicle/Vehicles.h"
+#include "features/downed/Downed.h"
 #include "features/story/contest/Contest.h"
 #include "features/story/courier/Courier.h"
 #include "features/story/cutscene-partner/ScenePartner.h"
@@ -1162,6 +1163,8 @@ const RemotePlayer* LivingPartner(uint8_t prefer) {
 using KillPlayerFn = void(__fastcall*)(void*, void*);
 KillPlayerFn g_origKillPlayer = nullptr;
 void __fastcall HookKillPlayer(void* info, void* edx) {
+    // lying down with a partner who can bring us up (Downed.cpp): the game gets no death meanwhile
+    if (info == &PlayerInfos()[0] && downed::OnKillPlayer()) return;
     void* s = info == &PlayerInfos()[0] && Net().Online() && Net().IsHost() && !Net().SharedLife() ? FindMissionScript() : nullptr;
     if (const RemotePlayer* rp = s && StoryMission(s) ? LivingPartner(g_down.by) : nullptr) {
         if (!g_down.on) {

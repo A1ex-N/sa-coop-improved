@@ -260,6 +260,8 @@ enum MsgId : uint8_t {
     G_OBJ_HOLD = 163,         // reliable: the partner holds the copy of a host's mission object: u8 op (1 hold, 2 release,
                               // 3 enter pressed, 4 deny: host -> partner), u16 object, release: vec3 pos, quat rot
 
+    G_REVIVE = 187,           // reliable: u8 op (1 tick), u8 to: the sender kneels by the downed player `to` and holds its
+                              // key (5 a second): the count to bring it up is the downed player's (Downed.cpp)
     G_VOICE = 200,            // unreliable: voice frame
     G_LAST = 255,
 };

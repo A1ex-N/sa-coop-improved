@@ -80,7 +80,9 @@ struct OnFootState {
     enum : uint8_t {
         F_DUCKING = 1, F_IN_AIR = 2, F_DEAD = 4, F_SWIMMING = 8, F_JETPACK = 16, F_IN_TRAIN = 32, F_PHONE = 64, F_TASK_WALK = 128
     };
-    enum : uint8_t { F2_DOOR = 1 };  // F2_DOOR: going through a door of an entrance (CEntryExitManager::ms_exitEnterState)
+    // F2_DOOR: going through a door of an entrance (CEntryExitManager::ms_exitEnterState)
+    // F2_DOWNED: F_DEAD, but a partner can still bring the owner up (Downed.cpp): its copy lies, the owner is not dead
+    enum : uint8_t { F2_DOOR = 1, F2_DOWNED = 2 };
 
     void Write(Writer& w) const;
     bool Read(Reader& r);

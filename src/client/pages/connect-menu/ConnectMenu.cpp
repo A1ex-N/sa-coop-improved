@@ -101,10 +101,10 @@ uint16_t PortValue() {
 
 // the keys of the keys page, in its order
 int* const* BoundKeys() {
-    static int* const keys[] = {&Cfg().chatKey, &Cfg().passengerKey, &Cfg().playerListKey, &Cfg().voiceKey};
+    static int* const keys[] = {&Cfg().chatKey, &Cfg().passengerKey, &Cfg().playerListKey, &Cfg().voiceKey, &Cfg().reviveKey};
     return keys;
 }
-constexpr int kBoundKeys = 4;
+constexpr int kBoundKeys = 5;
 
 // a letter or a digit as on the key cap whatever the layout ("Е" for T in a Russian one), the rest by Windows' names
 std::string KeyName(int vk) {
@@ -232,7 +232,8 @@ void RenderConnectMenu() {
         g.Text(FONT_BIG, cx, cy, TR("Клавиши", "Keys"), kSaBlue, TEXT_SHADOW);
         cy += bh + 22 * s;
         const char* labels[kBoundKeys] = {TR("Чат", "Chat"), TR("Сесть пассажиром", "Enter as a passenger"),
-                                          TR("Список игроков", "Player list"), TR("Микрофон", "Microphone")};
+                                          TR("Список игроков", "Player list"), TR("Микрофон", "Microphone"),
+                                          TR("Поднять напарника", "Revive a partner")};
         float kx = cx + cw * 0.55f;
         for (int i = 0; i < kBoundKeys; ++i) {
             g.Text(FONT_NORMAL, cx, cy + (rowH - lh) * 0.5f, labels[i], kText, TEXT_SHADOW);

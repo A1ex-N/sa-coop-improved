@@ -41,6 +41,9 @@ struct ClientConfig {
     bool partnerArrow = true;         // ...drawn as an arrow turned with their heading, as the game draws its player
     bool nameTags = true;             // their names, health and armour over their heads (off for a blind shoot-out)
     bool gps = true;                  // the road route to the map target on the radar while driving
+    bool downRevive = true;           // dying with a partner near: lie down and wait for a revive instead of the hospital
+    int downSeconds = 60;             // how long a downed player can be brought up (10..600)
+    int reviveSeconds = 5;            // how long a partner holds the key to bring one up (1..30)
 
     // [voice]
     bool voiceEnabled = true;
@@ -57,6 +60,7 @@ struct ClientConfig {
     int chatKey = 0x54;               // T
     int passengerKey = 0x47;          // G
     int playerListKey = 0x71;         // F2
+    int reviveKey = 0x48;             // H: held beside a downed partner
 
     // [debug]
     bool debugOverlay = false;

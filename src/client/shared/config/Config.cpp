@@ -71,6 +71,9 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
     partnerArrow = ini.GetBool("game", "partner_arrow", partnerArrow);
     nameTags = ini.GetBool("game", "name_tags", nameTags);
     gps = ini.GetBool("game", "gps", gps);
+    downRevive = ini.GetBool("game", "down_revive", downRevive);
+    downSeconds = ini.GetInt("game", "down_seconds", downSeconds);
+    reviveSeconds = ini.GetInt("game", "revive_seconds", reviveSeconds);
 
     voiceEnabled = ini.GetBool("voice", "enabled", voiceEnabled);
     voiceKey = ini.GetInt("voice", "push_to_talk_key", voiceKey);
@@ -85,6 +88,7 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
     chatKey = ini.GetInt("keys", "chat", chatKey);
     passengerKey = ini.GetInt("keys", "enter_as_passenger", passengerKey);
     playerListKey = ini.GetInt("keys", "player_list", playerListKey);
+    reviveKey = ini.GetInt("keys", "revive", reviveKey);
 
     debugOverlay = ini.GetBool("debug", "overlay", debugOverlay);
     cleanScreen = ini.GetBool("debug", "clean_screen", cleanScreen);
