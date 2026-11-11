@@ -664,6 +664,11 @@ int64_t BlipColour(const std::string& name) {
     return (int64_t)((uint32_t)strtoul(name.c_str(), nullptr, 16) << 8 | 0xFF);
 }
 
+uint32_t MarkRgba(const std::string& name) {
+    int64_t colour = BlipColour(name);
+    return colour > 8 ? (uint32_t)colour : Call<0x584770, uint32_t>((int)(colour < 0 ? 7 : colour), true, true);
+}
+
 // The other player on the radar and the map as an arrow turned with its heading, the way CRadar::DrawBlips draws the
 // game's own player (the centre sprite, DrawRotatingRadarSprite), in its mark's colour: a dot did not tell where it went
 // (asked for in the chat on October 25). Its blip stays for the rest, not drawn (CHANGE_BLIP_DISPLAY 0). Drawn from
@@ -680,8 +685,7 @@ void DrawArrows() {
         if (!rp.blip || !rp.ped || !IsPedValid(rp.ped) || rp.ped->AreaCode() != me->AreaCode()) continue;
         // in the colour its player chose for itself. CRadar::GetRadarTraceColour: one of the game's (the allies' blue for
         // none: a threat as a friend), or RGBA as it is
-        int64_t c = BlipColour(rp.markColour);
-        uint32_t rgba = c > 8 ? (uint32_t)c : Call<0x584770, uint32_t>((int)(c < 0 ? 7 : c), true, true);
+        uint32_t rgba = MarkRgba(rp.markColour);
         CRGBA colour{(uint8_t)(rgba >> 24), (uint8_t)(rgba >> 16), (uint8_t)(rgba >> 8), 255};
         CEntity* e = rp.ped->InVehicle() && rp.ped->Vehicle() ? (CEntity*)rp.ped->Vehicle() : (CEntity*)rp.ped;
         if (CVehicle* toy = RemoteToy(rp)) e = toy;  // where its player looks from: its toy, not its CJ standing by (31.10)
@@ -914,6 +918,8 @@ void ReadCommon(Reader& r, OnFootState& st) {
     st.walkGroup = r.U8();
 }
 }  // namespace
+
+uint32_t Players::LocalMarkRgb() { return MarkRgba(Cfg().markColour) >> 8; }
 
 // A model in memory, else asked for (it comes in a few frames, and a later try uses it): LoadModelNow loads the whole
 // streaming queue with it, and the other player's weapon or phone stood this game still for a second or more (issue #43)

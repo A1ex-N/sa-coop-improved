@@ -95,6 +95,7 @@ public:
     const std::map<uint8_t, RemotePlayer>& All() const { return m_remote; }
     // our own mark in this colour on the other players' radar (BlipColour's names, empty: the allies' blue), saved in
     // coop.ini and sent to them
+    static uint32_t LocalMarkRgb();
     void SetMarkColour(const std::string& colour);
     // the other players as arrows turned with their heading, at the end of CRadar::DrawBlips (the radar and the menu
     // map): Waypoints' hook of it calls this, and says whether it is in (MinHook takes one hook per function)

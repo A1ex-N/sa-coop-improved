@@ -6,6 +6,7 @@
 
 #include "common/api/protocol/Protocol.h"
 #include "common/lib/util/Util.h"
+#include "entities/player/Players.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "shared/game/Game.h"
@@ -24,6 +25,7 @@ struct Ping {
     CVector at;
     uint8_t area;
     uint64_t placedAt;
+    uint32_t rgb = 0x50DCFF;
 };
 
 std::map<uint8_t, Ping> g_pings;
@@ -43,11 +45,13 @@ public:
             uint8_t area = r.U8();
             auto pos = r.Vec();
             CVector at{pos.x, pos.y, pos.z};
+            uint32_t rgb = r.Remaining() ? r.U32() : 0x50DCFF;
+            if (rgb > 0xFFFFFF) return;
             if (!r.Ok() || r.Remaining() != 0 || !ValidPosition(at) || from == Net().MyId()) return;
             uint64_t now = NowMs();
             auto previous = g_pings.find(from);
             if (previous != g_pings.end() && now - previous->second.placedAt < kCooldownMs) return;
-            g_pings.insert_or_assign(from, Ping{at, area, now});
+            g_pings.insert_or_assign(from, Ping{at, area, now, rgb});
         });
     }
 
@@ -75,13 +79,16 @@ public:
                 auto alpha = static_cast<uint8_t>((145.0f + 110.0f * pulse) * fade);
                 uint32_t markerId = 0x50494E00u | id;
                 CVector base = ping.at;
+                auto red = static_cast<uint8_t>(ping.rgb >> 16);
+                auto green = static_cast<uint8_t>(ping.rgb >> 8);
+                auto blue = static_cast<uint8_t>(ping.rgb);
                 // C3dMarkers::PlaceMarkerSet uses the same cylinder as mission markers.
-                Call<0x725BA0>(markerId, (uint16_t)1, &base, 2.25f, (uint8_t)40, (uint8_t)215, (uint8_t)255,
+                Call<0x725BA0>(markerId, (uint16_t)1, &base, 2.25f, red, green, blue,
                                alpha, (uint16_t)1024, 0.12f, (int16_t)0);
 
                 // CCoronas::RegisterCorona adds a bright light above the cylinder.
                 CVector light = ping.at + CVector{0.0f, 0.0f, 4.0f + 0.6f * pulse};
-                Call<0x6FC580>(markerId, (CEntity*)nullptr, (uint8_t)85, (uint8_t)230, (uint8_t)255, alpha,
+                Call<0x6FC580>(markerId, (CEntity*)nullptr, red, green, blue, alpha,
                                &light, 1.6f + 0.7f * pulse, 240.0f, (uint8_t)0, (uint8_t)0, (uint8_t)0,
                                (uint8_t)0, (uint8_t)0, 0.0f, false, 0.0f, true, 15.0f, false, true);
             }
@@ -137,10 +144,12 @@ bool Place() {
     // Pull the glow slightly off the surface so the geometry does not hide it.
     CVector at = collision.point - direction * 0.2f;
     uint8_t area = static_cast<uint8_t>(me->AreaCode());
-    g_pings.insert_or_assign(Net().MyId(), Ping{at, area, now});
+    uint32_t rgb = Players::LocalMarkRgb();
+    g_pings.insert_or_assign(Net().MyId(), Ping{at, area, now, rgb});
     Writer w(proto::G_PING);
     w.U8(area);
     w.Vec({at.x, at.y, at.z});
+    w.U32(rgb);
     Net().Send(proto::CH_RELIABLE, w);
     return true;
 }

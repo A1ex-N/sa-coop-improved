@@ -262,7 +262,7 @@ enum MsgId : uint8_t {
 
     G_REVIVE = 187,           // reliable: u8 op (1 tick), u8 to: the sender kneels by the downed player `to` and holds its
                               // key (5 a second): the count to bring it up is the downed player's (Downed.cpp)
-    G_PING = 188,             // reliable: u8 interior, vec3 location of a temporary player ping
+    G_PING = 188,             // reliable: u8 interior, vec3 location, u32 RGB of a temporary player ping
     G_VOICE = 200,            // unreliable: voice frame
     G_LAST = 255,
 };

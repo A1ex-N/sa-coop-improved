@@ -13,371 +13,157 @@
   <a href="https://github.com/sponsors/Karimov-Akbar"><img src="https://img.shields.io/badge/GitHub-Sponsors-EA4AAA?logo=githubsponsors&logoColor=white" alt="GitHub Sponsors"></a>
 </p>
 
-<p align="center"><a href="README.md">Русский</a> · <b>English</b></p>
+SA:COOP brings the GTA San Andreas story to **2–4 players**. The host supplies the save and starts missions.
+Each teammate joins the same world with their own character, money, clothes and skills.
 
-SA:COOP is a mod for GTA San Andreas that lets two, three or four players go through the story together over the
-network. One player is the host: the game runs on their save, and they start the missions. The others connect to them
-and play in the same world as characters of their own, with their own money, skills and look.
+![Playing together in Los Santos](docs/images/hero.jpg)
 
-![CJ and the partner in a green jacket at a wall they have just tagged](docs/images/hero.jpg)
+## Install and connect
 
-## What the mod does
+Requires **GTA San Andreas 1.0 US on Windows**. Downgrade Steam or Rockstar Games Launcher editions first.
+All players need the same mod version and compatible story scripts.
 
-### The story together
+1. Download [SA-COOP.zip](../../releases/latest) and extract it beside `gta_sa.exe`.
+2. Run `install.bat` to install the bundled ASI loader if needed.
+3. Start GTA and press **F9**. Choose **EN** at the top for English.
+4. The host opens **Host a game**, selects a save or **New game**, chooses 2–4 players, and starts the server.
+   Hosting from a running game uses the current world.
+5. Friends open **Join a game**, enter the host's invite code, and connect.
 
-The host starts a mission, but it only begins once all players stand in the marker. If the partner reaches the
-marker first, the host gets an invitation and presses Y to be there at once. The partners see the same texts,
-subtitles, radar blips, markers, race checkpoints and timers, and the texts come in the language of each partner's
-own game. The partners also hear the lines characters say during missions outside cutscenes. Weapons the mission
-gives CJ go to the partners as well. When the story takes all of CJ's weapons, partners near the host lose theirs
-too. Every player gets the mission reward. Enemies attack everyone, and any player can hurt them.
+Share invite codes with your teammates. They contain the host's external IP address.
+Allow `coop-server.exe` through Windows Firewall when prompted.
 
-If the mission moves CJ somewhere else after a cutscene, the partner ends up next to the host. The mission's limits
-on the wanted level apply to a partner near the host, and away from the host the wanted level works as usual. The
-stars a mission gives CJ go to a partner near the host too. The gates and buildings a mission opens or changes change
-for the partner too, as do the parts of the map a mission adds, such as the weed field in "Are You Going To San
-Fierro?". The partner can also take the photos a mission asks for. A partner killed during a mission comes back next
-to the host. The partner watches a mission's in-engine scenes through the same camera as the host.
+UPnP and NAT traversal usually handle connections. If a connection fails, forward **UDP 7788** or configure
+`turn` in `coop/server.ini`. The archive includes a detailed Russian guide, `Инструкция.txt`.
 
-The partner takes part in the missions themselves. They plant the charges in "Dam and Blast" and the bug in
-"Amphibious Assault", drive a bike onto the truck in "Cop Wheels" and throw crates off the train in "Catalyst". They
-see the missions' smoke, searchlight beams and sparks, and their shots raise the alarm. Any player can carry the
-crates in the house robbery with Ryder and load them into the van. In the lowrider contest and the beach dance the
-partner plays next to the host, and their points go into the shared score.
+To update, extract the new archive over the existing files. Settings and teammate profiles are preserved.
+For a new story, the host plays the prologue while teammates wait, then everyone joins CJ at the bike.
 
-If the host gets on a bike or into a vehicle with no seat left, the partner is put straight into the same kind of
-vehicle. In story missions the partner gets a plane or a helicopter of their own, such as the Hydra in "Vertical
-Bird", and in Toreno's missions a jetpack of their own as well. In Zero's missions the partner gets a minigun of their
-own next to the host's turret or an RC toy of their own: one with a gun or, in "New Model Army", with a magnet. A
-partner far from Zero's shop gets the toy at its door. When the host is a gunner on a helicopter or a car, as in "The
-Da Nang Thang" and "Reuniting the Families", the partner shoots beside them from the other side. If the host reaches a
-mission's objective while the partner is still on the way, the mission waits for the partner up to 45 seconds.
+## Features
 
-<p align="center">
-  <img src="docs/images/jetpack.gif" width="49%" alt="The host and the partner fly up the shaft with jetpacks in Black Project">
-  <img src="docs/images/rc-plane.gif" width="49%" alt="The partner's radio-controlled plane flies over a San Fierro street in a mission for Zero">
-  <img src="docs/images/lowrider.gif" width="49%" alt="The lowrider contest on the partner's screen: their lowrider hops, the host's lowrider is behind it">
-  <img src="docs/images/dance.gif" width="49%" alt="The host and the partner dance side by side on the beach">
-</p>
-
-### Cutscenes
-
-Cutscenes play for all players at the same time, and the partner is next to CJ in them. The partner walks with him:
-follows CJ at a walking pace without jumping from spot to spot, and while standing listens to the conversation and
-turns to whoever is talking. The paths for 130 cutscenes are worked out in advance from the game's map, and the second
-and third partner have paths of their own. During drives the partner rides in the car with CJ if there is a seat. A
-cutscene can only be skipped by everyone together: one player presses Enter, and the others agree with Enter or
-refuse with Esc.
-
-<p align="center"><img src="docs/images/cutscenes.gif" alt="The partner in a green jacket next to CJ in three cutscenes"></p>
-
-### A shared world
-
-All players have the same pedestrians, people inside buildings, cars and police, the same time of day and the same
-weather. Pedestrians chat and swear the same way for everyone, and police roadblocks with their barriers are seen by
-all. When one player drives away, the pedestrians and cars near another player move over to that player's game
-instead of vanishing. Knocked-down lamp posts and signs, broken glass and crates, fire, gang territories, the building
-doors a mission opens and the doors of Pay 'n' Spray and mod shops look the same for everyone. Horseshoes, oysters,
-snapshots and tags count toward the shared world. New pedestrians and cars no longer appear right in front of another
-player. Gang members from different players' games fight each other, the police chase whoever is wanted, and SWAT
-officers slide down ropes from the helicopter for everyone. Police officers move the same way on every screen: they
-hold a pistol in both hands, crouch to shoot and sidestep around their target. The police helicopter's gun fires on
-every screen, and police cars no longer vanish for the partner when the host dies. Bodies and wrecks thrown by
-explosions lie in the same places for everyone. Pool balls, shooting range targets and other activity objects are
-seen by the other players.
-
-### Cars
-
-Each player drives on their own or rides as a passenger with another. A passenger can shoot from the window: the
-right mouse button leans out with the gun, the left one fires. A passenger fires the RPG and the heat-seeking
-launcher that way too, only without the lock-on. The driver also aims and fires anywhere while holding the right
-mouse button, on a motorbike as well. Everyone in a car hears one radio: the driver changes the station, and the
-passengers hear the same song from the same point. Tuning and damage are visible to the other players. Plane landing
-gear and nozzles, tank and fire truck turrets, hydraulics, the horn, the police helicopter's searchlight, trailers,
-the tow truck and the airport tug all work. Explosions, rockets, grenades, tank shells, fire truck water, NPC
-drive-bys, trains and RC toys are seen by everyone. Any player can leave a car in the garage at a safe house or take
-one out, and the host's world keeps them.
+- **Story co-op.** Missions begin when everyone reaches the marker. Objectives, dialogue, rewards, mission weapons,
+  checkpoints and world changes are shared. Teammates can complete mission tasks, fly their own aircraft,
+  use jetpacks and RC toys, and join vehicle gunner sections.
+- **Shared cutscenes.** Teammates appear beside CJ and watch synchronized scenes. Skipping requires everyone's agreement.
+- **Shared world.** Traffic, pedestrians, police, weather, time, fires, damage, collectibles, properties and gang territories
+  stay synchronized as players travel.
+- **Vehicles.** Drive separately or ride together, shoot from vehicles, share the driver's radio, tune cars and use trailers,
+  tow trucks, trains, hydraulics and safe-house garages.
+- **Player progress.** Money, appearance, gym progress and weapon skills belong to each player. Driving skills use the team's
+  best values. Completed activities and their completion rewards count for everyone. The host saves profiles by nickname.
+- **Activities.** Invite teammates to jobs, races and challenges with **Y** within 20 seconds of starting. Press **U**
+  during that window to challenge someone to a contest. Invitations use **Y/N**. Pool and contests support two players.
+- **Communication.** Text and proximity voice chat, shared map waypoints, player name tags and temporary ping beacons.
+- **Customization.** Named skins with previews and native movement animations, plus an animation menu with poses, dances,
+  paired interactions and support for custom IFP files.
+- **Team rules.** The host controls friendly fire, shared lives and teammate teleport requests. Players choose English
+  or Russian independently in the F9 window.
 
 <p align="center">
-  <img src="docs/images/drift.gif" width="49%" alt="A black sports car pulls away and drifts through a bend">
-  <img src="docs/images/drive-by.gif" width="49%" alt="CJ drives with the partner beside him, then guns fire from the car's windows on the move">
+  <img src="docs/images/cutscenes.gif" width="49%" alt="Teammates beside CJ in cutscenes">
+  <img src="docs/images/drive-by.gif" width="49%" alt="Players shooting from a moving car">
+  <img src="docs/images/animations.gif" width="49%" alt="The animation picker and a dance">
+  <img src="docs/images/pool.gif" width="49%" alt="Two players playing pool">
 </p>
 
-### Your own progress
+## Controls
 
-Food and the gym, weapon skills, clothes, haircuts, tattoos and money are separate for each player. Driving,
-motorbike, cycling and flying skills are shared: everyone has the best of the players' skills. The stats in the menu
-are shared too. A side job or challenge completed by one player counts for everyone, reward included. The export list
-at the docks is shared: a car one player delivers is crossed out for everyone, and everyone gets the money. What a
-player does at a diner, the gym, a barber's or a tattoo parlour, the other players see as well, along with a tray of
-food, a cigarette, a phone at the ear, a parachute jump, a fighting style learned at the gym, crouching with its
-rolls, reloading and walking in through shop doors. If a player changes their character model, for example with a
-skin selector, the others see the new model too.
+| Action | Keyboard / mouse | Controller |
+|---|---|---|
+| Co-op window | F9 | Select + D-pad Up |
+| Ping the camera's target | F5 | Select + Circle |
+| Skin picker | F6 | Select + Cross |
+| Animation menu | U | Select + Square |
+| Players, gifts and teleport requests | F2 | Select + Triangle |
+| Revive a nearby teammate | Hold H | Hold Triangle |
+| Enter a car as passenger | G | Hold Triangle |
+| Aim / fire from a vehicle | Right / left mouse button | Game controls |
+| Text chat | T, then Enter to send or Esc to close | |
+| Voice chat | Hold B by default | |
+| Hide / show the interface | F7 | |
+| Offer / accept / decline a cutscene skip | Enter / Enter / Esc | |
 
-The friend comes into the host's world as their own CJ, in the clothes and with the tattoos their CJ has in their own
-game. If the friend joined from the main menu, the look comes from their latest save. When the host saves the game,
-the friend's progress is saved on the host's side as well. The partner's school lessons and medals, side job levels,
-gym, unique stunt jumps and businesses stay with the partner after the host's world is loaded again. When the host
-loads a save, the partner's weapons become what they were at that save.
+In the skin picker, use the D-pad or left stick to move, Cross to apply, Circle to return, and L2/R2 to scroll.
+Change chat, passenger, player list, voice and revive keys through **F9 → Keys**. Voice supports hold-to-talk,
+toggle, always-on and off modes.
 
-![The partner in their own clothes boxes at the gym](docs/images/boxing.jpg)
+### Pings and revives
 
-### Friendly fire
+Point the camera at an object or surface and press the ping shortcut. Nearby teammates in the same area see a
+pulsing beacon for **6.5 seconds**, matching your chosen radar blip colour.
 
-Before creating the game, the host can allow friendly fire with a checkbox in the F9 window. Then the players can
-hurt and kill each other with bullets, fists, explosions, fire and cars. Without the checkbox they cannot harm
-each other, and a stealth kill with a knife from behind does not work either. A player knocked down falls and gets up
-on every screen. Next to it is the "Shared life" checkbox: with it, any player's death fails the host's story mission.
-Without it, a host who dies gets up next to a partner a couple of seconds later and the mission goes on. It fails only
-when everyone dies.
+With shared lives off, fatal damage on foot can leave you downed when a teammate is nearby in the shared world.
+A teammate can approach and hold the revive button for **5 seconds**. The default rescue window is **60 seconds**.
+With shared life enabled, any player's death fails the host's story mission.
 
-### Russian and English
+### Commands and appearance
 
-The SA:COOP window, the chat and the hints come in Russian and English. The language switch is at the top of the
-F9 window, and each player picks their own: the host can play in Russian while the partner plays in English.
-
-### Animations
-
-The U key opens the animations window. It holds 250 animations: emotions, poses, actions and dances from the game,
-16 animations for two (handshakes, gang greetings, a hand on the shoulder, a deal, a gift, an argument, a kiss) and 88
-animations from other authors' packs, among them Fortnite dances, breakdance and parkour. The tabs hold the main
-animations of SA-MP role play servers: sitting, lying, smoking, eating, the phone, gestures. The chosen animation shows
-at once in the window on a copy of your CJ, and the other players see it on your character. Your partner accepts an
-animation for two with Y, and their CJ steps in front of yours. Poses, stances, dances and sitting last until you press
-Space or F. A short animation stops at any movement. Your own animations from .ifp files go into the `coop/anims`
-folder: another player sees them if they have the same file. The mod brings the pack animations along, and they load
-on their own and replace nothing in the game.
-
-<p align="center"><img src="docs/images/animations.gif" alt="The animations window with a copy of CJ, then CJ dances on Grove Street"></p>
-
-### Side jobs and activities together
-
-Side jobs (taxi, paramedic, firefighter, vigilante, pimp, courier), races, schools, the shooting range, trucking and
-the quarry are played by each player in their own game. A vehicle side job is started by whoever drives. A side job, a
-race, a stadium event, the quarry, a valet shift or a shooting range round can be played together: within 20 seconds
-of its start press Y, and the other players get an invitation (Y: yes, N: no). Whoever accepts sees its markers,
-checkpoints, timers and hints, can ride along and help, for example put out burning cars or shoot the criminals, and
-gets the same money at its end. The job's levels stay with the player who started it, and the reward for completing
-the job goes to everyone. Taxi fares, stolen goods, trucking runs and quarry jobs count together for the reward.
-
-In a joint race, a story race too, the second player races as well, with their own checkpoints and their own place on
-the screen. Whoever rides with a racer sees the racer's place. Pool for two is played for money: the loser gives the
-stake to the winner. Two players can be at one school at once: during a lesson the other player's car is not shown
-and does not get in the way.
-
-<p align="center">
-  <img src="docs/images/firefighters.gif" width="49%" alt="The players' two fire trucks put out a burning car">
-  <img src="docs/images/ambulance.gif" width="49%" alt="The partner's ambulance brings a patient to the hospital, a second ambulance stands nearby">
-  <img src="docs/images/courier.gif" width="49%" alt="The partner delivers packages on a BMX as a courier in Los Santos">
-  <img src="docs/images/pool.gif" width="49%" alt="The host and the partner play pool">
-</p>
-
-An activity can be turned into a contest. Within 20 seconds of its start press U, and the other players get a
-challenge (Y: yes, N: no). Whoever accepts first plays the same in their own game. While the contest is on, both
-results are shown at the top of the screen, and at the end each player learns who won. Contests work for basketball,
-pool, blackjack, roulette, the wheel of fortune, dancing in a club, the lowrider contest, the stadium events, races and
-triathlons.
-
-<p align="center">
-  <img src="docs/images/club.gif" width="49%" alt="A dance contest: the host and the partner dance in a club, both scores at the top">
-  <img src="docs/images/8-track.gif" width="49%" alt="An 8-Track stadium contest: the partner races with the contest board at the top, then the host's car">
-</p>
-
-### Everything else
-
-There is text chat and voice chat, and the farther away the partner is, the quieter they sound. A waypoint one player
-sets on the map shows up on the other players' radar, and a house one player buys appears for everyone. Above the
-partner's head you see their health, armour, weapon and wanted stars, shown over their RC toy while they fly one.
-Turf wars near the host are the host's, and all players' kills of rival gang members provoke them. A partner more
-than 100 m from the host can start a war of their own, and the host sees in the chat which district it is for and how
-it ended. Cheats for the weather, traffic, pedestrians and game speed work for everyone, while weapon, money and
-health cheats only work for the player who typed them. Theme cheats such as the beach party change the pedestrians
-for everyone, but only the player who typed the code gets the outfit and the katana.
-
-![The players' chat and the name tag over another player with their health and weapon](docs/images/chat.jpg)
-
-## Installation
-
-You need GTA San Andreas version 1.0 US, either clean or a modded build. If your game comes from Steam or the
-Rockstar Games Launcher, downgrade it to 1.0 US first, for example with GTA SA Downgrader.
-
-1. Download `SA-COOP.zip` from the [Releases](../../releases) page and unpack it into the game folder so that
-   `coop.asi`, `install.bat` and the `coop` folder end up next to `gta_sa.exe`.
-2. Run `install.bat`. In a clean game it installs an ASI plugin loader, and in a build that already has one (for
-   example, the one Widescreen Fix brings) it changes nothing.
-3. Start the game. The SA:COOP window opens in the main menu, and later you can bring it up with F9. Enter your
-   nickname. To switch the window to English, click EN at the top of it.
-
-The archive also contains a detailed player guide in Russian, `Инструкция.txt`.
-
-To update, unpack the new archive over the old files. Your settings and the partners' progress stay, and you don't
-need to run `install.bat` again. All players need to update: different versions of the mod do not connect to each
-other.
-
-## How to play
-
-The host presses F9, opens the "Host a game" tab, picks a save and clicks "Start the server". If the host is
-already in the game, the server is created from the current game. Beside the password the host chooses how many will
-play: 2, 3 or 4. The "Friendly fire" checkbox above the button lets the players hurt each other. A couple of seconds
-later the window shows a code like `XXXX-XXXX-XXXX`, which the host sends to the friends. The code contains the host's
-external IP address, so only send it to the people you play with.
-
-The friend opens the "Join a game" tab, pastes the code and clicks "Connect". After that, the host's world loads
-on the friend's side.
-
-<p align="center"><img src="docs/images/menu.jpg" alt="The SA:COOP window in Russian: the Host a game tab with 4 players chosen" width="600"></p>
-
-The picture shows the window in Russian. EN at the top switches it to English.
-
-You can also start the story from the very beginning: the last item in the save list is "New game". The host
-plays the prologue alone, while the friend connects right away and waits. When CJ gets on the bike, the friend
-appears next to him, and there is a bike for the friend too. The friend's money, weapons, skills and look start
-over in a new game too. When the host goes back to an older save, the friend has everything they had in that game.
-When the host loads a save, the friend's weapons become what they were at that save.
-
-You don't need Hamachi or Radmin. The server opens its port through UPnP or punches through NAT. If neither works
-with your internet providers, the host can turn on a relay with the `turn` line in `coop\server.ini`, as the
-guide describes.
-
-When the host creates a game, the mod checks Windows Firewall. If it would keep friends from the server, Windows
-asks to allow changes, and after "Yes" the mod allows `coop-server.exe` on every network. Without that the friend
-sees "The server does not answer", even on a home network. If an antivirus removed or blocked `coop.asi` or
-`coop-server.exe`, add the game folder to its exclusions and unpack the archive again.
-
-## Keys
-
-| Key | What it does |
+| Command | Action |
 |---|---|
-| F9 | the SA:COOP window |
-| F5 or Select + Circle | place a temporary beacon where the camera is pointing |
-| F6 or Select + Cross | open the skin picker |
-| H or Triangle (hold) | revive a nearby downed teammate |
-| T | chat: Enter sends a message, Esc closes the chat |
-| B | voice chat while the key is held (the mode is set in the F9 window) |
-| G | get into the nearest car as a passenger, by the nearest door |
-| Triangle (hold) | on a gamepad: get in as a passenger |
-| Right mouse button | in a vehicle with a gun: lean out and aim, fire with the left button |
-| F2 | the players: money, giving money and weapons, and with more than two players their numbers and /tp and /tphere by a click |
-| U | animations: emotions, poses, actions, dances, animations for two and your own |
-| F7 | hide the interface and bring it back |
-| Enter / Esc | in a cutscene: offer to skip it, agree / refuse |
+| `/help`, `/players` | Help and player numbers |
+| `/tp [player]`, `/tphere [player]` | Request teleport to / summon a teammate, answered with Y or N |
+| `/kick <nickname> [reason]` | Host removes a player |
+| `/anims [number]` | Open the animation menu or play an animation |
+| `/skin menu` | Open the skin picker |
+| `/skin <ID>`, `/skin next`, `/skin prev` | Choose or cycle character models |
+| `/skin 0` | Return to CJ |
 
-The chat supports the `/help`, `/players`, `/tp` (go to your partner unless they are inside a building) and `/tphere`
-(bring your partner over) commands. With more than two players the command takes the player's number: `/tp 2`,
-`/tphere 3`. The F2 window shows the numbers. Your partner answers `/tp` and `/tphere` with Y or N. The host can kick a player
-with `/kick <nickname> [reason]` and, creating the game, turn `/tp` and `/tphere` off for partners.
-The `/anims` command opens the animations window, and `/anims` with a number plays that animation at once.
-The `/skin` command changes your character: `/skin 105` puts on skin number 105 (the game's ped model ID), `/skin next` and
-`/skin prev` go through the skins one by one, and `/skin 0` is CJ again. The other players see your skin. Your choice is kept
-in `coop.ini` (`[player]`, `skin`) and put on again when the game gives CJ back, after a load or a cutscene for example.
+Skin choices persist in `[player]` under `skin` in `coop/coop.ini`. **Use skin animations** selects the skin's idle,
+walk, run and sprint set and saves as `skin_animations`. Change skins while standing freely on foot.
+Special character slots 290–299 are excluded, and CJ's clothing applies to CJ.
 
-Open the skin picker with F6 or `/skin menu` to browse named skins and preview them before applying one. **Use skin animations**
-switches idle, walk, run and sprint to the selected skin's movement set by default. The setting is saved as
-`skin_animations` under `[player]`.
+Paired animations require the partner's acceptance with **Y**. Press **Space** or **F** to leave a sustained pose.
+Put custom `.ifp` files in `coop/anims`. Teammates need matching files to see those animations.
 
-Hold Select on a controller and press D-pad Up for the co-op window, Cross for skins, Square for animations or Triangle
-for the player list. In the skin picker, use the D-pad or left stick to move, Cross to apply, Circle to go back and
-L2/R2 to scroll.
+## Settings
 
-Point the camera at a surface or object and press F5 or Select + Circle to place a pulsing cyan beacon. Nearby
-teammates in the same area can see it for 6.5 seconds.
+Edit `coop/coop.ini` for these options.
 
-With shared lives off, a player who takes fatal damage on foot in the shared world can go down if a teammate is nearby.
-Walk up to a downed teammate and hold H or Triangle for five seconds to revive them. The default revive window is
-60 seconds. The `down_seconds` and `revive_seconds` settings under `[game]` adjust those times.
+| Section | Setting | Effect |
+|---|---|---|
+| `[game]` | `down_seconds`, `revive_seconds` | Rescue window and revive duration |
+| `[game]` | `partner_blip = 0`, `name_tags = 0` | Hide teammate radar marks or name tags |
+| `[game]` | `gps = 0` | Disable road routes to waypoints and mission destinations |
+| `[game]` | `windowed = 1`, `borderless = 1` | Use a borderless window |
+| `[game]` | `window_title = ...` | Give the window a custom title for recording |
+| `[debug]` | `clean_screen = 1` | Hide the mod's chat, windows and overlays |
 
-<p align="center"><img src="docs/images/players.jpg" alt="The F2 window in Russian: the host and three partners with their numbers, money and buttons" width="600"></p>
+## Compatibility and limitations
 
-The chat, passenger, player list, voice and revive keys can be changed in the F9 window, the "Keys" button. The microphone's
-mode is picked there too: while the key is held, a press turns it on and off, always on or off. The `[game]` section
-of `coop\coop.ini` can hide the partner's radar mark (`partner_blip = 0`) and the name tag over their head
-(`name_tags = 0`), for a shoot-out where you have to find each other. `gps = 0` there turns off the road route to
-the map waypoint or the mission's destination that the radar shows in a vehicle. Change the keys if, say, T gets in the way of typing cheat
-codes.
+- Use the same nickname to keep your saved profile. Loading a host save restores teammate weapons to that save's state.
+- The host starts story missions and Cesar's races. Teammates receive newly unlocked story content when the world reloads,
+  usually at a mission marker or after ten minutes without missions.
+- Teammate girlfriend progress comes from the host. Business income belongs to the shared world.
+- Teammates cannot board the host's trains during story missions.
+- Shop staff and activity characters may differ between games. Broken street objects reset after a few minutes.
+- Each player hears their own User Track Player music.
+- Modloader is supported. Players see their own models, textures and effects. Everyone needs mods that change story scripts
+  or saves. A custom model requires the same model installed on other clients, and unavailable player skins appear as CJ.
 
-Three more lines help to record video in windowed mode (`windowed = 1`). `borderless = 1` takes the frame off the
-window, so a window the size of the screen looks like a fullscreen game. `window_title = ...` gives the window a title
-of its own, which lets recording software tell one copy of the game from another. `clean_screen = 1` in the `[debug]`
-section clears everything the mod draws: the chat, the names over the players and the windows.
+## Bugs and support
 
-## Limitations
+Report issues through [GitHub Issues](../../issues/new/choose) or the [Telegram group](https://t.me/sacoop_forum).
+Include the mod version, game build and steps to reproduce. The issue form accepts English answers.
 
-- The partner's girlfriend progress is not kept: it comes from the host's world. The income of the partner's
-  businesses lies in the shared world, and any player can pick it up, as with the host's.
-- Story missions and Cesar's races run in the host's game: a mission does not begin without the host in the marker.
-  With three or four players it begins once they all stand in the marker.
-- Pool and contests are for two. The others meanwhile do something of their own or watch.
-- During the host's story mission the partner cannot get into the host's trains. Outside missions any player can
-  get into a train another player is not driving and drive it.
-- The partner gets story progress (new areas, gyms) by loading the host's world. This happens in the next
-  mission's marker, or after 10 minutes without missions, and takes a couple of seconds. The partner keeps their
-  position, weapons and progress.
-- The host keeps the partner's profile under the partner's nickname. With a different nickname, money and skills
-  start over.
-- The Ammu-Nation clerk, the shooting range's shooters, the casino dealers and other people that shop and activity
-  scripts place are made by each game for its own player. Different players may see them looking different.
-- Whatever gets knocked down or broken on the streets stays that way for a few minutes, then the map puts
-  everything back, as in the normal game.
-- If the host and the partner are both behind a "symmetric" NAT (common with mobile internet), the invite code cannot
-  connect them without a relay. Then you need `turn` or port 7788/UDP forwarded to the host's computer.
-- Each player hears their own User Track Player. When the driver plays their own music, the passenger hears
-  their own, or the radio is off for them if they have none.
-- Only `gta_sa.exe` version 1.0 US is supported. The players' builds may differ, but mods that change the story or
-  the saves are needed by everyone. If the partner's `data\script\main.scm` differs from the host's, the host's
-  world does not load for them, and the mod says so in the chat.
-- Mods installed through modloader work. Each player sees their own models, textures and effects. A car that a mod
-  adds under a new ID is only visible to the player who has that mod.
-- `/skin` works while you stand free on foot, not in a cutscene or in a scene the game controls. It takes the people of the
-  game (not the special characters, 290-299). A skin is a model of its own: CJ's clothes do not apply to it. A player whose
-  game has no such model (an ID a mod added) sees CJ in its place.
+Attach `coop/coop.log` from the affected player, `coop/crash.log` for crashes, and the host's
+`coop/server-data/server.log` for connection problems. Use `coop/coop.old.log` if the game has restarted since the issue.
 
-## Bugs and ideas
+## Build from source
 
-Report bugs, crashes and ideas in [Issues](../../issues/new/choose). A short form opens there: what happened, how
-to make it happen again, the mod version and which game you have. The form is in Russian, but you can answer in
-English. A [Telegram group](https://t.me/sacoop_forum) is also available if you encounter difficulties sending to GitHub.
+Requires Windows, Python 3.10+ and PowerShell. Download the llvm-mingw toolchain, then build the distribution.
 
-With a bug report, attach `coop\coop.log` from the game folder of the player who had the problem. If the game
-crashed, also attach `coop\crash.log`, and if you cannot connect, attach the host's `coop\server-data\server.log`.
-The log of the previous run is kept as `coop\coop.old.log`: send it if the game was started again after a crash.
-
-## Building from source
-
-You need Windows, Python 3.10 or newer and PowerShell. A script downloads the compiler (llvm-mingw) into the
-`toolchain` folder:
-
-```
+```powershell
 powershell -ExecutionPolicy Bypass -File tools/get-toolchain.ps1
-python tools/build.py          # coop.dll, coop-server.exe and vorbisFile.dll in build/release/bin
-python tools/build.py dist     # the same plus the ready archive dist/SA-COOP.zip
-python tools/fsd_check.py      # checks the dependencies between the layers
-python tools/i18n_check.py     # checks that every text of the game has its English one
+python tools/build.py dist
+python tools/fsd_check.py
+python tools/i18n_check.py
 ```
 
-GitHub Actions builds every push and keeps the archive in the build artifacts. A tag like `v0.2.0` publishes a
-release with `SA-COOP.zip` attached.
+The release archive is written to `dist/SA-COOP.zip`. GitHub Actions also produces build artifacts and publishes
+releases for version tags.
 
-## Project layout
-
-The sources follow Feature-Sliced Design. Each of the three programs is a separate application with the layers
-`app`, `pages`, `widgets`, `features`, `entities` and `shared`, and the code they share lives in `src/common`.
-
-```
-src/
-├── client/        coop.asi, runs inside the game
-│   ├── app/       entry point, main loop, game patches
-│   ├── pages/     the F9 window
-│   ├── widgets/   the overlay on top of the game
-│   ├── features/  story and cutscenes, progress, garages, voice, weather and more
-│   ├── entities/  session, player, vehicle, ped, mission, profile
-│   └── shared/    engine wrappers, network, drawing and input, config
-├── server/        coop-server.exe, the server for 2 to 4 players
-├── loader/        vorbisFile.dll, the ASI loader for a clean game
-└── common/        protocol, network, log and utilities for all three
-```
-
-A layer only includes the layers below it and its own slice, which `tools/fsd_check.py` checks. How the mod works
-inside and why it is built this way is described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (in Russian).
+Sources are split across `src/client`, `src/server`, `src/loader` and `src/common`. Each application follows
+Feature-Sliced Design. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for implementation details in Russian.
 
 ## Third-party code
 
