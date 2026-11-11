@@ -858,6 +858,7 @@ uint8_t WantedLevel(CPlayerPed* me) {
 }
 
 void FillCommon(OnFootState& st, CPlayerPed* me) {
+    st.walkGroup = (uint8_t)std::clamp(Field<int32_t>(me, 0x4D4), 0, 0xFE);
     st.health = ClampByte(me->Health());
     st.wanted = WantedLevel(me);
     st.armour = ClampByte(me->Armour());
@@ -898,6 +899,7 @@ void WriteCommon(Writer& w, const OnFootState& st) {
     w.U16(st.ammo);
     w.I8(st.area);
     w.U8(st.wanted);
+    w.U8(st.walkGroup);
 }
 
 void ReadCommon(Reader& r, OnFootState& st) {
@@ -909,6 +911,7 @@ void ReadCommon(Reader& r, OnFootState& st) {
     st.ammo = r.U16();
     st.area = r.I8();
     st.wanted = r.U8();
+    st.walkGroup = r.U8();
 }
 }  // namespace
 
@@ -1128,9 +1131,38 @@ RemotePlayer* Players::Get(uint8_t id) {
     return it == m_remote.end() ? nullptr : &it->second;
 }
 
+// GTA SA 1.0 US: CPedModelInfo::m_nAnimType is at +0x24 (plugin-sdk).
+// The model's peds.ide animation group is independent of the player's current group.
+int ModelWalkGroup(int model) {
+    if (!IsPedModel(model)) return -1;
+    void* info = Ref<void*>(addr::ModelInfoPtrs + (uintptr_t)model * 4);
+    if (!info) return -1;
+    int group = Field<int32_t>(info, 0x24);
+    return group >= 0 && group < (int)Ref<uint32_t>(0xB4EA28) ? group : -1;
+}
+
+// Avoid passing a group whose animation block is not yet streamed to SetMoveAnim.
+bool PlayerWalkGroupReady(int group) {
+    if (group < 0 || group >= (int)Ref<uint32_t>(0xB4EA28)) return false;
+    uintptr_t groups = Ref<uintptr_t>(0xB4EA34);  // CAnimManager::ms_aAnimAssocGroups
+    if (!groups) return false;
+    uintptr_t g = groups + (uintptr_t)group * 0x14;
+    uintptr_t block = Ref<uintptr_t>(g);
+    if (block && Ref<uint8_t>(block + 0x10) && Ref<void*>(g + 4)) {
+        // Player locomotion uses animation IDs 0 through 4, from walk to walk start.
+        return Ref<int32_t>(g + 0xC) == 0 && Ref<uint32_t>(g + 8) >= 5;
+    }
+
+    // A group may not have associations yet if its IFP has never been loaded.
+    const char* name = Call<0x4D3A30, const char*>(group);  // CAnimManager::GetAnimBlockName
+    int index = name ? Call<0x4D3990, int>(name) : -1;      // CAnimManager::GetAnimationBlockIndex
+    if (index >= 0) RequestModel(anim::kIfpBase + index, 2);
+    return false;
+}
+
 // as SET_PLAYER_MODEL (0x47A820) changes it: a new clump, the walk set kept. A special character (290-299) must be
 // in memory already: it is loaded by name (Peds::SpecialModelFor). For the other players' copies only.
-bool Players::SetModel(CPlayerPed* ped, int model) {
+bool Players::SetModel(CPlayerPed* ped, int model, bool useModelAnimations) {
     if (ped->ModelIndex() == model) return true;
     bool special = model >= 290 && model <= 299;
     if (model != 0 && (!IsPedModel(model) || (special ? !IsModelLoaded(model) : !LoadModelNow(model)))) return false;
@@ -1146,7 +1178,12 @@ bool Players::SetModel(CPlayerPed* ped, int model) {
     CallVirtual<8>(ped);                        // CEntity::DeleteRwObject
     Field<uint16_t>(ped, 0x22) = 0xFFFF;        // CEntity::m_nModelIndex: SetModelIndex rebuilds only a new one
     CallVirtual<5>(ped, (uint32_t)model);       // CPed::SetModelIndex
-    Field<int32_t>(ped, 0x4D4) = walk;
+    // SetModelIndex does not reliably install the model's walk group on CPlayerPed.
+    // Use CPedModelInfo::m_nAnimType explicitly; preserve CJ's group when disabled.
+    int desired = useModelAnimations && model != 0 ? ModelWalkGroup(model) : walk;
+    int group = PlayerWalkGroupReady(desired) ? desired : 0;
+    Field<int32_t>(ped, 0x4D4) = group;
+    if (ped->RwObject()) CallMethod<0x609650>(ped);  // CPlayerPed::ReApplyMoveAnims
     return true;
 }
 
@@ -1559,6 +1596,12 @@ void HoldWayfarerFace(CPed* ped, bool& held) {
 void Players::ApplyState(RemotePlayer& rp) {
     CPlayerPed* ped = rp.ped;
     const OnFootState& st = rp.state;
+    // Replicate the owner's movement style as well as their skin.
+    // Group is sent in on-foot, driver and passenger snapshots, so it survives seat changes.
+    if (ped->RwObject() && !ped->InVehicle() && st.walkGroup != 0xFF && Field<int32_t>(ped, 0x4D4) != st.walkGroup && PlayerWalkGroupReady(st.walkGroup)) {
+        Field<int32_t>(ped, 0x4D4) = st.walkGroup;
+        CallMethod<0x609650>(ped);  // CPlayerPed::ReApplyMoveAnims
+    }
     NoteRideAnims(rp);
     HoldWayfarerFace(ped, rp.faceHeld);
 
@@ -2239,6 +2282,7 @@ void Players::SendLocalState() {
     st.area = me->AreaCode();
     st.moveState = (uint8_t)me->MoveState();
     st.wanted = WantedLevel(me);
+    st.walkGroup = (uint8_t)std::clamp(Field<int32_t>(me, 0x4D4), 0, 0xFE);
     CPad* pad = GetPad(0);
     if (pad->DisablePlayerControls == 0 && !game::MenuActive()) st.pad = PadState::From(pad->NewState);
     CameraState& c = st.cam;

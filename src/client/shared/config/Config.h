@@ -8,6 +8,7 @@ struct ClientConfig {
     // [player]
     std::string nickname = "Player";
     bool english = false;             // language = en: the interface in English instead of Russian
+    bool skinAnimations = true;       // skin_animations = 1: use the selected ped model's native animation group
     int skin = 0;                     // skin = N: the model our player wears instead of CJ (0: CJ); /skin changes it
 
     // [connect]

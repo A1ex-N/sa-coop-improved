@@ -316,6 +316,11 @@ void RenderSkinsMenu() {
     else g.Text(FONT_SMALL, cx, noteY, TR("Выберите модель персонажа. CJ возвращает стандартный вид.",
                                           "Choose a character model. CJ restores the default appearance."), kSaMuted, TEXT_SHADOW);
 
+    bool skinAnimations = skin::UseSkinAnimations();
+    if (w::Checkbox("skin-native-animations", cx, footY - rowH - 12 * s,
+                    TR("Анимации выбранного персонажа", "Use skin animations"), skinAnimations))
+        skin::SetSkinAnimations(skinAnimations);
+
     const char* applyText = TR("Выбрать", "Apply");
     const char* closeText = TR("Закрыть", "Close");
     float closeX = cx + cw - g.TextWidth(FONT_MENU, closeText);

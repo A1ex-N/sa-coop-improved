@@ -128,6 +128,7 @@ void OnFootState::Write(Writer& w) const {
     w.I8(area);
     w.U8(moveState);
     w.U8(wanted);
+    w.U8(walkGroup);
     pad.Write(w);
     cam.Write(w);
 }
@@ -147,6 +148,7 @@ bool OnFootState::Read(Reader& r) {
     area = r.I8();
     moveState = r.U8();
     wanted = r.U8();
+    walkGroup = r.U8();
     pad.Read(r);
     cam.Read(r);
     return r.Ok();

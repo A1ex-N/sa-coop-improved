@@ -29,6 +29,7 @@
 #include "shared/game/Game.h"
 #include "shared/game/Script.h"
 #include "shared/lib/core/Core.h"
+#include "shared/lib/memory/Memory.h"
 #include "shared/ui/chat/Chat.h"
 #include "pages/skins-menu/SkinsMenu.h"
 
@@ -50,6 +51,28 @@ bool g_loaded = false;
 uint64_t g_readySince = 0, g_nextTryMs = 0, g_windowMs = 0, g_pausedUntilMs = 0;
 int g_tries = 0;
 std::set<int> g_ours;  // models our choices asked the streaming for: let go of when the player moves on to another
+
+bool CutsceneOn();
+
+bool RefreshMovement(CPlayerPed* ped) {
+    if (!Cfg().skinAnimations || !ped->RwObject() || ped->InVehicle() || ped->ModelIndex() == 0) return false;
+    int group = ModelWalkGroup(ped->ModelIndex());
+    if (!PlayerWalkGroupReady(group)) return false;
+    auto& current = Field<int32_t>(ped, 0x4D4);
+    if (current != group) {
+        current = group;
+        CallMethod<0x609650>(ped);  // CPlayerPed::ReApplyMoveAnims
+    }
+    return true;
+}
+
+using ProcessAnimGroupsFn = void(__fastcall*)(CPlayerPed*, void*);
+ProcessAnimGroupsFn g_origProcessAnimGroups = nullptr;
+void __fastcall HookProcessAnimGroups(CPlayerPed* ped, void* edx) {
+    // The vanilla controller selects CJ's locomotion group during ProcessControl.
+    if (ped == FindPlayerPed(0) && !CutsceneOn() && RefreshMovement(ped)) return;
+    g_origProcessAnimGroups(ped, edx);
+}
 
 bool IsSpecial(int model) { return model >= 290 && model <= 299; }
 
@@ -146,6 +169,9 @@ void AutoWear(CPlayerPed* me, uint64_t now) {
 class Skin : public Module {
 public:
     const char* Name() const override { return "Skin"; }
+    void OnInstallHooks() override {
+        mem::HookFn(0x6098F0, &HookProcessAnimGroups, &g_origProcessAnimGroups, "CPlayerPed::ProcessAnimGroups");
+    }
     void OnGameStarted() override {  // a world made anew: our player is CJ again until the skin goes on
         g_readySince = g_nextTryMs = g_windowMs = g_pausedUntilMs = 0;
         g_tries = 0;
@@ -188,9 +214,12 @@ bool Apply(int model, std::string& why) {
         return false;
     }
     int prev = me->ModelIndex();
-    if (prev == model) return true;
+    if (prev == model) {
+        RefreshMovement(me);
+        return true;
+    }
     int weapon = me->ActiveWeapon().type;  // the gun in the hand goes with the old body
-    if (!Players::SetModel(me, model)) {
+    if (!Players::SetModel(me, model, Cfg().skinAnimations)) {
         why = Format(TR("Скин %d не загрузился.", "Skin %d did not load."), model);
         return false;
     }
@@ -212,6 +241,20 @@ int Current() {
     if (core::IsPlayerReady())
         if (CPlayerPed* me = FindPlayerPed(0)) return me->ModelIndex();
     return g_wanted;
+}
+
+bool UseSkinAnimations() { return Cfg().skinAnimations; }
+
+void SetSkinAnimations(bool enabled) {
+    Cfg().skinAnimations = enabled;
+    if (core::IsPlayerReady()) {
+        std::string ignored;
+        Apply(Current(), ignored);
+    }
+    Ini ini;
+    ini.Load(Cfg().iniPath);
+    ini.SetInt("player", "skin_animations", enabled ? 1 : 0);
+    ini.Save(Cfg().iniPath);
 }
 
 bool Choose(int model, std::string& why) {

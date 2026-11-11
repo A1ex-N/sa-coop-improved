@@ -40,6 +40,7 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
     if (nickname.size() < 2) nickname = "Player";
     english = ToLower(ini.Get("player", "language", "ru")) == "en";  // configs made before the switch were Russian
     skin = std::max(0, ini.GetInt("player", "skin", 0));
+    skinAnimations = ini.GetBool("player", "skin_animations", true);
 
     autoConnect = ini.GetBool("connect", "auto_connect", autoConnect);
     host = ini.Get("connect", "host", host);

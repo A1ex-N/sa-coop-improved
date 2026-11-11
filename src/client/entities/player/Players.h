@@ -11,6 +11,10 @@
 
 namespace coop {
 
+// GTA SA 1.0 US pedestrian movement animation helpers.
+int ModelWalkGroup(int model);
+bool PlayerWalkGroupReady(int group);
+
 // The other player as seen on this machine: a real CPlayerPed (needed for clothes, fat/muscle
 // and player animations) driven by the remote pad/camera through context switching.
 struct RemotePlayer {
@@ -87,7 +91,7 @@ public:
     RemotePlayer* FindByPed(game::CPed* ped);
     RemotePlayer* Get(uint8_t id);
     // the copy's model as SET_PLAYER_MODEL changes a player's (0: CJ in his clothes); false if it cannot be loaded
-    static bool SetModel(game::CPlayerPed* ped, int model);
+    static bool SetModel(game::CPlayerPed* ped, int model, bool useModelAnimations = false);
     const std::map<uint8_t, RemotePlayer>& All() const { return m_remote; }
     // our own mark in this colour on the other players' radar (BlipColour's names, empty: the allies' blue), saved in
     // coop.ini and sent to them

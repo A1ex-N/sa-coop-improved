@@ -73,6 +73,7 @@ struct OnFootState {
     int8_t area = 0;
     uint8_t moveState = 0;
     uint8_t wanted = 0;  // stars, shown on the name tag
+    uint8_t walkGroup = 0xFF; // CPed animation group, 0xFF means unspecified
     PadState pad;
     CameraState cam;
 
