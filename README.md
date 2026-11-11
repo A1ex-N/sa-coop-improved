@@ -1,18 +1,3 @@
-<p align="center">
-  <img src="docs/images/logo.png" alt="SA:COOP" width="440">
-</p>
-
-<p align="center">
-  <a href="https://github.com/Karimov-Akbar/sa-coop/releases/latest"><img src="https://img.shields.io/github/v/release/Karimov-Akbar/sa-coop" alt="Release"></a>
-  <a href="https://github.com/Karimov-Akbar/sa-coop/releases"><img src="https://img.shields.io/github/downloads/Karimov-Akbar/sa-coop/total" alt="Downloads"></a>
-  <a href="https://github.com/Karimov-Akbar/sa-coop/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/Karimov-Akbar/sa-coop/build.yml?branch=main" alt="Build"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Karimov-Akbar/sa-coop" alt="MIT license"></a>
-  <img src="https://img.shields.io/badge/GTA_San_Andreas-1.0_US-orange" alt="GTA San Andreas 1.0 US">
-  <a href="https://t.me/cavalier_mods"><img src="https://img.shields.io/badge/News-Telegram-26A5E4?logo=telegram&logoColor=white" alt="News on Telegram"></a>
-  <a href="https://dalink.to/itscavalier"><img src="https://img.shields.io/badge/Support_the_project-DonationAlerts-F57507" alt="Support the project"></a>
-  <a href="https://github.com/sponsors/Karimov-Akbar"><img src="https://img.shields.io/badge/GitHub-Sponsors-EA4AAA?logo=githubsponsors&logoColor=white" alt="GitHub Sponsors"></a>
-</p>
-
 SA:COOP brings the GTA San Andreas story to **2–4 players**. The host supplies the save and starts missions.
 Each teammate joins the same world with their own character, money, clothes and skills.
 
