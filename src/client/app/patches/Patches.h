@@ -1,5 +1,7 @@
 #pragma once
 
+namespace game { struct CControllerState; }
+
 namespace coop::patches {
 
 // Applies engine patches required by co-op (and optional comfort patches from coop.ini):
@@ -11,6 +13,9 @@ void Apply();
 
 // True while the local player is allowed to receive mouse look (false when our UI owns the mouse).
 bool GameMouseEnabled();
+
+// Consume pause-menu input before the live world runs.
+void FinishPauseMenuInput(bool wasOpen, const game::CControllerState& menuPad);
 
 // Windowed mode: restores our window style/size if the game or RW changed it (called each second).
 void ApplyWindowPlacement();

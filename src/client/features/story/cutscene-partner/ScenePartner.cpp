@@ -97,7 +97,7 @@ bool BlockReady(const char* name) {
     int i = Call<0x4D3990, int>(name);  // CAnimManager::GetAnimationBlockIndex
     if (i < 0) return false;
     if (anim::BlockLoaded(i)) return true;
-    RequestModel(anim::kIfpBase + i, 2);
+    RequestModel(IfpBase() + i, 2);
     return false;
 }
 
@@ -223,7 +223,7 @@ void Extend(const CVector& a, const CVector& b, const CVector& c, void* user) {
         r->x0 = std::min(r->x0, v->x), r->x1 = std::max(r->x1, v->x), r->y0 = std::min(r->y0, v->y), r->y1 = std::max(r->y1, v->y);
 }
 bool IsCar(CEntity* e, Bounds& b) {
-    void* mi = Ref<void*>(addr::ModelInfoPtrs + (uintptr_t)e->ModelIndex() * 4);
+    void* mi = ModelInfoOf(e->ModelIndex());
     auto* col = mi ? Field<uint8_t*>(mi, 0x14) : nullptr;  // CColModel: its box first
     if (!col || IsPerson(e)) return false;
     CVector lo = Field<CVector>(col, 0x00), hi = Field<CVector>(col, 0x0C);
@@ -363,7 +363,7 @@ void BuildGrid(const CVector& cj, float floor) {
         if (!(e->Flags() & 0x80) || Field<uint8_t>(e, 0x34)) continue;  // not drawn, or the LOD of others
         if (std::find(own, own + owned, e) != own + owned) continue;
         if (e->AreaCode() != area && e->AreaCode() != 13) continue;     // another interior
-        void* mi = Ref<void*>(addr::ModelInfoPtrs + (uintptr_t)e->ModelIndex() * 4);
+        void* mi = ModelInfoOf(e->ModelIndex());
         void* col = mi ? Field<void*>(mi, 0x14) : nullptr;  // its bounds: CBaseModelInfo::m_pColModel
         if (col) {
             CVector centre = Transform(e, Field<CVector>(col, 0x18), true);
@@ -1107,7 +1107,7 @@ void OfferAttractors(const Scene& sc, Best& best) {
     Call<0x564A20>(&sc.cj, 9.0f, false, &n, (int16_t)96, ents, true, false, false, true, true);  // CWorld::FindObjectsInRange
     for (int i = 0; i < n; ++i) {
         CEntity* e = ents[i];
-        void* mi = Ref<void*>(addr::ModelInfoPtrs + (uintptr_t)e->ModelIndex() * 4);
+        void* mi = ModelInfoOf(e->ModelIndex());
         if (!mi) continue;
         int count = Field<uint8_t>(mi, 0x0D);  // m_nNum2dEffects
         for (int k = 0; k < count; ++k) {
@@ -1471,7 +1471,7 @@ int SeatsOf(int vehicle) {
     static std::map<int, int> known;
     if (vehicle < 0) return 0;
     if (auto it = known.find(vehicle); it != known.end()) return it->second;
-    void* mi = Ref<void*>(addr::ModelInfoPtrs + (uintptr_t)vehicle * 4);
+    void* mi = ModelInfoOf(vehicle);
     int type = mi ? Field<int32_t>(mi, 0x3C) : -1;  // m_nVehicleType: 0 car, 1 monster truck (bikes, boats, aircraft: no)
     if (type != 0 && type != 1) return known[vehicle] = 0;
     bool had = IsModelLoaded(vehicle);
@@ -3220,7 +3220,7 @@ void DumpWorld(const std::string& path) {
     for (int i = 0; i < n; ++i) {
         CEntity* e = ents[i];
         if (e->AreaCode() != area && e->AreaCode() != 13) continue;
-        void* mi = Ref<void*>(addr::ModelInfoPtrs + (uintptr_t)e->ModelIndex() * 4);
+        void* mi = ModelInfoOf(e->ModelIndex());
         void* col = mi ? Field<void*>(mi, 0x14) : nullptr;     // CBaseModelInfo::m_pColModel
         uint8_t* data = col ? Field<uint8_t*>(col, 0x2C) : nullptr;  // CColModel::m_pColData
         CVector p = e->GetPosition();

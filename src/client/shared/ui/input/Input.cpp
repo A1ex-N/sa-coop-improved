@@ -48,6 +48,19 @@ void Input::Install(void* hwnd) {
     g_focusMenuHooked = mem::RedirectCallFn(0x748063, &HookFocusMenu, &g_origFocusMenu);
 }
 
+// a letter or a digit as on the key cap whatever the layout ("Е" for T in a Russian one), the rest by Windows' names
+std::string KeyName(int vk) {
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) return std::string(1, (char)vk);
+    UINT sc = MapVirtualKeyW((UINT)vk, MAPVK_VK_TO_VSC);
+    switch (vk) {  // the extended ones, else Windows names the numpad's
+        case VK_LEFT: case VK_UP: case VK_RIGHT: case VK_DOWN: case VK_PRIOR: case VK_NEXT: case VK_END: case VK_HOME:
+        case VK_INSERT: case VK_DELETE: case VK_DIVIDE: case VK_RCONTROL: case VK_RMENU: sc |= 0x100;
+    }
+    wchar_t name[64];
+    if (sc && GetKeyNameTextW((LONG)(sc << 16), name, 64) > 0) return WideToUtf8(name);
+    return Format("#%d", vk);
+}
+
 void Input::ClearGameKeys() {
     // the new, old and the "temp" state the window messages write and the pads copy every frame: a key held when the
     // chat opened would stay down there for good
@@ -58,33 +71,25 @@ void Input::ClearGameKeys() {
     memset(&pad->OldState, 0, sizeof(pad->OldState));
 }
 
-void Input::ProcessControllerHotkeys(const game::CControllerState& state) {
-    // Controller shortcuts use Select as a modifier. Start is deliberately NOT
-    // used: it belongs to GTA's pause menu. While Select is held, HookUpdatePads
-    // consumes the complete pad state, so neither the modifier nor the chord's
-    // second button can trigger a normal gameplay action.
-    // Select + D-pad Up = main SA:COOP window; Cross = skins;
-    // Square = animations; Triangle = players; Circle = ping.
-    bool selectDpadUp = state.Select && state.DPadUp &&
-                        !(m_previousHotkeyPad.Select && m_previousHotkeyPad.DPadUp);
-    bool selectCross = state.Select && state.ButtonCross &&
-                       !(m_previousHotkeyPad.Select && m_previousHotkeyPad.ButtonCross);
-    bool selectSquare = state.Select && state.ButtonSquare &&
-                        !(m_previousHotkeyPad.Select && m_previousHotkeyPad.ButtonSquare);
-    bool selectTriangle = state.Select && state.ButtonTriangle &&
-                          !(m_previousHotkeyPad.Select && m_previousHotkeyPad.ButtonTriangle);
-
-    bool selectCircle = state.Select && state.ButtonCircle &&
-                        !(m_previousHotkeyPad.Select && m_previousHotkeyPad.ButtonCircle);
-
-    if (!m_kbCapture && !m_mouseCapture) {
-        if (selectDpadUp) core::OnKeyDown(VK_F9, false);
-        else if (selectCross) core::OnKeyDown(VK_F6, false);
-        else if (selectSquare) core::OnKeyDown('U', false);
-        else if (selectTriangle) core::OnKeyDown(Cfg().playerListKey, false);
-        else if (selectCircle) core::OnKeyDown(VK_F5, false);
+int16_t Input::ProcessControllerHotkeys(const game::CControllerState& state, bool enabled) {
+    // Defer Select until release so a camera tap and a menu chord can share the button.
+    const auto& previous = m_previousHotkeyPad;
+    int key = 0;
+    if (enabled && !m_kbCapture && !m_mouseCapture && state.Select) {
+        if (state.DPadUp && !(previous.Select && previous.DPadUp)) key = Cfg().menuKey;
+        else if (state.ButtonCross && !(previous.Select && previous.ButtonCross)) key = Cfg().skinsKey;
+        else if (state.ButtonSquare && !(previous.Select && previous.ButtonSquare)) key = Cfg().animsKey;
+        else if (state.ButtonTriangle && !(previous.Select && previous.ButtonTriangle)) key = Cfg().playerListKey;
+        else if (state.ButtonCircle && !(previous.Select && previous.ButtonCircle)) key = Cfg().pingKey;
     }
+    const bool tap = enabled && !m_kbCapture && !m_mouseCapture && !state.Select &&
+                     previous.Select && !m_selectUsedForShortcut;
+    const int16_t select = tap ? previous.Select : 0;
+    if (!state.Select) m_selectUsedForShortcut = false;
+    else if (key || !enabled || m_kbCapture || m_mouseCapture) m_selectUsedForShortcut = true;
     m_previousHotkeyPad = state;
+    if (key) core::OnKeyDown(key, false);
+    return select;
 }
 
 void Input::SetKeyboardCapture(bool on) {

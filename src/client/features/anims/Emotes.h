@@ -53,6 +53,9 @@ void* PreviewTexture();
 void PreviewTurn(float radians);
 // The same RenderWare portrait, but for a skin model (without changing the real player).
 void SkinPreviewShow(int model, float pixels);
+// the thing the hand holds in that emote (a cigarette, a bottle, the phone): its object model, -1 for none or none in this
+// game; the bone it is on (RpHAnim ID) and its place in the bone's axes
+int EmoteThing(uint16_t emote, int& bone, float offset[3]);
 
 // a block loaded from coop\anims or coop\packs: its index differs between games, the others know it by its name
 bool IsCustomBlock(int block);

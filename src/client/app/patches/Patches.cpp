@@ -7,11 +7,14 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cstring>
 
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
 #include "entities/mission/Mission.h"
+#include "entities/player/Players.h"
 #include "entities/vehicle/Vehicles.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
@@ -98,25 +101,68 @@ VoidFn g_origStartUserPause = nullptr;
 // Typing in the chat or a window of ours, no key plays the game, whatever brings it to the pad: the window procedure
 // keeps the key messages from the game, and still Shift with Alt (the keyboard's layout) or a space in the chat made CJ
 // jump with jump on that key (30.10).
+using PadFields = std::array<int16_t, sizeof(game::CControllerState) / sizeof(int16_t)>;
+game::CControllerState g_previousMenuPad{};
+constexpr uintptr_t kNewMouseState = 0xB73418;
+std::array<uint8_t, 0x14> g_previousMenuMouse{};
+PadFields g_waitForPadRelease{};
+bool g_menuInputCleared = false;
+bool g_pauseCameraThisFrame = false;
+
+PadFn g_origCameraProcess = nullptr;
+void __fastcall HookCameraProcess(void* self, void* edx) {
+    // The shared world ticks under the pause menu, but the local view should stay where it was.
+    if (game::MenuActive() || g_pauseCameraThisFrame) return;
+    g_origCameraProcess(self, edx);
+}
+
 VoidFn g_origUpdatePads = nullptr;
 void __cdecl HookUpdatePads() {
+    auto* localPad = game::GetPad(0);
+    const bool menu = game::MenuActive();
+    if (menu && g_menuInputCleared) {
+        localPad->NewState = g_previousMenuPad;
+        memcpy((void*)kNewMouseState, g_previousMenuMouse.data(), g_previousMenuMouse.size());
+    }
+    g_menuInputCleared = false;
+    g_pauseCameraThisFrame = menu;
     g_origUpdatePads();
+    if (!menu) {
+        auto fields = std::bit_cast<PadFields>(localPad->NewState);
+        for (size_t i = 0; i < fields.size(); ++i) {
+            if (fields[i] == 0 || (i < 4 && std::abs(fields[i]) <= 16)) g_waitForPadRelease[i] = 0;
+            if (g_waitForPadRelease[i]) fields[i] = 0;
+        }
+        localPad->NewState = std::bit_cast<game::CControllerState>(fields);
+    }
     // Snapshot before any UI shortcut can open a window (opening one clears the game's pad state).
-    game::CPad* localPad = game::GetPad(0);
     game::CControllerState controllerState = localPad->NewState;
     ui::In().FeedControllerState(controllerState);
-    ui::In().ProcessControllerHotkeys(controllerState);
+    const bool background = Cfg().multiInstance && GetForegroundWindow() != (HWND)game::GameWindow();
+    // The keyboard camera key can also appear as Select in the merged CPad state.
+    const bool keyboardCamera = (GetAsyncKeyState('V') & 0x8000) != 0;
+    const bool routeShortcuts = !menu && !keyboardCamera;
+    const int16_t selectTap = ui::In().ProcessControllerHotkeys(controllerState, !background && routeShortcuts);
 
-    // Select is the modifier for every controller-only GUI shortcut. Consume the full
-    // pad state while it is held so neither Select nor the chord button reaches gameplay.
-    if (ui::In().KeyboardCaptured() || controllerState.Select) {
-        // The UI needs the real GInput state, but the game must not receive it while a window is open.
-        // Preserve it for the UI first, then clear the game's copy to prevent movement/actions behind the menu.
+    if (background) {
+        for (int i = 0; i < 2; ++i) game::GetPad(i)->NewState = game::CControllerState{};
+        return;
+    }
+    if (ui::In().KeyboardCaptured()) {
         localPad->NewState = game::CControllerState{};
         return;
     }
-    if (!Cfg().multiInstance || GetForegroundWindow() == (HWND)game::GameWindow()) return;
-    for (int i = 0; i < 2; ++i) game::GetPad(i)->NewState = game::CControllerState{};
+    if (!routeShortcuts) return;
+
+    auto& gameplay = localPad->NewState;
+    gameplay.Select = selectTap;
+    if (controllerState.Select) {
+        gameplay.DPadUp = 0;
+        gameplay.ButtonCross = 0;
+        gameplay.ButtonSquare = 0;
+        gameplay.ButtonTriangle = 0;
+        gameplay.ButtonCircle = 0;
+    }
 }
 // F1 plays the last seconds again (CReplay), F3 a replay saved on the disk: in a session it stopped this world alone, and
 // the copy of the other player, a PLAYER1 ped with no clothes of its own in the recording, crashed the playback
@@ -330,7 +376,7 @@ void __cdecl HookRequestMotionGroupAnims() {
     int group = me ? game::Field<int32_t>(me, 0x4D4) : 0;  // CPed::m_nAnimGroup
     const char* block = group == 55 ? "fat" : group == 56 ? "muscular" : nullptr;  // ANIM_GROUP_FAT, ANIM_GROUP_MUSCULAR
     if (int i = block ? game::Call<0x4D3990, int>(block) : -1; i >= 0)  // CAnimManager::GetAnimationBlockIndex
-        game::RequestModel(game::anim::kIfpBase + i, 2 | 0x10);                 // GAME_REQUIRED, PRIORITY_REQUEST
+        game::RequestModel(game::IfpBase() + i, 2 | 0x10);                 // GAME_REQUIRED, PRIORITY_REQUEST
 }
 
 // CClothes::ConstructPedModel builds the player's clump on its model's texture dictionary. With that one gone (a mod's
@@ -339,7 +385,7 @@ void __cdecl HookRequestMotionGroupAnims() {
 using ConstructPedModelFn = void(__cdecl*)(uint32_t, void*, const void*, bool);
 ConstructPedModelFn g_origConstructPedModel = nullptr;
 void __cdecl HookConstructPedModel(uint32_t model, void* clothes, const void* old, bool cutscene) {
-    void* mi = model < 20000 ? game::Ref<void*>(game::addr::ModelInfoPtrs + model * 4) : nullptr;
+    void* mi = game::ModelInfoOf(model);
     auto* txds = game::Ref<game::CPoolHeader*>(0xC8800C);  // CTxdStore::ms_pTxdPool
     int slot = mi ? game::Field<int16_t>(mi, 0x0A) : -1;   // m_nTxdIndex
     void* dict = txds && slot >= 0 && slot < txds->size && txds->byteMap[slot] >= 0
@@ -802,6 +848,36 @@ void* __fastcall HookObjectDelete(void* object, void* edx, int flags) {  // CObj
     return g_origObjectDelete(object, edx, flags);
 }
 
+// A ped getting into a car, the car deleted before its last step: CTaskComplexEnterCar::ControlSubTask aborts its child,
+// but the set-in steps cannot be aborted, and their ProcessPed registers a reference on the car with no test (the steps
+// before them return when it is gone). The game keeps a car someone is getting into (CVehicle::CanBeDeleted); a script
+// or a network copy's removal does not ask. A passer-by crashed at 0x571B73 in CEntity::RegisterReference (15.11).
+// Gone car, nothing to set in: the step ends. The parent, aborting, sets the ped out next with the same null car, whose
+// first read of it is +0x594 (0x647D8E): for a ped not in a car only its own part of that step is done. Then the parent
+// finishes and gives the ped its collision back (TASK_FINISHED tests the car).
+using CarStepFn = bool(__fastcall*)(void*, void*, game::CPed*);
+CarStepFn g_origSetInDriver = nullptr, g_origSetInPassenger = nullptr, g_origSetOut = nullptr;
+bool CarGone(void* task, game::CPed* ped) {
+    if (game::Field<void*>(task, 0x10)) return false;  // m_pTargetVehicle
+    static int told = 0;
+    if (told++ < 5) LOGW("A ped (model %d) was getting into a car deleted meanwhile: its entry ends", ped ? ped->ModelIndex() : -1);
+    return true;
+}
+bool __fastcall HookSetInDriver(void* task, void* edx, game::CPed* ped) {  // CTaskSimpleCarSetPedInAsDriver::ProcessPed
+    return CarGone(task, ped) || g_origSetInDriver(task, edx, ped);
+}
+bool __fastcall HookSetInPassenger(void* task, void* edx, game::CPed* ped) {  // CTaskSimpleCarSetPedInAsPassenger::ProcessPed
+    return CarGone(task, ped) || g_origSetInPassenger(task, edx, ped);
+}
+bool __fastcall HookSetOut(void* task, void* edx, game::CPed* ped) {  // CTaskSimpleCarSetPedOut::ProcessPed
+    if (!game::Field<void*>(task, 0x08) && ped && !(game::Field<uint32_t>(ped, 0x46C) & 0x100)) {  // no car, not bInVehicle
+        game::Call<0x64F680>(ped);        // CCarEnterExit::RemoveCarSitAnim
+        game::CallMethod<0x5DED50>(ped);  // CPed::RestartNonPartialAnims
+        return true;
+    }
+    return g_origSetOut(task, edx, ped);
+}
+
 // A destroyed object left in the object pool: its slot still taken, its table the one its destructors leave (CPlaceable's).
 // The population's next look at it called its Remove through that table and the game crashed at 0x42480000 (a player's
 // eight crashes in a gym, 02.11; one in CWorld::ClearForRestart's DeleteAllMissionObjects on a load). Who leaves it is not
@@ -838,7 +914,71 @@ void __cdecl HookDeleteAllMissionObjects() {  // a load's: every slot first
     g_origDeleteMissionObjects();
 }
 
+// whose clump that animation data is (for the log)
+std::string WhoseAnims(void* data) {
+    game::CPoolHeader* pool = game::PedPool();
+    uint32_t offset = game::Ref<uint32_t>(0xB5F878);  // the animation plugin's place in a clump (RpAnimBlendClumpGetData)
+    for (int i = 0; pool && i < pool->size; ++i) {
+        if (pool->byteMap[i] < 0) continue;
+        auto* p = (game::CPed*)(pool->objects + (size_t)i * game::kPedPoolElemSize);
+        auto* clump = (uint8_t*)p->RwObject();
+        if (!clump || clump[0] != 2 /* rpCLUMP */ || game::Field<void*>(clump, offset) != data) continue;
+        if (p == (game::CPed*)game::FindPlayerPed(0)) return "our player";
+        if (RemotePlayer* rp = Players::Instance().FindByPed(p)) return Format("the copy of player %d", rp->id);
+        return Format("a ped of model %d", p->ModelIndex());
+    }
+    return "a clump";
+}
+
+// RpAnimBlendClumpUpdateAnimations (0x4D34F0) gathers the nodes of a clump's animations and then calls a frame callback
+// for each bone. A ped's root bone moves the ped by its animations (velocity extraction, 0x4D1680 and 0x4D1A50), and that
+// reads the first animation's nodes with no check. When the last animations of a ped blend out and remove themselves in
+// that same update, there are none, and the host's game crashed reading address 0x10 while its CJ slid to a car door
+// that the other player's copy was opening (#116). Then the bones keep their pose and the ped is not moved by animation
+// this frame; the next update finds the list empty and leaves the clump alone, as the game does.
+using ForAllFramesFn = void(__fastcall*)(void*, void*, void*, void*);
+ForAllFramesFn g_origForAllFrames = nullptr;
+void __fastcall HookForAllFrames(void* data, void* edx, void* callback, void* update) {
+    // the update's own callbacks: FrameUpdateCallBackSkinned, NonSkinned, CompressedSkinned, CompressedNonSkinned, Offscreen.
+    // Only theirs is an AnimBlendUpdateData: RpAnimBlendClumpFindBone passes a bone's number (the stand's load crashed
+    // reading address 5 when this read came first, 10.11)
+    static const uintptr_t kUpdate[] = {0x4D2B90, 0x4D30A0, 0x4D2E40, 0x4D32D0, 0x4D2E10};
+    if (update && std::find(std::begin(kUpdate), std::end(kUpdate), (uintptr_t)callback) != std::end(kUpdate) &&
+        !game::Field<void*>(update, 4)) {  // AnimBlendUpdateData::BlendNodeArrays[0]
+        auto* shift = game::Field<float*>(data, 0x0C);     // CAnimBlendClumpData::m_PedPosition
+        auto* frames = game::Field<uint8_t*>(data, 0x10);  // m_FrameDatas: 0x18 bytes each, the flags first
+        uint32_t n = game::Field<uint32_t>(data, 0x08);    // m_NumFrameData
+        bool moves = false;
+        for (uint32_t i = 0; shift && frames && i < n && !moves; ++i) moves = frames[i * 0x18] & 0x08;  // HasVelocity
+        if (moves) {  // the case that crashed: anything else goes on as the game does
+            shift[0] = shift[1] = 0.0f;
+            static int told = 0;
+            if (told++ < 5)
+                LOGW("All animations of %s ended in one update: its pose kept (the game would have crashed)", WhoseAnims(data).c_str());
+            return;
+        }
+    }
+    g_origForAllFrames(data, edx, callback, update);
+}
+
 }  // namespace
+
+void FinishPauseMenuInput(bool wasOpen, const game::CControllerState& menuPad) {
+    const bool open = game::MenuActive();
+    if (!wasOpen && !open) return;
+    g_pauseCameraThisFrame = true;
+
+    auto* pad = game::GetPad(0);
+    g_previousMenuPad = pad->NewState;
+    memcpy(g_previousMenuMouse.data(), (const void*)kNewMouseState, g_previousMenuMouse.size());
+    g_menuInputCleared = true;
+    g_waitForPadRelease = std::bit_cast<PadFields>(menuPad);
+    if (!open) game::Call<0x53F1E0>();  // ClearKeyBoardHistory after the menu has read the closing key.
+    pad->NewState = {};
+    pad->OldState = {};
+    game::Call<0x541BD0>();  // ClearMouseHistory, including pending movement and wheel input.
+    if (!open) g_buttonsWaitUp = true;
+}
 
 bool GameMouseEnabled() { return !ui::In().MouseCaptured(); }
 
@@ -945,6 +1085,7 @@ void Apply() {
     mem::HookFn(0x57C520, &HookCentreMousePointer, &g_origCentreMouse, "CMenuManager::CentreMousePointer");
     mem::RedirectCallFn(0x53E9F1, &HookIdleMouseSetPos, &g_origIdleMouseSetPos);  // Idle -> RsMouseSetPos
     mem::HookFn(0x53F3C0, &HookUpdateMouse, &g_origUpdateMouse, "CPad::UpdateMouse");
+    mem::HookFn(0x52B730, &HookCameraProcess, &g_origCameraProcess, "CCamera::Process");
     mem::HookFn(0x561AF0, &HookStartUserPause, &g_origStartUserPause, "CTimer::StartUserPause");
     mem::HookFn(0x4600F0, &HookTriggerReplay, &g_origTriggerReplay, "CReplay::TriggerPlayback");
     mem::RedirectCallFn(0x576C55, &HookMenuStopRadio, &g_origMenuStopRadio);  // CMenuManager::CheckForMenuClosing
@@ -966,6 +1107,11 @@ void Apply() {
     g_origObjectDelete = (ObjectDeleteFn)mem::SwapVTable((void**)0x866F60, 0, (void*)&HookObjectDelete);  // CObject's vtable
     mem::HookFn(0x615DC0, &HookManageObject, &g_origManageObject, "CPopulation::ManageObject");
     mem::HookFn(0x5A1910, &HookDeleteAllMissionObjects, &g_origDeleteMissionObjects, "CObject::DeleteAllMissionObjects");
+    mem::HookFn(0x4CF190, &HookForAllFrames, &g_origForAllFrames, "CAnimBlendClumpData::ForAllFrames");
+    // through the tasks' tables, as the task manager calls them: scripts and SetPedInCarDirect call them straight with a car
+    g_origSetInDriver = (CarStepFn)mem::SwapVTable((void**)0x86EE28, 7, (void*)&HookSetInDriver);
+    g_origSetInPassenger = (CarStepFn)mem::SwapVTable((void**)0x86EE04, 7, (void*)&HookSetInPassenger);
+    g_origSetOut = (CarStepFn)mem::SwapVTable((void**)0x86EEB8, 7, (void*)&HookSetOut);
     if (cfg.windowed) {
         InstallWindowedMode();
         mem::HookFn(0x745C70, &HookSetVideoMode, &g_origSetVideoMode, "SetVideoMode");

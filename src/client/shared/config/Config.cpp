@@ -90,6 +90,11 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
     passengerKey = ini.GetInt("keys", "enter_as_passenger", passengerKey);
     playerListKey = ini.GetInt("keys", "player_list", playerListKey);
     reviveKey = ini.GetInt("keys", "revive", reviveKey);
+    menuKey = ini.GetInt("keys", "menu", menuKey);
+    skinsKey = ini.GetInt("keys", "skins", skinsKey);
+    animsKey = ini.GetInt("keys", "animations", animsKey);
+    pingKey = ini.GetInt("keys", "ping", pingKey);
+    interfaceKey = ini.GetInt("keys", "toggle_interface", interfaceKey);
 
     debugOverlay = ini.GetBool("debug", "overlay", debugOverlay);
     cleanScreen = ini.GetBool("debug", "clean_screen", cleanScreen);

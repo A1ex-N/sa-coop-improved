@@ -14,6 +14,7 @@
 #include "shared/config/Config.h"
 #include "shared/game/Game.h"
 #include "shared/lib/core/Core.h"
+#include "shared/ui/input/Input.h"
 #include "shared/ui/renderer/Renderer.h"
 #include "shared/ui/widgets/Widgets.h"
 
@@ -28,10 +29,11 @@ void RenderOverlay() {
     // status line, bottom-right
     std::string line;
     if (net.Online()) {
-        line = Format(TR("SA:COOP · %s · %u мс", "SA:COOP · %s · %u ms"),
+        line = Format(TR(COOP_NAME " · %s · %u мс", COOP_NAME " · %s · %u ms"),
                       net.IsHost() ? TR("хост", "host") : TR("напарник", "partner"), net.Rtt());
     } else if (frontend) {
-        line = TR("SA:COOP " COOP_VERSION_STR " · F9: совместная игра", "SA:COOP " COOP_VERSION_STR " · F9: co-op");
+        line = Format(TR(COOP_NAME " " COOP_VERSION_STR " · %s: совместная игра", COOP_NAME " " COOP_VERSION_STR " · %s: co-op"),
+                      KeyName(Cfg().menuKey).c_str());
     }
     if (!line.empty())
         g.Text(FONT_SMALL, g.Width() - 16 * s, g.Height() - g.LineHeight(FONT_SMALL) - 10 * s, line, 0xC0FFFFFF,

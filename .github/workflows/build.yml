@@ -52,6 +52,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: SA:COOP ${{ github.ref_name }}
+          name: SA Co-op Improved ${{ github.ref_name }}
           files: dist/SA-COOP.zip
           body_path: .github/release-notes.md

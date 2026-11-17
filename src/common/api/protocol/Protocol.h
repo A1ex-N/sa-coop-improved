@@ -128,6 +128,10 @@ enum MsgId : uint8_t {
     G_WAYPOINT = 133,         // reliable: the player's map waypoint (set or cleared)
     G_PROPERTY = 134,         // reliable: the player bought a property (its index in main.scm)
     G_HOST_SAVED = 135,       // reliable: the host saved its game, the partners save their profiles
+    G_TAKE_WHEEL = 190,       // reliable: u16 vehicle, u8 to (its driver): the sender's mission drives the sender's player in
+                              // that car (TASK_CAR_DRIVE_TO_COORD), the driver moves over to a free seat (Players.cpp)
+    G_STEALTH = 189,          // reliable: u8 victim, u8 the knife's animation group: our player knifed that player from
+                              // behind (a stealth kill, decided in the attacker's game), the victim's game plays its part
     G_EXPORT = 186,           // reliable: the docks' export list (Exports.cpp): i8 the car of the list just delivered (-1: the host
                               // says the list), i32 what it paid, bytes the list: stage, all done, 10 x delivered, 42 x imports
     G_MISSION_FX = 185,       // reliable, host -> partner: an effect of the story mission's script: u8 op (1 make, 2 play, 3 stop, 4 play
@@ -171,7 +175,9 @@ enum MsgId : uint8_t {
     G_PHOTO = 151,            // reliable, partner -> host: u8 n, u16 peds, u8 m, u16 mission objects: the host's own that
                               // the partner's camera took (their copies there), for the mission's photo checks
     G_IPL = 152,              // reliable, host -> partner: u8 op (0 in, 1 out, 2 out when far), str name: a part of the
-                              // map the host's mission brings in or takes out (REQUEST_IPL / REMOVE_IPL...)
+                              // map the host's mission brings in or takes out (REQUEST_IPL / REMOVE_IPL...); op 3, u16 n,
+                              // n x (str name, u8 held in): every part's state by name after the partner's game (re)started
+                              // (older games drop op 3 as an unknown op)
     G_HELI_SHOT = 153,        // reliable: u16 helicopter, vec3 gun from it, vec3 aimed at, u8 damage: a round of a police
                               // helicopter of the sender's game
     G_CONTACTS = 154,         // reliable, host -> partner: u8 n, the story's mission start points of the host's radar
@@ -215,8 +221,9 @@ enum MsgId : uint8_t {
                               // u16 id of who looks, the same of whom, i32 ms
     G_PED_NO_COLLIDE = 171,   // reliable, host -> partner: SET_CHAR_USES_COLLISION_CLOSEST_OBJECT_OF_TYPE of the story mission
                               // on a shared person: u8 kind, u16 id, vec3 at, f32 radius, i32 model, u8 state
-    G_PED_ATTACH = 172,       // reliable, host -> partner: the story mission puts a shared person on a car (ATTACH_CHAR_TO_CAR):
-                              // u8 1 on (0 off), u8 kind, u16 id, u16 car, vec3 offset, i32 heading, f32 range, i32 weapon
+    G_PED_ATTACH = 172,       // reliable: attach a shared person to a vehicle for a mission or board without a seat.
+                              // u8 on, u8 kind, u16 id, u16 vehicle, vec3 offset, i32 heading, f32 range, i32 weapon,
+                              // u8 flags (aboard, hidden, seated, bench)
     G_MARK_COLOUR = 173,      // reliable: str the colour the sender chose for its own mark on the others' radar (white, red,
                               // green, blue, yellow, RRGGBB; empty: the allies' blue), on a change and every 15 s
     G_CONTEST = 174,          // reliable: a side activity as a contest: u8 op (1 call, 2 accept, 3 decline, 4 state, 5

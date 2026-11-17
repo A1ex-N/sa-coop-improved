@@ -41,7 +41,7 @@ public:
     // Save the controller state before the game input hook clears it while a UI window is open.
     void FeedControllerState(const game::CControllerState& state) { m_controllerState = state; }
     // Controller-only shortcuts, called once per game pad update before gameplay input is suppressed.
-    void ProcessControllerHotkeys(const game::CControllerState& state);
+    int16_t ProcessControllerHotkeys(const game::CControllerState& state, bool enabled);
 
     InputState& State() { return m_state; }
     void EndFrame();  // clears per-frame events
@@ -66,6 +66,7 @@ private:
     game::CControllerState m_controllerState{};
     game::CControllerState m_previousPad{};
     game::CControllerState m_previousHotkeyPad{};
+    bool m_selectUsedForShortcut = false;
     bool m_padPrimed = false;
     bool m_padCursorActive = false;
     bool m_padCrossBlocked = false;
@@ -77,5 +78,6 @@ private:
 };
 
 Input& In();
+std::string KeyName(int vk);
 
 }  // namespace coop::ui

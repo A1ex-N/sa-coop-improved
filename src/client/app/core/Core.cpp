@@ -1,6 +1,7 @@
 #include "shared/lib/core/Core.h"
 
 #include <windows.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <cctype>
@@ -23,6 +24,7 @@
 #include "pages/connect-menu/ConnectMenu.h"
 #include "pages/players-menu/PlayersMenu.h"
 #include "pages/skins-menu/SkinsMenu.h"
+#include "features/downed/Downed.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "shared/game/Game.h"
@@ -42,7 +44,7 @@ std::vector<Module*>& Modules() {
 
 
 using VoidFn = void(__cdecl*)();
-using MenuProcessFn = void(__fastcall*)(void* self, void* edx);
+using MenuProcessFn = int(__fastcall*)(void* self, void* edx);
 VoidFn g_origGameProcess = nullptr;
 MenuProcessFn g_origMenuProcess = nullptr;
 VoidFn g_origDebugTextIngame = nullptr;
@@ -107,7 +109,7 @@ void __cdecl HookGameProcess() {
              (unsigned)(t2 - t1));
 }
 
-void __fastcall HookMenuProcess(void* self, void* edx) {
+int __fastcall HookMenuProcess(void* self, void* edx) {
     // The start menu (FrontendIdle) never reaches CGame::Process, so HookUpdatePads (the in-game feed) does not run:
     // the co-op window got no controller state there and the pad did nothing in it. CPad::UpdatePads has run just
     // before this call, so the pad is current: give it to the UI, then hide it from the game's own menu while a
@@ -117,13 +119,17 @@ void __fastcall HookMenuProcess(void* self, void* edx) {
         ui::In().FeedControllerState(pad->NewState);
         if (ui::In().KeyboardCaptured() || ui::In().MouseCaptured()) pad->NewState = game::CControllerState{};
     }
-    g_origMenuProcess(self, edx);
-    g_lastFrameMs = NowMs();  // a pause in the menu is no lag
+    const bool wasOpen = game::MenuActive();
+    const auto menuPad = game::GetPad(0)->NewState;
+    const int result = g_origMenuProcess(self, edx);
+    if (game::GameState() == game::GAME_STATE_IDLE) patches::FinishPauseMenuInput(wasOpen, menuPad);
+    if (wasOpen || game::MenuActive()) g_lastFrameMs = NowMs();
     // FrontendIdle: CGame::Process is not running
     if (game::GameState() != game::GAME_STATE_IDLE) {
         ++g_frameNo;
         CommonFrame();
     }
+    return result;
 }
 
 std::string g_screenshotPath, g_screenshotOverlayPath;
@@ -206,6 +212,14 @@ void* __cdecl HookEndUpdateMenu(void* camera) {
 
 void __cdecl HookShutDownForRestart() {
     LOGI("CGame::ShutDownForRestart");
+    // A load or a new game while a cutscene is loaded (a partner's rejoin during the host's first mission, 10.11): the game
+    // clears the players (CPlayerInfo::Clear) before the world, and CWorld::ClearForRestart then deletes the cutscene's
+    // data, whose CCamera::RestoreWithJumpCut gave the camera back to the player just cleared (a null ped, 0x571B73). The
+    // cutscene goes first, as a script's CLEAR_CUTSCENE ends it, while the player is still there.
+    if (game::Ref<int32_t>(0xB5F84C) != 0 && game::FindPlayerPed(0)) {  // CCutsceneMgr::ms_cutsceneLoadStatus
+        LOGI("A cutscene is loaded: its data goes before the restart");
+        game::Call<0x4D5ED0>();  // CCutsceneMgr::DeleteCutsceneData
+    }
     if (g_gameStarted) {
         g_gameStarted = false;
         for (auto* m : Modules()) m->OnGameShutdown();
@@ -215,6 +229,14 @@ void __cdecl HookShutDownForRestart() {
     // at once: holding them would leave the game without a player for good
     g_restarting = g_initDepth == 0;
     g_origShutDownForRestart();
+}
+
+// Free preview RenderWare resources before the engine tears down its plugins.
+VoidFn g_origShutdownRenderWare = nullptr;
+void __cdecl HookShutdownRenderWare() {
+    LOGI("CGame::ShutdownRenderWare: the game closes");
+    for (auto* m : Modules()) m->OnGameExit();
+    g_origShutdownRenderWare();
 }
 
 // F7 (03.11): the game's parts of the interface outside CHud::Draw (Players' hook hides its own), the zone's name and
@@ -256,6 +278,22 @@ void HandleChatSubmit(const std::string& text) {
             ShowConnectMenu(true);
             return;
         }
+        if (cmd == "unstuck") {
+            if (!IsPlayerReady() || game::FindPlayerPed(0)->Health() <= 0.0f) {
+                ui::TheChat().AddError(TR("Восстановление управления доступно только в игре.",
+                                          "You can restore controls while your character is alive in-game."));
+                return;
+            }
+            auto* pad = game::GetPad(0);
+            if (!pad->DisablePlayerControls) {
+                ui::TheChat().AddSystem(TR("Управление персонажем уже включено.", "The game's control lock is already clear."));
+                return;
+            }
+            LOGI("Manual control recovery: clearing pad lock 0x%04X", (unsigned)pad->DisablePlayerControls);
+            pad->DisablePlayerControls = 0;
+            ui::TheChat().AddSystem(TR("Блокировка управления снята.", "Cleared the game's control lock."));
+            return;
+        }
         if (cmd == "debug") {
             Cfg().debugOverlay = !Cfg().debugOverlay;
             return;
@@ -278,8 +316,9 @@ void HandleChatSubmit(const std::string& text) {
         return;
     }
     if (Net().Online()) Net().SendChat(text);
-    else ui::TheChat().AddError(TR("Вы не подключены. Окно SA:COOP открывается клавишей F9.",
-                                   "You are not connected. Press F9 to open the SA:COOP window."));
+    else ui::TheChat().AddError(Format(TR("Вы не подключены. Окно " COOP_NAME " открывается клавишей %s.",
+                                          "You are not connected. Press %s to open the " COOP_NAME " window."),
+                                       ui::KeyName(Cfg().menuKey).c_str()));
 }
 
 void CommonFrame() {
@@ -422,6 +461,10 @@ bool IsInCoopSession() { return Net().Online(); }
 
 bool IsInGame() { return game::GameState() == game::GAME_STATE_IDLE; }
 
+void ShowSkinsMenu() { ui::SetSkinsMenuVisible(true); }
+bool LocalPlayerDowned() { return downed::IsDown(); }
+bool TryDownLocalPlayer() { return downed::OnKillPlayer(); }
+
 bool IsPlayerReady() { return IsInGame() && game::FindPlayerPed(0) != nullptr; }
 
 bool IsRestarting() { return g_restarting; }
@@ -500,11 +543,11 @@ bool OnKeyDown(int vk, bool repeat) {
     auto& cfg = Cfg();
     // before this key counts as the last letter (the codes' timing)
     bool typingU = !repeat && TypingCheat(vk, kCheatsWithU);
-    bool typingCheat = vk == 'U' ? typingU : !repeat && TypingCheat(vk, kCheatsWithT);
+    bool typingCheat = vk == cfg.animsKey && vk == 'U' ? typingU : !repeat && TypingCheat(vk, kCheatsWithT);
     if (!repeat && vk >= 'A' && vk <= 'Z') g_lastLetterMs = NowMs();
     if (ui::IsConnectMenuVisible()) {
         if (!repeat && ui::ConnectMenuKey(vk)) return true;  // its keys page waits for a key
-        if (vk == VK_ESCAPE || vk == VK_F9) {
+        if (vk == VK_ESCAPE || vk == cfg.menuKey) {
             if (!repeat) ui::SetConnectMenuVisible(false);
             return true;
         }
@@ -515,18 +558,18 @@ bool OnKeyDown(int vk, bool repeat) {
         return true;  // its amount box takes the keys while it is open
     }
     if (ui::IsSkinsMenuVisible()) {
-        if (vk == VK_ESCAPE && !repeat) ui::SetSkinsMenuVisible(false);
+        if ((vk == VK_ESCAPE || vk == cfg.skinsKey) && !repeat) ui::SetSkinsMenuVisible(false);
         return true;
     }
     if (ui::IsAnimsMenuVisible()) {
         // a cheat code typed on after its U (UZUMYMW, or BAGUVIX's U in the same frame as its G): closed, the letter goes on
-        if (!repeat && vk >= 'A' && vk <= 'Z' && NowMs() - ui::AnimsMenuOpenedMs() < 600 &&
+        if (cfg.animsKey == 'U' && !repeat && vk >= 'A' && vk <= 'Z' && NowMs() - ui::AnimsMenuOpenedMs() < 600 &&
             (StartsCodeWithU(vk) || typingU)) {
             ui::SetAnimsMenuVisible(false);
             return false;
         }
         if (!repeat && (vk == 'Y' || vk == 'N') && anims::Key(vk == 'Y')) return true;  // the other player's call
-        if ((vk == VK_ESCAPE || vk == 'U') && !repeat) ui::SetAnimsMenuVisible(false);
+        if ((vk == VK_ESCAPE || vk == cfg.animsKey) && !repeat) ui::SetAnimsMenuVisible(false);
         return true;  // its list takes the keys while it is open
     }
     if (ui::TheChat().IsOpen()) return true;
@@ -535,24 +578,24 @@ bool OnKeyDown(int vk, bool repeat) {
     if ((vk == 'Y' || vk == 'N') && !game::MenuActive() &&
         (contest::Key(vk) || teleport::Key(vk == 'Y') || anims::Key(vk == 'Y') || SideCallKey(vk == 'Y')))
         return true;  // a call, a request
-    if (vk == 'U' && !game::MenuActive() && !typingCheat && contest::Key(vk)) return true;  // a contest's challenge
-    if (vk == VK_F9) {
+    if (vk == cfg.animsKey && !game::MenuActive() && !typingCheat && contest::Key(vk)) return true;  // a contest's challenge
+    if (vk == cfg.menuKey) {
         // a window that cannot be drawn would only take the mouse and the keys (#26)
         if (ui::Gfx().Failed()) {
-            LOGW("F9: the interface could not be built for this screen, the window stays closed");
+            LOGW("Co-op menu: the interface could not be built for this screen, the window stays closed");
             return false;
         }
         ui::SetConnectMenuVisible(true);
         return true;
     }
     bool inMenu = game::MenuActive();
-    if (vk == VK_F6 && !inMenu && IsPlayerReady()) {
+    if (vk == cfg.skinsKey && !inMenu && IsPlayerReady()) {
         ui::ToggleSkinsMenu();
         return true;
     }
-    if (vk == 'U' && !inMenu && IsPlayerReady() && !typingCheat) {
+    if (vk == cfg.animsKey && !inMenu && IsPlayerReady() && !typingCheat) {
         ui::ToggleAnimsMenu();
-        return false;  // U reaches the game too: a cheat code beginning with it goes on (the window gives way, above)
+        return vk != 'U';  // U can start a cheat code.
     }
     if (vk == cfg.chatKey && !inMenu && (IsPlayerReady() || Net().Online()) && !typingCheat) {
         ui::TheChat().Open();
@@ -568,8 +611,8 @@ bool OnKeyDown(int vk, bool repeat) {
         Players::Instance().TryEnterAsPassenger();
         return false;  // G still reaches the game (gang recruiting)
     }
-    if (vk == VK_F5 && !inMenu && ping::Place()) return true;
-    if (vk == VK_F7 && IsPlayerReady()) {  // last: a key of the F9 window set to F7 is its own
+    if (vk == cfg.pingKey && !inMenu && ping::Place()) return true;
+    if (vk == cfg.interfaceKey && IsPlayerReady()) {
         g_interfaceHidden = !g_interfaceHidden;
         LOGI("F7: the interface %s", g_interfaceHidden ? "hidden" : "shown");
         return true;
@@ -622,6 +665,24 @@ void KeepGameFolder() {
         SetCurrentDirectoryA(root.c_str());
     }
     if (GetFileAttributesA("anim\\ped.ifp") == INVALID_FILE_ATTRIBUTES) LOGW("anim\\ped.ifp is missing: the game can't start");
+}
+
+// SA-MP's and open.mp's launchers start the game with their own arguments ("-c -n <nick> -h <ip> -p <port>") and put their
+// samp.dll in it, and the ASI loader loads this mod there too: with its hooks under SA-MP's, SA-MP crashed (issue #121,
+// 0x706611), and it ran again once the mod was taken out of the folder.
+bool RunBySamp() {
+    if (GetModuleHandleW(L"samp.dll")) return true;
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool h = false, p = false, c = false;
+    for (int i = 1; i < argc; ++i) {
+        h = h || !wcscmp(argv[i], L"-h");
+        p = p || !wcscmp(argv[i], L"-p");
+        c = c || !wcscmp(argv[i], L"-c") || !wcscmp(argv[i], L"-n");
+    }
+    LocalFree(argv);
+    return h && p && c;
 }
 
 bool LoadSaveFile(const std::wstring& path) {
@@ -717,6 +778,10 @@ void Init(void* hModule) {
     LOGI("%s %s (protocol %u) loaded, coop dir: %s, config: %s", COOP_NAME, COOP_VERSION_STR, kProtocolVersion,
          WideToUtf8(coopDir).c_str(), WideToUtf8(cfg.iniPath).c_str());
     if (!cfg.verboseLog) log::SetMinLevel(log::Level::Info);
+    if (RunBySamp()) {  // nothing of ours in SA-MP's game: not even the crash filter
+        LOGI("The game is started by SA-MP or open.mp: SA:COOP stays off");
+        return;
+    }
     InstallCrashHandler(coopDir);
     // for everyone, not only with verbose_log: the reports of a game frozen on a black screen (#86, #87) came without the
     // place it stood, and the main thread's stack 15 s into a freeze goes to crash.log
@@ -732,15 +797,15 @@ void Init(void* hModule) {
     if (*(uint32_t*)0x82457C != 0x94BF) {
         LOGE("Unsupported gta_sa.exe (size %u). SA:COOP requires GTA SA 1.0 US.", (unsigned)fad.nFileSizeLow);
         MessageBoxW(nullptr,
-                    TR(L"SA:COOP работает только с GTA San Andreas версии 1.0 US.\n"
+                    TR(L"" COOP_NAME L" работает только с GTA San Andreas версии 1.0 US.\n"
                        L"Если игра из Steam или Rockstar Games Launcher, откатите её до 1.0 US\n"
                        L"программой GTA SA Downgrader.\n\n"
                        L"Пока мод выключен.",
-                       L"SA:COOP works only with GTA San Andreas 1.0 US.\n"
+                       L"" COOP_NAME L" works only with GTA San Andreas 1.0 US.\n"
                        L"If your game comes from Steam or the Rockstar Games Launcher, downgrade it to 1.0 US\n"
                        L"with GTA SA Downgrader.\n\n"
                        L"The mod stays off for now."),
-                    L"SA:COOP", MB_ICONWARNING);
+                    L"" COOP_NAME, MB_ICONWARNING);
         return;
     }
 
@@ -750,7 +815,7 @@ void Init(void* hModule) {
 
     // frame hooks (call-site redirections; chain to whatever was there before)
     mem::RedirectCallFn(0x53E981, &HookGameProcess, &g_origGameProcess);      // Idle -> CGame::Process
-    mem::RedirectCallFn(0x53E7A5, &HookMenuProcess, &g_origMenuProcess);      // FrontendIdle -> CMenuManager::Process
+    mem::HookFn(0x57B440, &HookMenuProcess, &g_origMenuProcess, "CMenuManager::Process");  // FrontendIdle and CGame::Process
     mem::RedirectCallFn(0x53EBE4, &HookDebugTextIngame, &g_origDebugTextIngame);  // Idle -> DebugDisplayTextBuffer
     mem::RedirectCallFn(0x53E86C, &HookDebugTextMenu, &g_origDebugTextMenu);  // FrontendIdle -> DebugDisplayTextBuffer
     mem::RedirectCallFn(0x53EBF5, &HookEndUpdateIngame, &g_origEndUpdateIngame);  // Idle -> RwCameraEndUpdate
@@ -760,6 +825,7 @@ void Init(void* hModule) {
     mem::HookFn(0x6190A0, &HookGenerateGameFilename, &g_origGenerateGameFilename, "C_PcSave::GenerateGameFilename");
     mem::HookFn(0x53C550, &HookShutDownForRestart, &g_origShutDownForRestart, "CGame::ShutDownForRestart");
     mem::HookFn(0x53C680, &HookInitialiseWhenRestarting, &g_origInitWhenRestarting, "CGame::InitialiseWhenRestarting");
+    mem::HookFn(0x53BB80, &HookShutdownRenderWare, &g_origShutdownRenderWare, "CGame::ShutdownRenderWare");  // RwTerminate only
 
     for (auto* m : Modules()) {
         LOGI("Module: %s", m->Name());
@@ -793,8 +859,8 @@ void Init(void* hModule) {
     net.onWorldNone = [] { flow::OnWorldNone(); };
     net.onInvite = [](const std::string& code) {
         if (Net().IsHost())
-            ui::TheChat().AddSystem(Format(TR("Код для друга: %s. Скопировать его можно в окне F9.",
-                                              "Code for your friend: %s. You can copy it in the F9 window."),
+            ui::TheChat().AddSystem(Format(TR("Код для друга: %s. Скопировать его можно в окне мода.",
+                                              "Code for your friend: %s. You can copy it in the co-op menu."),
                                            code.c_str()));
     };
 

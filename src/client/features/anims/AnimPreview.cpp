@@ -93,6 +93,7 @@ bool g_camFailed = false;
 uint16_t g_want = 0;  // the emote asked for (0: standing)
 bool g_skinPreview = false;
 int g_skinModel = -1;
+bool g_skinRequestedByPreview = false;
 int g_skinHeldModel = -1;  // keep the selected model streamed while its copied clump is shown
 int g_skinRequestedModel = -1;  // an asynchronous model request still in flight
 float g_pixels = 0.0f;  // how big the window shows the picture
@@ -114,6 +115,61 @@ bool g_camSet = false;
 // turn the body round (the packs' dances showed their back)
 float g_face = 0.0f, g_faceTo = 0.0f;
 uint64_t g_faceAtMs = 0;
+
+// The thing in the hand (EmoteThing, 12.11): a copy of its model's own object, put on our body's bone as the game's hold
+// task puts the real one (CTaskSimpleHoldEntity::SetPedPosition: the bone's matrix, moved by the offset in its axes)
+struct Thing {
+    uint16_t emote = 0;
+    int model = -1, bone = 0;
+    float offset[3] = {0, 0, 0};
+    void* obj = nullptr;  // the copy: an RpAtomic (an object's model), an RpClump (a weapon's)
+    bool asked = false;   // its model asked for here, to be let go again
+};
+Thing g_thing;
+
+void FreeThing() {
+    if (g_thing.obj) {
+        if (Field<uint8_t>(g_thing.obj, 0) == 2) {
+            Call<0x74A310>(g_thing.obj);  // RpClumpDestroy, its frames with it
+        } else {
+            void* frame = Field<void*>(g_thing.obj, 0x04);  // RwObject::parent
+            Call<0x749DC0>(g_thing.obj);                     // RpAtomicDestroy
+            if (frame) Call<0x7F05A0>(frame);                // RwFrameDestroy
+        }
+    }
+    if (g_thing.asked) Call<0x409C10>(g_thing.model);  // CStreaming::SetModelIsDeletable
+    g_thing = Thing{};
+}
+
+// that emote's thing, made once its model is in memory (asked for meanwhile); null: none to show
+void* MakeThing(uint16_t emote) {
+    if (g_thing.emote != emote) {
+        FreeThing();
+        g_thing.emote = emote;
+        g_thing.model = emote ? EmoteThing(emote, g_thing.bone, g_thing.offset) : -1;
+    }
+    if (g_thing.model < 0 || g_thing.obj) return g_thing.obj;
+    if (!IsModelLoaded(g_thing.model)) {
+        if (!g_thing.asked) RequestModel(g_thing.model, 2), g_thing.asked = true;  // STREAMING_GAME_REQUIRED, in the background
+        return nullptr;
+    }
+    void* info = ModelInfoOf(g_thing.model);
+    void* src = info ? Field<void*>(info, 0x1C) : nullptr;  // CBaseModelInfo::m_pRwObject
+    if (!src) return nullptr;
+    if (Field<uint8_t>(src, 0) == 2) {
+        g_thing.obj = Call<0x749F70, void*>(src);  // RpClumpClone
+    } else {
+        void* a = Call<0x749E60, void*>(src);              // RpAtomicClone
+        void* f = a ? Call<0x7F0410, void*>() : nullptr;  // RwFrameCreate
+        if (a && f) {
+            Call<0x74BF20>(a, f);  // RpAtomicSetFrame
+            g_thing.obj = a;
+        } else if (a) {
+            Call<0x749DC0>(a);
+        }
+    }
+    return g_thing.obj;
+}
 
 void Stand(void* clump, float delta) {
     if (void* idle = Call<0x4D42F0, void*>("IDLE_stance", (void*)anim::Block(0))) anim::Blend(clump, idle, anim::F_LOOPED, delta);
@@ -243,8 +299,9 @@ bool MakeCamera() {
 void ReleaseSkinModel() {
     CPlayerPed* me = core::IsPlayerReady() ? FindPlayerPed(0) : nullptr;
     // The real player may now be wearing this model; do not ask streaming to release it.
-    if (g_skinHeldModel > 0 && (!me || me->ModelIndex() != g_skinHeldModel)) MarkModelNotNeeded(g_skinHeldModel);
-    if (g_skinRequestedModel > 0 && (!me || me->ModelIndex() != g_skinRequestedModel)) MarkModelNotNeeded(g_skinRequestedModel);
+    const int model = g_skinRequestedModel >= 0 ? g_skinRequestedModel : g_skinHeldModel;
+    if (g_skinRequestedByPreview && model > 0 && (!me || me->ModelIndex() != model)) MarkModelNotNeeded(model);
+    g_skinRequestedByPreview = false;
     g_skinHeldModel = g_skinRequestedModel = -1;
 }
 
@@ -269,6 +326,7 @@ bool MakeSkinBody(int model) {
     }
     if (!IsModelLoaded(model)) {
         RequestModel(model, 2 | 0x10);  // game-required, priority: the portrait can wait for streaming
+        g_skinRequestedByPreview = true;
         g_skinRequestedModel = model;
         return false;
     }
@@ -282,11 +340,12 @@ bool MakeSkinBody(int model) {
     CPed* temporary = handle >= 0 ? GetPed(handle) : nullptr;
     bool made = temporary && MakeBody(g_body[0], temporary);
     if (handle >= 0) game::script::Cmd(0x009B).I(handle).Run();  // DELETE_CHAR
+    g_skinHeldModel = model;
     if (!made) {
         FreeBody(g_body[0]);
+        ReleaseSkinModel();
         return false;
     }
-    g_skinHeldModel = model;
     return true;
 }
 
@@ -294,6 +353,7 @@ void FreeAll() {
     FreeBody(g_body[0]);
     FreeBody(g_body[1]);
     ReleaseSkinModel();
+    FreeThing();
     FreeCamera();
     g_seenSet = g_camSet = false;
 }
@@ -413,6 +473,20 @@ void Draw() {
     }
     if (lo.x > hi.x) return;
 
+    // the thing on our body's hand (no pair's emote has one, nor the skins' window)
+    void* thing = !pair && !g_skinPreview ? MakeThing(g_want) : nullptr;
+    if (thing) {
+        int i = Call<0x7C51A0, int>(g_body[0].hier, g_thing.bone);  // RpHAnimIDGetIndex
+        auto* m = Field<RwMat*>(g_body[0].hier, 0x08);             // the bones' matrices, in the picture's world
+        if (i < 0 || !m) {
+            thing = nullptr;
+        } else {
+            RwMat at = m[i];
+            at.pos = at.pos + at.right * g_thing.offset[0] + at.up * g_thing.offset[1] + at.at * g_thing.offset[2];
+            SetFrame(Field<void*>(thing, 0x04), at);  // the atomic's frame, the clump's
+        }
+    }
+
     // where it faces: forward of the line from its right thigh to its left one, taken once 0.4 s into the emote (a dance
     // that spins does not turn the camera with it)
     if (g_seenFor != g_want || !g_seenSet) g_faceAtMs = NowMs() + 400;
@@ -506,6 +580,8 @@ void Draw() {
             States::Set(8, 1);   // the bodies write their depth
             States::Set(12, 0);  // and blend only where their materials ask
             for (int i = 0; i < bodies; ++i) Call<0x749B70>(g_body[i].clump, (void*)&RenderAtomic, nullptr);  // RpClumpForAllAtomics
+            if (thing && Field<uint8_t>(thing, 0) == 2) Call<0x749B70>(thing, (void*)&RenderAtomic, nullptr);
+            else if (thing) RenderAtomic(thing, nullptr);
         }
         Call<0x7EE180>(g_cam);  // RwCameraEndUpdate
         g_drawn = true;
@@ -535,6 +611,7 @@ public:
         if (g_wantMs && NowMs() - g_wantMs > 2000) PreviewHide();
     }
     void OnGameShutdown() override { PreviewHide(); }
+    void OnGameExit() override { FreeAll(); }
 };
 AnimPreview g_module;
 struct Reg {

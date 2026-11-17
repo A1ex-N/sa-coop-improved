@@ -1,4 +1,6 @@
-SA:COOP brings the GTA San Andreas story to **2–4 players**. The host supplies the save and starts missions.
+# SA Co-op Improved
+
+SA Co-op Improved brings the GTA San Andreas story to **2–4 players**. The host supplies the save and starts missions.
 Each teammate joins the same world with their own character, money, clothes and skills.
 
 ![Playing together in Los Santos](docs/images/hero.jpg)
@@ -11,11 +13,25 @@ This fork builds on [Karimov-Akbar/sa-coop](https://github.com/Karimov-Akbar/sa-
 - Controller shortcuts and navigation for the co-op menus.
 - A downed state and teammate revives when shared lives are disabled.
 - Camera-targeted ping beacons that use the sender's radar blip colour.
+- Editable keyboard shortcuts in the co-op menu. Tap and release **Select** to cycle the camera on a controller.
+- Pause-menu input isolation and a local `/unstuck` command for stuck control locks.
+
+### Updates in 0.3.4
+
+- Selected upstream fixes cover cutscene loads and restarts, animation cleanup, deleted vehicles, mismatched saves,
+  invite-code expiry, interior exits, and mission and world synchronization.
+- Emotes show held props such as cigarettes, beer bottles, drink cans, burgers, phones and cameras in previews and co-op.
+- Players can board aircraft and boats without a free seat. Seating and mission vehicle assignment work better in groups
+  of three or four, including the crew car in *Reuniting the Families*.
+- Nearby teammates can enter Cesar's story races with their own checkpoints and standings. Aircraft gunfire effects
+  synchronize across clients.
+- This release keeps this fork's skin picker and movement animations. The upstream skin packs and replacement voices
+  are excluded.
 
 ## Install and connect
 
 Requires **GTA San Andreas 1.0 US on Windows**. Downgrade Steam or Rockstar Games Launcher editions first.
-All players need the same mod version and compatible story scripts.
+All players need this fork’s **protocol 64** build and compatible story scripts. Upstream 0.3.4 uses protocol 63.
 
 1. Download [SA-COOP.zip](../../releases/latest) and extract it beside `gta_sa.exe`.
 2. Run `install.bat` to install the bundled ASI loader if needed.
@@ -45,7 +61,7 @@ For a new story, the host plays the prologue while teammates wait, then everyone
   tow trucks, trains, hydraulics and safe-house garages.
 - **Player progress.** Money, appearance, gym progress and weapon skills belong to each player. Driving skills use the team's
   best values. Completed activities and their completion rewards count for everyone. The host saves profiles by nickname.
-- **Activities.** Invite teammates to jobs, races and challenges with **Y** within 20 seconds of starting. Press **U**
+- **Activities.** Invite teammates to jobs, races and challenges with **Y** within 20 seconds of starting. Press the **Animations / challenge** shortcut (**U** by default)
   during that window to challenge someone to a contest. Invitations use **Y/N**. Pool and contests support two players.
 - **Communication.** Text and proximity voice chat, shared map waypoints, player name tags and temporary ping beacons.
 - **Customization.** Named skins with previews and native movement animations, plus an animation menu with poses, dances,
@@ -62,24 +78,31 @@ For a new story, the host plays the prologue while teammates wait, then everyone
 
 ## Controls
 
+Open the co-op menu (F9 by default), choose **Keybindings**, click a binding, and press the new key. Changes save immediately. The table below shows the defaults.
+
 | Action | Keyboard / mouse | Controller |
 |---|---|---|
 | Co-op window | F9 | Select + D-pad Up |
 | Ping the camera's target | F5 | Select + Circle |
 | Skin picker | F6 | Select + Cross |
-| Animation menu | U | Select + Square |
+| Animation menu / challenge | U | Select + Square |
 | Players, gifts and teleport requests | F2 | Select + Triangle |
 | Revive a nearby teammate | Hold H | Hold Triangle |
-| Enter a car as passenger | G | Hold Triangle |
+| Enter as a passenger or board without a free seat | G | Hold Triangle |
+| Cycle camera view | V | Tap and release Select |
 | Aim / fire from a vehicle | Right / left mouse button | Game controls |
 | Text chat | T, then Enter to send or Esc to close | |
+| Clear a stuck control lock after a transition | Type `/unstuck` in chat | |
 | Voice chat | Hold B by default | |
 | Hide / show the interface | F7 | |
 | Offer / accept / decline a cutscene skip | Enter / Enter / Esc | |
 
 In the skin picker, use the D-pad or left stick to move, Cross to apply, Circle to return, and L2/R2 to scroll.
-Change chat, passenger, player list, voice and revive keys through **F9 → Keys**. Voice supports hold-to-talk,
-toggle, always-on and off modes.
+Voice supports hold-to-talk, toggle, always-on and off modes.
+
+The shared world keeps running while the pause menu is open by default. The local camera stays still, and menu
+input is cleared before gameplay resumes. If CJ loses control after Alt+Tab during a building transition, open
+chat and enter `/unstuck` to clear the local control lock.
 
 ### Pings and revives
 
@@ -97,6 +120,8 @@ With shared life enabled, any player's death fails the host's story mission.
 | `/help`, `/players` | Help and player numbers |
 | `/tp [player]`, `/tphere [player]` | Request teleport to / summon a teammate, answered with Y or N |
 | `/kick <nickname> [reason]` | Host removes a player |
+| `/coop` | Open the co-op menu |
+| `/unstuck` | Clear the local control lock |
 | `/anims [number]` | Open the animation menu or play an animation |
 | `/skin menu` | Open the skin picker |
 | `/skin <ID>`, `/skin next`, `/skin prev` | Choose or cycle character models |
@@ -184,8 +209,8 @@ Feature-Sliced Design. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for implement
 
 ## License
 
-The SA:COOP code is released under the MIT license (see [LICENSE](LICENSE)). ENet, MinHook and the Font Awesome
+The SA Co-op Improved code is released under the MIT license (see [LICENSE](LICENSE)). ENet, MinHook and the Font Awesome
 icon have their own licenses, and their texts are in `third_party` and in the `coop\licenses` folder of the archive.
 
-SA:COOP is not affiliated with Rockstar Games or Take-Two Interactive. You need your own copy of GTA San Andreas,
+SA Co-op Improved is not affiliated with Rockstar Games or Take-Two Interactive. You need your own copy of GTA San Andreas,
 and the repository contains no game files.

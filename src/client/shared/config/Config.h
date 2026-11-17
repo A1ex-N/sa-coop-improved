@@ -58,6 +58,11 @@ struct ClientConfig {
     int speakerDevice = -1;
 
     // [keys]
+    int menuKey = 0x78;
+    int skinsKey = 0x75;
+    int animsKey = 0x55;
+    int pingKey = 0x74;
+    int interfaceKey = 0x76;
     int chatKey = 0x54;               // T
     int passengerKey = 0x47;          // G
     int playerListKey = 0x71;         // F2

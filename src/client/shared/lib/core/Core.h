@@ -18,6 +18,7 @@ public:
     virtual void OnPeerResync(uint8_t id) {}   // its game (re)started: what it had of ours is gone there
     virtual void OnHostChanged(uint8_t newHost) {}
     virtual void OnGameStarted() {}             // a game (new or loaded) became playable
+    virtual void OnGameExit() {}
     virtual void OnGameShutdown() {}            // restarting / loading another save
     virtual void OnPreProcess() {}              // before CGame::Process
     virtual void OnPostProcess() {}             // after CGame::Process
@@ -44,6 +45,9 @@ void Notify(const std::string& utf8, uint32_t argb = 0xFFFFFFFF);  // message in
 // tests: a frame as a BMP (scale 2: half size), without our overlay unless asked, the first one after delayMs
 void RequestScreenshot(const std::string& bmpPath, bool withOverlay = false, int scale = 2, uint32_t delayMs = 0);
 void ShowConnectMenu(bool show);
+void ShowSkinsMenu();
+bool LocalPlayerDowned();
+bool TryDownLocalPlayer();
 bool ConnectMenuVisible();
 bool InterfaceHidden();  // F7: the game's HUD and our chat and labels are not drawn (the windows a key opens are)
 

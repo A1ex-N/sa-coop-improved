@@ -31,7 +31,6 @@
 #include "shared/lib/core/Core.h"
 #include "shared/lib/memory/Memory.h"
 #include "shared/ui/chat/Chat.h"
-#include "pages/skins-menu/SkinsMenu.h"
 
 namespace coop::skin {
 
@@ -270,7 +269,7 @@ bool Command(const std::string& cmd, const std::vector<std::string>& args) {
         if (CPlayerPed* me = FindPlayerPed(0)) current = me->ModelIndex();
     std::string a = args.empty() ? "" : ToLower(args[0]);
     if (a == "menu" || a == "gui") {
-        ui::SetSkinsMenuVisible(true);
+        core::ShowSkinsMenu();
         return true;
     }
     int target = -1;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 #include "common/lib/log/Log.h"
 
@@ -60,14 +61,51 @@ static uintptr_t LoadStates() {
     if (!told) {
         told = true;
         if (at != addr::StreamingInfo + 0x10) LOGI("The streaming table is at %08X, not at 008E4CC0: a limit adjuster moved it", at - 0x10);
+        ModelTablesKnown();  // says once where the model tables are
     }
     return at;
 }
-bool IsModelLoaded(int model) {
-    // models, then txds, cols, ipls, dats, ifps, rrrs and scms (26316 in all)
-    return model >= 0 && model < 26316 && Ref<uint8_t>(LoadStates() + (uintptr_t)model * 0x14) == 1;
+// an imm32 after the opcode bytes at `at`, or the game's own value when the bytes differ (ok cleared)
+static uint32_t ImmAfter(uintptr_t at, std::initializer_list<uint8_t> op, uint32_t own, bool* ok = nullptr) {
+    bool same = !memcmp((const void*)at, op.begin(), op.size());
+    if (ok) *ok = *ok && same;
+    return same ? Ref<uint32_t>(at + op.size()) : own;
 }
-int ModelLoadState(int model) { return model >= 0 && model < 26316 ? Ref<uint8_t>(LoadStates() + (uintptr_t)model * 0x14) : -1; }
+// a count read from the code: the game's when it is out of reason
+static int Sane(uint32_t v, uint32_t own) { return v >= own && v <= 0x40000 ? (int)v : (int)own; }
+
+uintptr_t ModelInfoTable() { return ImmAfter(0x4089CF, {0x8B, 0x1C, 0xB5}, addr::ModelInfoPtrs); }  // mov ebx, [esi*4 + table]
+int ModelCount() { return Sane(ImmAfter(0x4089C6, {0x81, 0xFE}, 20000), 20000); }                     // cmp esi, models
+int IfpBase() { return Sane(ImmAfter(0x408A76, {0x81, 0xFE}, 25575), 25575); }                        // cmp esi, first IFP
+int ResourceCount() { return Sane(ImmAfter(0x408AAA, {0x81, 0xFE}, 26230), 26230) + 86; }              // cmp esi, first SCM
+uintptr_t AnimBlocksTable() { return ImmAfter(0x4D39A5, {0x2D}, 0xB5D4A0); }                         // sub eax, ms_aAnimBlocks
+uintptr_t AnimationsTable() { return ImmAfter(0x4CDE57, {0x8D, 0x04, 0xC5}, 0xB4EA40); }             // lea eax, [eax*8 + table]
+
+bool ModelTablesKnown() {
+    bool ok = true;
+    ImmAfter(0x4089CF, {0x8B, 0x1C, 0xB5}, 0, &ok);
+    ImmAfter(0x4089C6, {0x81, 0xFE}, 0, &ok);
+    ImmAfter(0x408A76, {0x81, 0xFE}, 0, &ok);
+    ImmAfter(0x408AAA, {0x81, 0xFE}, 0, &ok);
+    static bool told = false;
+    if (!told) {
+        told = true;
+        if (!ok) LOGW("The game's model code is not as expected (another mod replaced it): the game's own model tables are used");
+        else if (ModelInfoTable() != addr::ModelInfoPtrs || ModelCount() != 20000 || IfpBase() != 25575)
+            LOGI("Model tables moved by a limit adjuster: infos at %08X, %d models, IFPs from %d, %d resources, anim blocks at %08X",
+                 (unsigned)ModelInfoTable(), ModelCount(), IfpBase(), ResourceCount(), (unsigned)AnimBlocksTable());
+    }
+    return ok;
+}
+
+bool IsModelLoaded(int model) {
+    // models, then txds, cols, ipls, dats, ifps, rrrs and scms
+    return model >= 0 && model < ResourceCount() && Ref<uint8_t>(LoadStates() + (uintptr_t)model * 0x14) == 1;
+}
+int ModelLoadState(int model) { return model >= 0 && model < ResourceCount() ? Ref<uint8_t>(LoadStates() + (uintptr_t)model * 0x14) : -1; }
+uint8_t* StreamingInfoOf(int model) {
+    return model >= 0 && model < ResourceCount() ? (uint8_t*)(LoadStates() - 0x10 + (uintptr_t)model * 0x14) : nullptr;
+}
 bool LoadModelNow(int model) {
     if (!IsValidModel(model)) return false;
     if (IsModelLoaded(model)) return true;
@@ -98,15 +136,15 @@ void MarkModelNotNeeded(int model) {
     if (IsValidModel(model)) Call<0x409C10>(model);
 }
 
-static void* ModelInfo(int model) {
-    if (model < 0 || model >= 20000) return nullptr;
-    return Ref<void*>(addr::ModelInfoPtrs + (uintptr_t)model * 4);
+void* ModelInfoOf(int model) {
+    if (model < 0 || model >= ModelCount()) return nullptr;
+    return Ref<void*>(ModelInfoTable() + (uintptr_t)model * 4);
 }
 static int ModelType(int model) {
-    void* mi = ModelInfo(model);
+    void* mi = ModelInfoOf(model);
     return mi ? CallVirtual<4, uint8_t>(mi) : 0;
 }
-bool IsValidModel(int model) { return ModelInfo(model) != nullptr; }
+bool IsValidModel(int model) { return ModelInfoOf(model) != nullptr; }
 bool IsVehicleModel(int model) { return ModelType(model) == 6; }
 bool IsPedModel(int model) { return ModelType(model) == 7; }
 bool IsObjectModel(int model) { return IsValidModel(model) && !IsVehicleModel(model) && !IsPedModel(model); }

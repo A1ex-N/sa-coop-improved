@@ -101,23 +101,11 @@ uint16_t PortValue() {
 
 // the keys of the keys page, in its order
 int* const* BoundKeys() {
-    static int* const keys[] = {&Cfg().chatKey, &Cfg().passengerKey, &Cfg().playerListKey, &Cfg().voiceKey, &Cfg().reviveKey};
+    static int* const keys[] = {&Cfg().chatKey, &Cfg().passengerKey, &Cfg().playerListKey, &Cfg().voiceKey, &Cfg().reviveKey,
+                                &Cfg().menuKey, &Cfg().skinsKey, &Cfg().animsKey, &Cfg().pingKey, &Cfg().interfaceKey};
     return keys;
 }
-constexpr int kBoundKeys = 5;
-
-// a letter or a digit as on the key cap whatever the layout ("Е" for T in a Russian one), the rest by Windows' names
-std::string KeyName(int vk) {
-    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) return std::string(1, (char)vk);
-    UINT sc = MapVirtualKeyW((UINT)vk, MAPVK_VK_TO_VSC);
-    switch (vk) {  // the extended ones, else Windows names the numpad's
-        case VK_LEFT: case VK_UP: case VK_RIGHT: case VK_DOWN: case VK_PRIOR: case VK_NEXT: case VK_END: case VK_HOME:
-        case VK_INSERT: case VK_DELETE: case VK_DIVIDE: case VK_RCONTROL: case VK_RMENU: sc |= 0x100;
-    }
-    wchar_t name[64];
-    if (sc && GetKeyNameTextW((LONG)(sc << 16), name, 64) > 0) return Narrow(name);
-    return Format("#%d", vk);
-}
+constexpr int kBoundKeys = 10;
 
 // a key in a box: true when clicked
 bool KeyField(float x, float y, float w, float h, const std::string& text, bool waiting) {
@@ -135,8 +123,8 @@ bool KeyField(float x, float y, float w, float h, const std::string& text, bool 
 bool ConnectMenuKey(int vk) {
     if (!g_visible || g_capture < 0) return false;
     if (vk == VK_ESCAPE) return g_capture = -1, true;
-    // F9 opens this window, Alt and Windows' keys belong to Windows
-    if (vk == VK_F9 || vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN) return true;
+    // Keep the game's prompt responses and system shortcuts available.
+    if (vk == VK_RETURN || vk == 'Y' || vk == 'N' || vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN) return true;
     int* const* keys = BoundKeys();
     for (int i = 0; i < kBoundKeys; ++i)
         if (i != g_capture && *keys[i] == vk) *keys[i] = *keys[g_capture];  // the action that had it takes the old one
@@ -197,7 +185,7 @@ void RenderConnectMenu() {
 
     g.Rect(0, 0, g.Width(), g.Height(), 0x99000000);
     w::BeginFrame();
-    float cy = w::Panel(x, y, W, H, "SA:COOP") + 8 * s;
+    float cy = w::Panel(x, y, W, H, COOP_NAME) + 8 * s;
     float vx = x + W - 52 * s;
     g.Text(FONT_MENU_SMALL, vx, y + 36 * s, "v" COOP_VERSION_STR, kSaSlate, TEXT_RIGHT);
     // the language switch left of the version, the active one lit; the choice is saved at once
@@ -229,20 +217,26 @@ void RenderConnectMenu() {
 
     if (g_keysPage) {
         // ---- the mod's keys and the microphone, saved in coop.ini at once
-        g.Text(FONT_BIG, cx, cy, TR("Клавиши", "Keys"), kSaBlue, TEXT_SHADOW);
+        g.Text(FONT_BIG, cx, cy, TR("Клавиши", "Keybindings"), kSaBlue, TEXT_SHADOW);
         cy += bh + 22 * s;
         const char* labels[kBoundKeys] = {TR("Чат", "Chat"), TR("Сесть пассажиром", "Enter as a passenger"),
                                           TR("Список игроков", "Player list"), TR("Микрофон", "Microphone"),
-                                          TR("Поднять напарника", "Revive a partner")};
-        float kx = cx + cw * 0.55f;
+                                          TR("Поднять напарника", "Revive a partner"), TR("Окно мода", "Co-op menu"),
+                                          TR("Выбор скина", "Skin picker"), TR("Анимации и вызов", "Animations / challenge"),
+                                          TR("Метка", "Ping"), TR("Показать / скрыть интерфейс", "Toggle interface")};
+        constexpr int rows = (kBoundKeys + 1) / 2;
+        const float spacing = 24 * s;
+        const float width = (cw - spacing) * 0.5f;
+        const float step = ch + rowH + 10 * s;
         for (int i = 0; i < kBoundKeys; ++i) {
-            g.Text(FONT_NORMAL, cx, cy + (rowH - lh) * 0.5f, labels[i], kText, TEXT_SHADOW);
-            bool waiting = g_capture == i;
-            if (KeyField(kx, cy, cx + cw - kx, rowH, waiting ? TR("нажмите клавишу", "press a key") : KeyName(*BoundKeys()[i]), waiting))
-                g_capture = waiting ? -1 : i;
-            cy += rowH + 10 * s;
+            const float px = cx + (i / rows) * (width + spacing);
+            const float py = cy + (i % rows) * step;
+            g.Text(FONT_MENU_SMALL, px, py, labels[i], kText, TEXT_SHADOW);
+            const bool waiting = g_capture == i;
+            const auto label = waiting ? TR("Нажмите клавишу (Esc — отмена)", "Press a key (Esc to cancel)") : KeyName(*BoundKeys()[i]);
+            if (KeyField(px, py + ch + 3 * s, width, rowH, label, waiting)) g_capture = waiting ? -1 : i;
         }
-        cy += 14 * s;
+        cy += rows * step + 14 * s;
         caption(cx, TR("Голосовая связь", "Voice chat"));
         cy += ch + 6 * s;
         auto& cfg = Cfg();
@@ -443,7 +437,7 @@ void RenderConnectMenu() {
         if (item("leave", fx, by, leave)) flow::Leave();
         fx += g.TextWidth(FONT_MENU, leave) + room * 2.2f;
     }
-    if (item("keys", fx, by, g_keysPage ? TR("Назад", "Back") : TR("Клавиши", "Keys"))) g_keysPage = !g_keysPage, g_capture = -1;
+    if (item("keys", fx, by, g_keysPage ? TR("Назад", "Back") : TR("Клавиши", "Keybindings"))) g_keysPage = !g_keysPage, g_capture = -1;
     std::string close = online || busy || inGame ? TR("Закрыть", "Close") : TR("Одиночная игра", "Single player");
     if (item("close", cx + cw - g.TextWidth(FONT_MENU, close), by, close)) SetConnectMenuVisible(false);
     w::EndFrame();

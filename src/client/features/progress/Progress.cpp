@@ -989,6 +989,12 @@ public:
             // its own single player game went on as on a first visit, and the old CJ came into the new game (31.10).
             bool fresh = m_profile.empty() && (m_reset || flow::IsFollower());
             if (m_profile.empty()) {
+                // the gym's "enough for today" (5347 day, 5348 month, 5349 the day's workout: gymbench.scm's $21388..$21396)
+                // came with the host's world, and a partner here for the first time could not train once the host had (#132)
+                if (Global(5347) || Global(5348) || Global(5349))
+                    LOGI("First visit: the gym's workout of the host's world (%d.%d) is not ours, the machines are free",
+                         Global(5347), Global(5348));
+                Global(5347) = Global(5348) = Global(5349) = 0;
                 ui::TheChat().AddSystem(fresh ? TR("Хост начал новую игру. Деньги, оружие, навыки и внешность у вас тоже начинаются заново.",
                                                    "The host started a new game. Your money, weapons, skills and look start over too.")
                                               : TR("Вы здесь впервые. Дальше деньги, навыки и внешность у вас будут свои.",

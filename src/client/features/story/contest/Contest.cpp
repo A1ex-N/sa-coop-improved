@@ -26,6 +26,7 @@
 #include "shared/game/Game.h"
 #include "shared/lib/core/Core.h"
 #include "shared/ui/chat/Chat.h"
+#include "shared/ui/input/Input.h"
 
 namespace coop::contest {
 
@@ -559,7 +560,7 @@ std::string Text(std::string& hint) {
                          "%s takes the challenge. Make your bet: the loser gives it to the winner."),
                       Who(g_c.with).c_str());
     if (CanCall() && !SideCallOpen()) {  // with a call to play together it is in that box
-        hint = TR("U - вызвать", "U: challenge");
+        hint = Format(TR("%s - вызвать", "%s: challenge"), ui::KeyName(Cfg().animsKey).c_str());
         if (g_run.kind == POOL)
             return Format(TR("Бильярд вдвоём за этим столом: вызвать %s?", "Pool for two at this table: challenge %s?"), Others().c_str());
         return Format(TR("Соревнование: %s. Вызвать %s?", "Contest: %s. Challenge %s?"), KindName(g_run.kind, g_run.variant).c_str(),
@@ -574,7 +575,7 @@ bool Key(int vk) {
         Answer(vk == 'Y');
         return true;
     }
-    if (vk == 'U' && CanCall()) {
+    if (vk == Cfg().animsKey && CanCall()) {
         Call();
         return true;
     }
