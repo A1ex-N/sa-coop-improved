@@ -119,7 +119,7 @@ void OnFootState::Write(Writer& w) const {
     w.VecQ(V(vel), 40.0f);
     w.Angle(rotation);
     w.Angle(aimRotation);
-    w.U8(health);
+    w.U8((uint8_t)std::min<uint16_t>(health, 255));
     w.U8(armour);
     w.U8(weapon);
     w.U16(ammo);
@@ -131,6 +131,9 @@ void OnFootState::Write(Writer& w) const {
     w.U8(walkGroup);
     pad.Write(w);
     cam.Write(w);
+    // Older clients read the original byte and ignore this extension.
+    w.U16(health);
+    w.U8(reliableButtons);
 }
 
 bool OnFootState::Read(Reader& r) {
@@ -151,6 +154,8 @@ bool OnFootState::Read(Reader& r) {
     walkGroup = r.U8();
     pad.Read(r);
     cam.Read(r);
+    if (r.Remaining() >= 2) health = r.U16();
+    reliableButtons = r.Remaining() != 0 && r.Bool();
     return r.Ok();
 }
 

@@ -29,6 +29,7 @@ bool g_visible = false;
 bool g_autoShown = false;
 int g_tab = 0;  // 0 "connect", 1 "create"
 bool g_keysPage = false;  // the mod's keys and the microphone instead of the rest
+bool g_chatPage = false;  // opened from the keybindings page
 int g_capture = -1;       // the key of that action is being chosen (the next key pressed)
 std::wstring g_nick, g_addr, g_port, g_password;
 std::string g_formError;
@@ -138,6 +139,7 @@ void SetConnectMenuVisible(bool visible) {
     if (visible == g_visible) return;
     g_visible = visible;
     g_keysPage = false;
+    g_chatPage = false;
     g_capture = -1;
     if (visible) {
         LoadFields();
@@ -215,7 +217,24 @@ void RenderConnectMenu() {
         return w::Button(id, px - room, py, g.TextWidth(FONT_MENU, label) + 2 * room, rowH, label, enabled, lit);
     };
 
-    if (g_keysPage) {
+    if (g_chatPage) {
+        g.Text(FONT_BIG, cx, cy, TR("Настройки чата", "Chat settings"), kSaBlue, TEXT_SHADOW);
+        cy += bh + 22 * s;
+        auto setting = [&](const char* id, const char* label, int& value, int min, int max, int step, const char* units) {
+            caption(cx, label);
+            cy += ch + 6 * s;
+            int direction = w::Selector(id, cx, cy, 255 * s, rowH, std::to_string(value) + units);
+            if (direction) {
+                value = std::clamp(value + direction * step, min, max);
+                flow::SaveConnectSettings();
+            }
+            cy += rowH + 18 * s;
+        };
+        auto& cfg = Cfg();
+        setting("chatOpacity", TR("Непрозрачность фона", "Background opacity"), cfg.chatBackgroundOpacity, 0, 100, 10, "%");
+        setting("chatSize", TR("Размер текста", "Text size"), cfg.chatFontSize, 80, 150, 10, "%");
+        setting("chatDuration", TR("Время показа сообщений", "Message visibility"), cfg.chatMessageSeconds, 5, 120, 5, TR(" с", " s"));
+    } else if (g_keysPage) {
         // ---- the mod's keys and the microphone, saved in coop.ini at once
         g.Text(FONT_BIG, cx, cy, TR("Клавиши", "Keybindings"), kSaBlue, TEXT_SHADOW);
         cy += bh + 22 * s;
@@ -237,6 +256,8 @@ void RenderConnectMenu() {
             if (KeyField(px, py + ch + 3 * s, width, rowH, label, waiting)) g_capture = waiting ? -1 : i;
         }
         cy += rows * step + 14 * s;
+        const char* chatSettings = TR("Настройки чата", "Chat settings");
+        const float chatSettingsX = cx + cw - g.TextWidth(FONT_MENU, chatSettings);
         caption(cx, TR("Голосовая связь", "Voice chat"));
         cy += ch + 6 * s;
         auto& cfg = Cfg();
@@ -244,12 +265,16 @@ void RenderConnectMenu() {
         const char* modes[] = {TR("пока клавиша зажата", "while the key is held"),
                                TR("нажатие включает и выключает", "a press turns it on and off"), TR("всегда включена", "always on"),
                                TR("выключена", "off")};
-        if (int d = w::Selector("voice", cx, cy, cw, rowH, modes[mode])) {
+        if (int d = w::Selector("voice", cx, cy, chatSettingsX - cx - spacing, rowH, modes[mode])) {
             mode = (mode + d + 4) % 4;
             cfg.voiceEnabled = mode != 3;
             cfg.voiceAlwaysOn = mode == 2;
             cfg.voiceToggle = mode == 1;
             flow::SaveConnectSettings();
+        }
+        if (item("chatSettings", chatSettingsX, cy, chatSettings)) {
+            g_capture = -1;
+            g_chatPage = true;
         }
         cy += rowH;
     } else if (online) {
@@ -437,7 +462,11 @@ void RenderConnectMenu() {
         if (item("leave", fx, by, leave)) flow::Leave();
         fx += g.TextWidth(FONT_MENU, leave) + room * 2.2f;
     }
-    if (item("keys", fx, by, g_keysPage ? TR("Назад", "Back") : TR("Клавиши", "Keybindings"))) g_keysPage = !g_keysPage, g_capture = -1;
+    if (item("keys", fx, by, g_keysPage ? TR("Назад", "Back") : TR("Клавиши", "Keybindings"))) {
+        if (g_chatPage) g_chatPage = false;
+        else g_keysPage = !g_keysPage;
+        g_capture = -1;
+    }
     std::string close = online || busy || inGame ? TR("Закрыть", "Close") : TR("Одиночная игра", "Single player");
     if (item("close", cx + cw - g.TextWidth(FONT_MENU, close), by, close)) SetConnectMenuVisible(false);
     w::EndFrame();

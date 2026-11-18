@@ -887,7 +887,7 @@ uint8_t WantedLevel(CPlayerPed* me) {
 
 void FillCommon(OnFootState& st, CPlayerPed* me) {
     st.walkGroup = (uint8_t)std::clamp(Field<int32_t>(me, 0x4D4), 0, 0xFE);
-    st.health = ClampByte(me->Health());
+    st.health = (uint16_t)std::clamp(me->Health(), 0.0f, 65535.0f);
     st.wanted = WantedLevel(me);
     st.armour = ClampByte(me->Armour());
     CWeapon& w = me->ActiveWeapon();
@@ -921,13 +921,15 @@ void FillCommon(OnFootState& st, CPlayerPed* me) {
 void WriteCommon(Writer& w, const OnFootState& st) {
     st.pad.Write(w);
     st.cam.Write(w);
-    w.U8(st.health);
+    w.U8((uint8_t)std::min<uint16_t>(st.health, 255));
     w.U8(st.armour);
     w.U8(st.weapon);
     w.U16(st.ammo);
     w.I8(st.area);
     w.U8(st.wanted);
     w.U8(st.walkGroup);
+    w.U16(st.health);
+    w.U8(st.reliableButtons);
 }
 
 void ReadCommon(Reader& r, OnFootState& st) {
@@ -940,10 +942,18 @@ void ReadCommon(Reader& r, OnFootState& st) {
     st.area = r.I8();
     st.wanted = r.U8();
     st.walkGroup = r.U8();
+    if (r.Remaining() >= 2) st.health = r.U16();
+    st.reliableButtons = r.Remaining() != 0 && r.Bool();
 }
 }  // namespace
 
 uint32_t Players::LocalMarkRgb() { return MarkRgba(Cfg().markColour) >> 8; }
+
+uint32_t Players::MarkRgbForPlayer(uint8_t id) const {
+    if (id == Net().MyId()) return LocalMarkRgb();
+    auto it = m_remote.find(id);
+    return MarkRgba(it == m_remote.end() ? std::string{} : it->second.markColour) >> 8;
+}
 
 // A model in memory, else asked for (it comes in a few frames, and a later try uses it): LoadModelNow loads the whole
 // streaming queue with it, and the other player's weapon or phone stood this game still for a second or more (issue #43)
@@ -1076,8 +1086,9 @@ CVector PartnerSide(float heading, uint8_t id, float apart, uint8_t leader) {
 
 float RemoteDistance(const CVector& p, int8_t area, uint8_t* who) {
     float best = 1e9f;
+    uint64_t now = NowMs();
     for (auto& [id, rp] : Players::Instance().All())
-        if (float d = (rp.state.pos - p).Length(); rp.hasState && rp.state.area == area && d < best) {
+        if (float d = (rp.state.pos - p).Length(); rp.HasRecentState(now) && rp.state.area == area && d < best) {
             best = d;
             if (who) *who = id;
         }
@@ -1096,8 +1107,9 @@ bool FarFromUs(const CVector& at, int8_t area, float within) {
 // the distance to its CJ, left on Zero's roof (31.10).
 float RemoteViewDistance(const CVector& p, int8_t area) {
     float best = RemoteDistance(p, area);
+    uint64_t now = NowMs();
     for (auto& [id, rp] : Players::Instance().All())
-        if (CVehicle* toy = rp.hasState && rp.state.area == area ? RemoteToy(rp) : nullptr)
+        if (CVehicle* toy = rp.HasRecentState(now) && rp.state.area == area ? RemoteToy(rp) : nullptr)
             best = std::min(best, (toy->GetPosition() - p).Length());
     return best;
 }
@@ -1191,6 +1203,7 @@ void Players::OnInstallHooks() {
     });
     Net().SetHandler(proto::G_PLAYER_DRIVER, [](uint8_t from, Reader& r) { Instance().HandleDriver(from, r); });
     Net().SetHandler(proto::G_PLAYER_PASSENGER, [](uint8_t from, Reader& r) { Instance().HandlePassenger(from, r); });
+    Net().SetHandler(proto::G_PLAYER_PAD, [](uint8_t from, Reader& r) { Instance().HandlePadButtons(from, r); });
     Net().SetHandler(proto::G_PLAYER_ENTER_CAR, [](uint8_t from, Reader& r) { Instance().HandleEnterCar(from, r); });
     Net().SetHandler(proto::G_PLAYER_EXIT_CAR, [](uint8_t from, Reader& r) { Instance().HandleExitCar(from, r); });
     Net().SetHandler(proto::G_TAKE_WHEEL, [](uint8_t from, Reader& r) { Instance().HandleTakeWheel(from, r); });
@@ -1264,7 +1277,9 @@ bool Players::SetModel(CPlayerPed* ped, int model, bool useModelAnimations) {
     return true;
 }
 
-void Players::OnSessionStart() { m_lastSend = m_markSentMs = 0; }
+void Players::OnSessionStart() { m_lastSend = m_markSentMs = m_lastButtonSend = 0; }
+
+void Players::OnPeerJoin(uint8_t) { m_markSentMs = 0; }
 
 void Players::OnSessionEnd() {
     for (auto& [id, rp] : m_remote) DestroyRemote(rp);
@@ -1356,6 +1371,9 @@ void Players::OnGameShutdown() {
     for (auto& [id, rp] : m_remote) {
         DestroyRemote(rp);
         rp.blip = 0;
+        rp.enterNetId = 0;
+        rp.padButtonChanges.clear();
+        rp.hasReliablePad = false;
     }
     PlayerInfo(kRemoteSlot)->ped = nullptr;
 }
@@ -1450,6 +1468,45 @@ void Players::DestroyRemote(RemotePlayer& rp) {
     rp.pedHandle = -1;
 }
 
+static void QueuePadButtons(RemotePlayer& rp, uint16_t buttons) {
+    constexpr size_t kMaxButtonChanges = 8;
+    if (rp.padButtonChanges.size() == kMaxButtonChanges) rp.padButtonChanges.pop_front();
+    rp.padButtonChanges.push_back(buttons);
+}
+
+void Players::HandlePadButtons(uint8_t from, Reader& r) {
+    auto mode = (RemotePlayer::Mode)r.U8();
+    uint16_t vehicleId = r.U16(), buttons = r.U16();
+    if (!r.Ok() || from == Net().MyId() || mode > RemotePlayer::Mode::Passenger) return;
+    RemotePlayer& rp = Touch(from);
+    bool newContext = !rp.hasReliablePad || rp.reliablePadMode != mode || rp.reliablePadVehicle != vehicleId;
+    bool ready = core::IsPlayerReady();
+    if (newContext || !ready) rp.padButtonChanges.clear();
+    if (ready && (newContext || rp.reliablePadButtons != buttons)) QueuePadButtons(rp, buttons);
+    rp.hasReliablePad = true;
+    rp.reliablePadMode = mode;
+    rp.reliablePadVehicle = vehicleId;
+    rp.reliablePadButtons = buttons;
+}
+
+static void ReceivePlayerState(RemotePlayer& rp, const OnFootState& st, RemotePlayer::Mode mode, uint16_t vehicleId = 0) {
+    uint64_t now = NowMs();
+    if (!st.reliableButtons) {
+        // Older clients still send buttons in their snapshots. Keep transitions that arrive in one frame.
+        if (!rp.HasRecentState(now) || rp.mode != mode || rp.vehNetId != vehicleId) {
+            rp.padButtonChanges.clear();
+            QueuePadButtons(rp, st.pad.buttons);
+        } else if (st.pad.buttons != rp.state.pad.buttons) {
+            QueuePadButtons(rp, st.pad.buttons);
+        }
+    }
+    rp.state = st;
+    rp.hasState = true;
+    rp.stateRecvMs = now;
+    rp.mode = mode;
+    rp.vehNetId = vehicleId;
+}
+
 void Players::HandleOnFoot(uint8_t from, Reader& r) {
     if (from == Net().MyId()) return;
     OnFootState st;
@@ -1461,11 +1518,7 @@ void Players::HandleOnFoot(uint8_t from, Reader& r) {
     // enter/exit are replicated as events; with the target held the button is the fight's second attack (a kick,
     // CTaskSimplePlayerOnFoot: MeleeAttackJustDown 4), which only the pad replay shows
     if (!(st.pad.buttons & PadState::B_RS1)) st.pad.buttons &= ~PadState::B_TRIANGLE;
-    rp.state = st;
-    rp.hasState = true;
-    rp.stateRecvMs = NowMs();
-    rp.padFresh = true;
-    rp.mode = RemotePlayer::Mode::OnFoot;
+    ReceivePlayerState(rp, st, RemotePlayer::Mode::OnFoot);
 }
 
 RemotePlayer& Players::Touch(uint8_t from) {
@@ -1489,12 +1542,7 @@ void Players::HandleDriver(uint8_t from, Reader& r) {
     st.pos = vs.pos;
     st.vel = vs.vel;
     st.pad.buttons &= ~PadState::B_TRIANGLE;
-    rp.state = st;
-    rp.hasState = true;
-    rp.stateRecvMs = NowMs();
-    rp.padFresh = true;
-    rp.mode = RemotePlayer::Mode::Driver;
-    rp.vehNetId = netId;
+    ReceivePlayerState(rp, st, RemotePlayer::Mode::Driver, netId);
     rp.seat = -1;
     Vehicles::Instance().ApplyDriverState(from, netId, vs);
 }
@@ -1514,33 +1562,34 @@ void Players::HandlePassenger(uint8_t from, Reader& r) {
     st.time = time;
     st.pos = {p.x, p.y, p.z};
     st.pad.buttons &= ~PadState::B_TRIANGLE;
-    rp.state = st;
-    rp.hasState = true;
-    rp.stateRecvMs = NowMs();
-    rp.padFresh = true;
-    rp.mode = RemotePlayer::Mode::Passenger;
-    rp.vehNetId = netId;
+    ReceivePlayerState(rp, st, RemotePlayer::Mode::Passenger, netId);
     rp.seat = seat;
 }
 
 static void StartEnter(RemotePlayer& rp, NetVehicle& nv, int8_t seat) {
-    rp.enterTaskMs = NowMs();
-    if (seat < 0)
+    if (seat < 0) {
+        CPed* driver = nv.veh->Driver();
+        if (driver && driver != rp.ped && driver->IsPlayer() && !Net().FriendlyFire()) return;
+        // The seated snapshot can arrive before the reliable entry event.
+        if (rp.mode == RemotePlayer::Mode::Passenger && rp.vehNetId == nv.netId) return;
         Cmd(0x05CB).I(rp.pedHandle).I(nv.handle).I(10000).Run();  // TASK_ENTER_CAR_AS_DRIVER
-    else
-        Cmd(0x05CA).I(rp.pedHandle).I(nv.handle).I(10000).I(SeatOrAny(nv.veh, seat)).Run();  // TASK_ENTER_CAR_AS_PASSENGER
+    } else {
+        // Wait for the seated snapshot if this copy has a different occupant in the requested seat.
+        if (SeatOrAny(nv.veh, seat) < 0 || seat >= 8 || nv.veh->Passengers()[seat]) return;
+        Cmd(0x05CA).I(rp.pedHandle).I(nv.handle).I(10000).I(seat).Run();  // TASK_ENTER_CAR_AS_PASSENGER
+    }
+    rp.enterTaskMs = NowMs();
 }
 
 void Players::HandleEnterCar(uint8_t from, Reader& r) {
     uint16_t netId = r.U16();
     int8_t seat = r.I8();
     if (!r.Ok() || from == Net().MyId()) return;
-    RemotePlayer* rp = Get(from);
-    if (!rp || !rp->ped) return;
+    RemotePlayer* rp = &Touch(from);
     NetVehicle* nv = Vehicles::Instance().Find(netId);
     // a car deleted in the last frame is still listed (Vehicles drops it in its OnPreProcess, after the messages). One
     // not here yet (its model loads) gets the enter when it comes: the copy stood still, then was warped in (26.10)
-    if (!nv || !Vehicles::Alive(*nv)) {
+    if (!core::IsPlayerReady() || !rp->ped || !IsPedValid(rp->ped) || !nv || !Vehicles::Alive(*nv)) {
         rp->enterNetId = netId, rp->enterSeat = seat, rp->enterAskedMs = NowMs();
         return;
     }
@@ -1717,12 +1766,17 @@ void Players::ApplyState(RemotePlayer& rp) {
     HoldWayfarerFace(ped, rp.faceHeld);
     HoldSeat(ped, ped->AttachedTo() ? rp.seatAboard : 0);
 
-    // pad: "old" is always the previous frame, "new" only changes when a packet arrived
+    // Replay one button transition per frame while reading the latest stick positions.
     rp.padOld = rp.padNew;
-    if (rp.padFresh) {
-        st.pad.To(rp.padNew);
-        rp.padFresh = false;
+    PadState pad = st.pad;
+    bool padMatches = rp.hasReliablePad && rp.reliablePadMode == rp.mode && rp.reliablePadVehicle == rp.vehNetId;
+    if (st.reliableButtons) pad.buttons = padMatches ? rp.reliablePadButtons : 0;
+    if ((!st.reliableButtons || padMatches) && !rp.padButtonChanges.empty() &&
+        (rp.mode == RemotePlayer::Mode::OnFoot || ped->InVehicle())) {
+        pad.buttons = rp.padButtonChanges.front();
+        rp.padButtonChanges.pop_front();
     }
+    pad.To(rp.padNew);
     // in its vehicle in its game, not yet in its copy here: its driving buttons made the copy run and jump about until
     // the warp (accelerate as sprint, brake as jump)
     if (rp.mode != RemotePlayer::Mode::OnFoot && !ped->InVehicle()) rp.padNew = CControllerState{};
@@ -2109,7 +2163,7 @@ static int NearestFreeSeat(CVehicle* v, const CVector& from) {
     int best = -1;
     float bestDist = 0.0f;
     for (int s = 0; s < v->MaxPassengers() && s < 8; ++s) {
-        if (v->Passengers()[s] || Peds::Instance().SeatClaimed(v, s)) continue;
+        if (v->Passengers()[s] || PlayerInSeat(v, s) || Peds::Instance().SeatClaimed(v, s)) continue;
         float d = 1e6f;
         if (int door = Call<0x64F190, int>(v, s); door >= 0) {  // CCarEnterExit::ComputeTargetDoorToEnterAsPassenger
             CVector at;
@@ -2185,14 +2239,28 @@ void Players::DetectCarTasks() {
         auto* target = Field<CVehicle*>(task, 0x0C);  // CTaskComplexEnterCar::m_Car, ...AsPassengerTimed::m_TargetCar
         // The other player drives it: the enter key goes for a passenger seat at once, as G does. The driver's way
         // (held half a second for a seat) had been told to the other game already, and its copy dragged it out (#29).
-        if (type == TASK_ENTER_CAR_AS_DRIVER && target && IsVehicleValid(target) && target->Driver() &&
-            FindByPed(target->Driver()) && !Net().FriendlyFire()) {
-            Cmd(0x0792).I(GetPedRef(me)).Run();  // CLEAR_CHAR_TASKS_IMMEDIATELY
-            if (int s = NearestFreeSeat(target, me->GetPosition()); s >= 0) {
-                Cmd(0x05CA).I(GetPedRef(me)).I(GetVehicleRef(target)).I(10000).I(s).Run();  // TASK_ENTER_CAR_AS_PASSENGER
-                LOGI("The other player drives this car: a passenger seat (%d) instead", s);
+        if (type == TASK_ENTER_CAR_AS_DRIVER && target && IsVehicleValid(target)) {
+            const NetVehicle* nv = Vehicles::Instance().Find(target);
+            bool partnerDrives = target->Driver() && FindByPed(target->Driver());
+            if (nv && !partnerDrives) {
+                for (const auto& [id, rp] : m_remote)
+                    if (rp.hasState && rp.mode == RemotePlayer::Mode::Driver && rp.vehNetId == nv->netId &&
+                        NowMs() - rp.stateRecvMs < 1500) {
+                        partnerDrives = true;
+                        break;
+                    }
             }
-            return;
+            if (partnerDrives && !Net().FriendlyFire()) {
+                Cmd(0x0792).I(GetPedRef(me)).Run();  // CLEAR_CHAR_TASKS_IMMEDIATELY
+                m_enterReported = nullptr;
+                if (int s = NearestFreeSeat(target, me->GetPosition()); s >= 0) {
+                    Cmd(0x05CA).I(GetPedRef(me)).I(GetVehicleRef(target)).I(10000).I(s).Run();  // TASK_ENTER_CAR_AS_PASSENGER
+                    LOGI("The other player drives this car: a passenger seat (%d) instead", s);
+                }
+                return;
+            }
+            // A held enter button can still turn this driver task into a passenger task.
+            if (partnerDrives && GetPad(0)->NewState.ButtonTriangle && !m_enterHeldUsed) return;
         }
         if (target && target != m_enterReported && IsVehicleValid(target)) {
             m_enterReported = target;
@@ -2229,6 +2297,22 @@ void Players::DetectCarTasks() {
     }
 }
 
+void Players::SendPadButtons(const PadState& pad, RemotePlayer::Mode mode, uint16_t vehicleId, uint64_t now) {
+    uint16_t buttons = pad.buttons;
+    if (mode != RemotePlayer::Mode::OnFoot || !(buttons & PadState::B_RS1)) buttons &= ~PadState::B_TRIANGLE;
+    if (m_lastButtonSend && now - m_lastButtonSend < 1000 && m_lastButtons == buttons &&
+        m_lastButtonMode == mode && m_lastButtonVehicle == vehicleId) return;
+    Writer w(proto::G_PLAYER_PAD);
+    w.U8((uint8_t)mode);
+    w.U16(vehicleId);
+    w.U16(buttons);
+    Net().Send(proto::CH_RELIABLE, w);
+    m_lastButtonSend = now;
+    m_lastButtonMode = mode;
+    m_lastButtonVehicle = vehicleId;
+    m_lastButtons = buttons;
+}
+
 void Players::SendVehicleState(CVehicle* v) {
     CPlayerPed* me = FindPlayerPed(0);
     NetVehicle* nv = Vehicles::Instance().EnsureNetworked(v);
@@ -2239,6 +2323,8 @@ void Players::SendVehicleState(CVehicle* v) {
     // a button goes at once; a stick that moves (a gamepad's never rests) sent every frame: 33 ms at most, as SA-MP's rates
     bool padChanged = common.pad.buttons != m_lastSentPad.buttons || (!(common.pad == m_lastSentPad) && now - m_lastSend >= 33);
     bool driver = v->Driver() == me;
+    common.reliableButtons = true;
+    SendPadButtons(common.pad, driver ? RemotePlayer::Mode::Driver : RemotePlayer::Mode::Passenger, nv->netId, now);
     // ours from the first frame at its wheel: past the limit below, the copy's next update put its owner's parked state
     // back on it (the engine off), and the car did not go till got into again (issue #43)
     if (driver) Vehicles::Instance().TakeOwnership(*nv);
@@ -2295,7 +2381,7 @@ void Players::OnPreProcess() {
         }
         // states older than 5 s mean the player is loading / in the menu; a cutscene here keeps its ped in the scene
         // (its game loads the same cutscene and can be silent that long)
-        bool active = rp.hasState && (NowMs() - rp.stateRecvMs < 5000 || (rp.ped && Ref<uint8_t>(0xB5F851)));
+        bool active = rp.HasRecentState(NowMs()) || (rp.hasState && rp.ped && Ref<uint8_t>(0xB5F851));
         if (!active) {
             if (rp.ped) DestroyRemote(rp);
             continue;
@@ -2480,7 +2566,7 @@ void Players::SendLocalState() {
     st.vel = me->MoveSpeed() * 50.0f;
     st.rotation = me->CurrentRotation();
     st.aimRotation = me->AimingRotation();
-    st.health = ClampByte(me->Health());
+    st.health = (uint16_t)std::clamp(me->Health(), 0.0f, 65535.0f);
     st.armour = ClampByte(me->Armour());
     CWeapon& w = me->ActiveWeapon();
     st.weapon = (uint8_t)w.type;
@@ -2518,6 +2604,8 @@ void Players::SendLocalState() {
     c.chairY = cam::CrosshairMultY();
 
     uint64_t now = NowMs();
+    st.reliableButtons = true;
+    SendPadButtons(st.pad, RemotePlayer::Mode::OnFoot, 0, now);
     bool padChanged = st.pad.buttons != m_lastSentPad.buttons;  // a stick alone waits for the 30 Hz below (see SendVehicleState)
     if (!padChanged && now - m_lastSend < 33) return;  // ~30 Hz, immediately on a button
     m_lastSend = now;
@@ -2567,8 +2655,8 @@ void Players::OnPostProcess() {
         }
         m_deathSent = die != nullptr;
     }
-    DetectCarTasks();
     HoldForPassengerSeat();
+    DetectCarTasks();
     FollowHost();
     GroupRides(me);
     YieldClaimedSeat(me);

@@ -174,28 +174,38 @@ void SendDamage(uint8_t kind, uint8_t owner, uint16_t netId, int weapon, float d
 // The reaction to a blow (CEventDamage::ComputeDamageAnim: the style's HitA_1..3, a combo's knock-down) and a katana's
 // kill (ComputeWillForceDeath) come from the hitter's fight (GetTaskFighting: its secondary attack task). A mirror has
 // none, so the victim flinched the same way whatever hit it, and a copy's replayed fight may be a move off (29.10: the
-// partner's reactions did not fit the blows). For the damage call the slot shows a fight in the move the hitter's game
-// had; only those two bytes of it are read, and the slot gets its own task back right after.
+// partner's reactions did not fit the blows). Override the lookup during the damage call so the task manager never
+// owns the temporary fight data.
+struct FightAs;
+thread_local FightAs* g_fightOverride = nullptr;
+using GetTaskFightingFn = void*(__fastcall*)(void*, void*);
+GetTaskFightingFn g_origGetTaskFighting = nullptr;
+
 struct FightAs {
-    void** slot = nullptr;
-    void* saved = nullptr;
+    void* intelligence = nullptr;
+    FightAs* previous = nullptr;
     alignas(4) uint8_t task[0x28] = {};  // sizeof(CTaskSimpleFight)
     FightAs(CEntity* hitter, uint8_t set, uint8_t move) {
         if (!hitter || !hitter->IsPed() || set < 4 || set > 16 || move > 4) return;  // m_aComboData's 13 sets, HIT_1..FIGHTIDLE
-        auto* intel = (uint8_t*)((CPed*)hitter)->Intelligence();
-        if (!intel) return;
-        slot = (void**)(intel + 4 + 0x14);  // CTaskManager::m_aSecondaryTasks[TASK_SECONDARY_ATTACK]
-        saved = *slot;
+        intelligence = ((CPed*)hitter)->Intelligence();
+        if (!intelligence) return;
+        previous = g_fightOverride;
         *(uintptr_t*)task = 0x86D684;  // CTaskSimpleFight's vtable (its GetTaskType says 1016)
         task[0x24] = set, task[0x25] = move;
-        *slot = task;
+        g_fightOverride = this;
     }
     ~FightAs() {
-        if (slot) *slot = saved;
+        if (intelligence) g_fightOverride = previous;
     }
     FightAs(const FightAs&) = delete;
     FightAs& operator=(const FightAs&) = delete;
 };
+
+void* __fastcall HookGetTaskFighting(void* intelligence, void* edx) {
+    for (FightAs* fight = g_fightOverride; fight; fight = fight->previous)
+        if (fight->intelligence == intelligence) return fight->task;
+    return g_origGetTaskFighting(intelligence, edx);
+}
 
 // A blow on our player is judged from where the hitter stands to our player as it turns here (ComputePedShotSide, as
 // FightHitPed does): the other game judged it against its copy of our player, whose heading lags a little behind
@@ -651,6 +661,7 @@ class Damage : public Module {
 public:
     const char* Name() const override { return "Damage"; }
     void OnInstallHooks() override {
+        mem::HookFn(0x600F30, &HookGetTaskFighting, &g_origGetTaskFighting, "CPedIntelligence::GetTaskFighting");
         mem::HookFn(0x73A530, &HookGenerateDamageEvent, &g_origGenerateDamage, "CWeapon::GenerateDamageEvent");
         mem::HookFn(0x6D7C90, &HookInflictDamage, &g_origInflictDamage, "CVehicle::InflictDamage");
         mem::HookFn(0x5F0360, &HookKillPedWithCar, &g_origKillWithCar, "CPed::KillPedWithCar");

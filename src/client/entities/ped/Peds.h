@@ -101,6 +101,7 @@ class Peds : public Module {
 public:
     const char* Name() const override { return "Peds"; }
     void OnInstallHooks() override;
+    void OnSessionStart() override;
     void OnSessionEnd() override;
     void OnPeerLeave(uint8_t id) override;
     void OnGameStarted() override;
@@ -157,6 +158,7 @@ private:
     game::CPed* SpawnMirror(NetPed& np);
     bool TakeHanded(NetPed& np);  // np's ped is the one its owner was just handed by another game: ours of it becomes np's
     void Forget(uint16_t netId, bool deletePed);
+    void CompleteHandover(NetPed& np);
     void Adopt(NetPed& np);
     // keep: this game's own people now (it left: `left`), else deleted (it restarted)
     void DropMirrorsOf(uint8_t id, bool keep, bool left = false);

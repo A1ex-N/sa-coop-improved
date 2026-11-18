@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <string>
 #include <vector>
@@ -29,9 +30,13 @@ struct RemotePlayer {
     bool hasState = false;
     OnFootState state;          // latest received state (pad/camera/health are also filled in vehicles)
     uint64_t stateRecvMs = 0;   // local time of reception
+    bool HasRecentState(uint64_t now) const { return hasState && now - stateRecvMs < 5000; }
     uint32_t lastStateTime = 0; // sender time of the latest applied state (drops reordered packets)
     game::CControllerState padNew{}, padOld{};
-    bool padFresh = false;      // a new pad state arrived since the last frame
+    std::deque<uint16_t> padButtonChanges;
+    bool hasReliablePad = false;
+    Mode reliablePadMode = Mode::OnFoot;
+    uint16_t reliablePadVehicle = 0, reliablePadButtons = 0;
     uint64_t lastWeaponTry = 0;
 
     Mode mode = Mode::OnFoot;
@@ -81,6 +86,7 @@ public:
     const char* Name() const override { return "Players"; }
     void OnInstallHooks() override;
     void OnSessionStart() override;
+    void OnPeerJoin(uint8_t id) override;
     void OnSessionEnd() override;
     void OnPeerLeave(uint8_t id) override;
     void OnGameStarted() override;
@@ -99,6 +105,7 @@ public:
     // our own mark in this colour on the other players' radar (BlipColour's names, empty: the allies' blue), saved in
     // coop.ini and sent to them
     static uint32_t LocalMarkRgb();
+    uint32_t MarkRgbForPlayer(uint8_t id) const;
     void SetMarkColour(const std::string& colour);
     // the other players as arrows turned with their heading, at the end of CRadar::DrawBlips (the radar and the menu
     // map): Waypoints' hook of it calls this, and says whether it is in (MinHook takes one hook per function)
@@ -175,6 +182,11 @@ private:
     uint64_t m_lastSend = 0;
     uint64_t m_markSentMs = 0;  // our mark's colour went out last then
     PadState m_lastSentPad;
+    uint64_t m_lastButtonSend = 0;
+    RemotePlayer::Mode m_lastButtonMode = RemotePlayer::Mode::OnFoot;
+    uint16_t m_lastButtonVehicle = 0, m_lastButtons = 0;
+    void SendPadButtons(const PadState& pad, RemotePlayer::Mode mode, uint16_t vehicleId, uint64_t now);
+    void HandlePadButtons(uint8_t from, Reader& r);
     game::CVehicle* m_enterReported = nullptr;
     bool m_exitReported = false;
     uint64_t m_followAt = 0;

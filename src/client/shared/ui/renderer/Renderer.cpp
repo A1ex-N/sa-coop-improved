@@ -12,6 +12,7 @@
 
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
+#include "shared/config/Config.h"
 #include "shared/game/Game.h"
 
 namespace coop::ui {
@@ -212,17 +213,21 @@ bool Renderer::BuildFonts() {
     Invalidate();
     int h = (int)m_height;
     int normal = std::max(12, (int)std::lround(h / 46.0));
+    int chatSize = (int)std::lround(normal * Cfg().chatFontSize / 100.0);
     int small = std::max(11, (int)std::lround(h / 60.0));
     int big = std::max(16, (int)std::lround(h / 30.0));
     int menu = std::max(12, (int)std::lround(h / 45.0));
     int menuSmall = std::max(10, (int)std::lround(h / 66.0));
     // the menu font of the game is wide and spaced out: Bahnschrift stretched by a third, with tracking
     bool ok = BuildFont(m_fonts[FONT_NORMAL], L"Arial", normal, FW_BOLD) &&
+              BuildFont(m_fonts[FONT_CHAT], L"Arial", chatSize, FW_NORMAL) &&
+              BuildFont(m_fonts[FONT_CHAT_NAME], L"Arial", chatSize, FW_BOLD) &&
               BuildFont(m_fonts[FONT_SMALL], L"Arial", small, FW_BOLD) &&
               BuildFont(m_fonts[FONT_BIG], L"Bahnschrift", big, FW_BOLD, 1.35f, big * 0.12f, true) &&
               BuildFont(m_fonts[FONT_MENU], L"Bahnschrift", menu, FW_BOLD, 1.3f, menu * 0.12f, true) &&
               BuildFont(m_fonts[FONT_MENU_SMALL], L"Bahnschrift", menuSmall, FW_SEMIBOLD, 1.3f, menuSmall * 0.16f, true);
     m_fontHeightFor = h;
+    m_chatFontSizeFor = Cfg().chatFontSize;
     if (ok) LOGI("UI fonts created for %dx%d (%d/%d/%d/%d/%d px)", (int)m_width, h, normal, small, big, menu, menuSmall);
     return ok;
 }
@@ -256,8 +261,9 @@ bool Renderer::Begin() {
             m_height = (float)vp.Height;
         }
     }
-    if (!m_ready && m_failedFor == (int)m_height) return false;  // failed for this height: not tried again every frame
-    if (!m_ready || m_fontHeightFor != (int)m_height) {
+    bool chatSizeChanged = m_chatFontSizeFor != Cfg().chatFontSize;
+    if (!m_ready && m_failedFor == (int)m_height && !chatSizeChanged) return false;  // don't retry the same setup
+    if (!m_ready || m_fontHeightFor != (int)m_height || chatSizeChanged) {
         m_ready = BuildFonts();
         if (!m_ready) {
             m_failedFor = (int)m_height;
@@ -596,9 +602,10 @@ void Renderer::TextW(FontId fid, float x, float y, std::wstring_view text, uint3
     }
     x = std::floor(x);
     y = std::floor(y);
-    uint32_t shadow = WithAlpha(0xFF000000, (float)(argb >> 24) / 255.0f * 0.85f);
-    // shadows must not take inline colours: strip codes by drawing with a fixed colour
-    auto drawShadow = [&](float dx, float dy) {
+    uint32_t edgeColor = flags & TEXT_LIGHT_OUTLINE ? 0xB0F4F1EE : 0xD9000000;
+    edgeColor = WithAlpha(edgeColor, (float)(argb >> 24) / 255.0f);
+    // Use one colour for the outline or shadow even when the text has inline colours.
+    auto drawEdge = [&](float dx, float dy) {
         std::wstring plain;
         plain.reserve(text.size());
         for (size_t i = 0; i < text.size(); ++i) {
@@ -609,15 +616,15 @@ void Renderer::TextW(FontId fid, float x, float y, std::wstring_view text, uint3
             }
             plain += text[i];
         }
-        DrawRun(f, x + dx, y + dy, plain, shadow);
+        DrawRun(f, x + dx, y + dy, plain, edgeColor);
     };
-    if (flags & TEXT_OUTLINE) {
-        drawShadow(-1, 0);
-        drawShadow(1, 0);
-        drawShadow(0, -1);
-        drawShadow(0, 1);
+    if (flags & (TEXT_OUTLINE | TEXT_LIGHT_OUTLINE)) {
+        drawEdge(-1, 0);
+        drawEdge(1, 0);
+        drawEdge(0, -1);
+        drawEdge(0, 1);
     } else if (flags & TEXT_SHADOW) {
-        drawShadow(1, 1);
+        drawEdge(1, 1);
     }
     DrawRun(f, x, y, text, argb);
 }

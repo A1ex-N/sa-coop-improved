@@ -11,24 +11,29 @@ class Chat {
 public:
     // text: UTF-8, may contain colour codes {RRGGBB}; argb: base colour.
     void Add(const std::string& text, uint32_t argb = 0xFFFFFFFF);
+    void AddPlayer(const std::string& name, const std::string& text, uint32_t nameColor);
     void AddSystem(const std::string& text) { Add(text, 0xFFFFC864); }
     void AddError(const std::string& text) { Add(text, 0xFFFF6464); }
 
     void Open();
+    void OpenHelp();
     void Close();
-    bool IsOpen() const { return m_open; }
+    bool IsOpen() const { return m_open || m_helpOpen; }
 
-    // Feeds per-frame input while open. Returns true if the chat should close.
+    // Feeds per-frame input while chat or command help is open.
     void ProcessInput();
     void Render();
 
     std::function<void(const std::string& utf8)> onSubmit;
 
 private:
+    void RenderHelp(float x, float y, float width);
     struct Line {
         std::wstring text;
         uint32_t color;
         uint64_t time;
+        std::wstring name;
+        uint32_t nameColor = 0;
     };
     std::deque<Line> m_lines;
     std::wstring m_input;
@@ -37,6 +42,8 @@ private:
     int m_histPos = -1;
     int m_scroll = 0;
     bool m_open = false;
+    bool m_helpOpen = false;
+    int m_helpTab = 0;
     uint64_t m_openTime = 0;
 };
 

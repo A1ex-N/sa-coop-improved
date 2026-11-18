@@ -42,6 +42,10 @@ bool Aircraft(CVehicle* v) {
     return type == VEHICLE_TYPE_HELI || type == VEHICLE_TYPE_PLANE || type == VEHICLE_TYPE_FHELI || type == VEHICLE_TYPE_FPLANE;
 }
 
+bool IsScriptVehicle(const NetVehicle& nv) {
+    return nv.createdByUs ? nv.script : nv.veh->CreatedBy() == VEHICLE_CREATED_MISSION;
+}
+
 void SetVehicleCreatedBy(CVehicle* v, uint8_t by) { CallMethod<0x6D5D70>(v, (int)by); }  // keeps CCarCtrl counters right
 
 // A script of this game holds the car: its mission's list (CTheScripts::MissionCleanUp, 75 x {type, handle}, 1 a car)
@@ -202,10 +206,13 @@ NetVehicle* Vehicles::EnsureNetworked(CVehicle* v) {
     if (!v || !IsVehicleValid(v) || !IsSyncableVehicle(v)) return nullptr;
     if (NetVehicle* nv = Find(v)) return nv;
     if (!Net().Online()) return nullptr;
-    uint16_t id;
-    do {
+    uint16_t id = 0;
+    for (int slot = 0; slot < 4096; ++slot) {
         id = (uint16_t)(((Net().MyId() + 1) << 12) | (m_nextId++ & 0x0FFF));
-    } while (m_byId.count(id));
+        if (!m_byId.count(id)) break;
+        id = 0;
+    }
+    if (!id) return nullptr;
     NetVehicle& nv = m_byId[id];
     nv.netId = id;
     nv.veh = v;
@@ -231,16 +238,17 @@ VehicleSpawn Vehicles::SpawnOf(const NetVehicle& nv) const {
     sp.health = v->Health();
     sp.area = TrueArea(v);
     sp.lockState = (uint8_t)v->DoorLock();
-    sp.script = nv.createdByUs ? nv.script : v->CreatedBy() == VEHICLE_CREATED_MISSION;
+    sp.script = IsScriptVehicle(nv);
     sp.owned = (Field<uint8_t>(v, 0x42A) & 2) != 0;  // CVehicle::bHasBeenOwnedByPlayer
     sp.extras[0] = Field<int8_t>(v, 0x438), sp.extras[1] = Field<int8_t>(v, 0x439);  // CVehicle::m_anExtras
     return sp;
 }
 
-void Vehicles::Announce(const NetVehicle& nv) {
+void Vehicles::Announce(NetVehicle& nv) {
     Writer w(proto::G_VEH_CREATE);
     SpawnOf(nv).Write(w);
     Net().Send(proto::CH_RELIABLE, w);
+    nv.lastAnnounceMs = NowMs();
 }
 
 void Vehicles::Reannounce() {
@@ -432,18 +440,17 @@ CVehicle* Vehicles::SpawnMirror(const VehicleSpawn& sp) {
 void Vehicles::HandleCreate(uint8_t from, Reader& r) {
     VehicleSpawn sp;
     if (!sp.Read(r) || from == Net().MyId()) return;
-    if (!core::IsPlayerReady()) return;
     if (NetVehicle* existing = Find(sp.netId)) {
-        // announced again: its owner may have changed. Not a car of ours or another model: the id came twice (a game
-        // that started over counts its ids from the start), and it handed our car to the other player.
-        if (IsMirror(*existing) && existing->model == sp.model) existing->owner = sp.owner;
-        return;
+        if (!IsMirror(*existing) || existing->model != sp.model) return;
+        if (Alive(*existing)) {
+            if (existing->owner != sp.owner) existing->hasState = false;
+            existing->owner = sp.owner;
+            existing->script = sp.script;
+            return;
+        }
+        Forget(sp.netId, false);
     }
-    if (!IsVehicleModel(sp.model)) {
-        LOGW("Vehicle %04X has an unknown model %d", sp.netId, sp.model);
-        return;
-    }
-    if (CreateMirror(sp)) m_pending.erase(sp.netId);
+    if (core::IsPlayerReady() && CreateMirror(sp)) m_pending.erase(sp.netId);
     else m_pending[sp.netId] = sp;
 }
 
@@ -456,6 +463,10 @@ static bool ShownAnywhere(uint16_t netId, bool script) {
 
 bool Vehicles::CreateMirror(const VehicleSpawn& sp) {
     if (Find(sp.netId)) return true;  // announced again meanwhile and made already
+    if (!IsVehicleModel(sp.model)) {
+        LOGW("Vehicle %04X has an unknown model %d", sp.netId, sp.model);
+        return true;  // discard the announcement once model information is available
+    }
     // The car another game handed to this one's owner a moment ago (HandleHandover): ours of it stays as it stands, under
     // its new number. Deleted at the hand-over and made again by this announcement, it vanished and came back in front of
     // our player (three or four players, 10.11 audit).
@@ -1107,6 +1118,7 @@ void Vehicles::ScanTraffic() {
     CEntity* onVehicle = FindPlayerPed(0)->AttachedTo();
     for (auto& [id, nv] : m_byId)
         if (!IsMirror(nv) && IsVehicleValid(nv.veh) && !HasPlayerInside(nv.veh) && nv.veh != toy && (CEntity*)nv.veh != onVehicle &&
+            !IsScriptVehicle(nv) &&
             RemoteViewDistance(nv.veh->GetPosition(), TrueArea(nv.veh)) > (Aircraft(nv.veh) ? kAirOut : kTrafficOut) &&
             !(nv.createdByUs && ByTheirDoor(nv.veh)))
             gone.push_back(id);
@@ -1133,7 +1145,9 @@ void Vehicles::ScanTraffic() {
         // made and deleted in the other game. A parked car goes out once it has stood 5 s (CVehicle::m_nCreationTime).
         if (v->CreatedBy() == VEHICLE_CREATED_PARKED && !HasPlayerInside(v) && Ref<uint32_t>(0xB7CB84) - Field<uint32_t>(v, 0x430) < 5000)
             continue;
-        if (v == toy || RemoteViewDistance(v->GetPosition(), TrueArea(v)) < (Aircraft(v) ? kAirIn : kTrafficIn)) EnsureNetworked(v);
+        if (v == toy || v->CreatedBy() == VEHICLE_CREATED_MISSION ||
+            RemoteViewDistance(v->GetPosition(), TrueArea(v)) < (Aircraft(v) ? kAirIn : kTrafficIn))
+            EnsureNetworked(v);
     }
 }
 
@@ -1237,6 +1251,7 @@ void Vehicles::OnPostProcess() {
         ScanTraffic();
     }
     for (auto& [id, nv] : m_byId) {
+        if (!Alive(nv)) continue;
         if (IsMirror(nv)) {
             // keep the visual controls after the physics step (wheels, brake lights)
             if (nv.hasState) {
@@ -1253,10 +1268,13 @@ void Vehicles::OnPostProcess() {
             }
             continue;
         }
+        // A peer may have lost its copy during a world load or a local script's vehicle cleanup.
+        bool refreshSpawn = IsScriptVehicle(nv) && now >= nv.lastAnnounceMs + 10000;
+        if (refreshSpawn) Announce(nv);
         // owned: mod shop changes; repeated every 10 s for mirrors that were still streaming their model
-        if (now - nv.lookCheckMs >= 1000) {
+        if (refreshSpawn || now - nv.lookCheckMs >= 1000) {
             nv.lookCheckMs = now;
-            if (!nv.hasLook || !(CaptureLook(nv.veh) == nv.look) || now - nv.lookSentMs > 10000) {
+            if (refreshSpawn || !nv.hasLook || !(CaptureLook(nv.veh) == nv.look) || now - nv.lookSentMs > 10000) {
                 SendLook(nv);
                 nv.lookSentMs = now;
             }
@@ -1371,11 +1389,13 @@ void Vehicles::OnGameStarted() {
     m_heldNoGround.clear();
     m_byId.clear();
     m_byPtr.clear();
-    m_pending.clear();
     m_giveAway.clear();
     m_local.clear();
 }
 
-void Vehicles::OnGameShutdown() { OnGameStarted(); }
+void Vehicles::OnGameShutdown() {
+    OnGameStarted();
+    m_pending.clear();
+}
 
 }  // namespace coop

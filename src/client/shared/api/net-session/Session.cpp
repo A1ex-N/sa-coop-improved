@@ -3,6 +3,7 @@
 #include "common/config/version/Version.h"
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
+#include "entities/player/Players.h"
 #include "shared/config/Config.h"
 #include "shared/ui/chat/Chat.h"
 #include "shared/ui/renderer/Renderer.h"
@@ -94,6 +95,8 @@ void Session::Update() {
             Reader r(pkt.data.data() + 1, pkt.data.size() - 1);
             HandleService(id, r);
         }
+        // A callback can close the session while processing a world or a welcome.
+        if (m_state == State::Offline) break;
     }
 
     if (m_net.TakeDisconnectEvent()) {
@@ -211,10 +214,7 @@ void Session::HandleService(uint8_t id, Reader& r) {
             if (from == kServerId) {
                 chat.Add(Cfg().english && !en.empty() ? en : text, ui::RgbaToArgb(rgba));
             } else {
-                uint32_t nameColor = from == m_hostId ? 0xFF64B4FF : 0xFF78DC78;
-                char hex[16];
-                snprintf(hex, sizeof(hex), "{%06X}", nameColor & 0xFFFFFF);
-                chat.Add(std::string(hex) + PeerName(from) + "{FFFFFF}: " + text, 0xFFFFFFFF);
+                chat.AddPlayer(PeerName(from), text, 0xFF000000u | Players::Instance().MarkRgbForPlayer(from));
             }
             break;
         }

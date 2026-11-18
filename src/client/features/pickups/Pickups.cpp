@@ -50,6 +50,19 @@ int16_t ModelIndexVar(uintptr_t a) { return Ref<int16_t>(a); }  // CModelInfo MI
 
 bool g_applying = false;               // this module creates or takes a pickup itself
 std::vector<int> g_announced;          // handles of pickups announced from here (for a restarted partner)
+struct DeferredPickup {
+    uint8_t from, type;
+    uint16_t model;
+    int16_t position[3];
+    uint64_t receivedAt;
+};
+std::vector<DeferredPickup> g_deferred;
+constexpr uint64_t kPickupReplayMs = 15000;
+
+bool CurrentPickupHandle(int handle) {
+    int i = handle & 0xFFFF;
+    return i < kNumPickups && Ref<uint16_t>(Pickup(i) + 0x1A) == (uint16_t)(handle >> 16) && Type(Pickup(i));
+}
 
 bool Shared(uint8_t type, int model) {
     switch (type) {
@@ -61,11 +74,12 @@ bool Shared(uint8_t type, int model) {
 }
 
 // the local pickup matching one of the other game (same model, within 1.5 m), or -1
-int Find(int model, const int16_t* pos, uint8_t type) {
+int Find(int model, const int16_t* pos, uint8_t type, bool exactType = false) {
     int best = -1, bestDist = 13;
     for (int i = 0; i < kNumPickups; ++i) {
         uintptr_t p = Pickup(i);
-        if (!Type(p) || Model(p) != model || (Type(p) == PU_SNAPSHOT) != (type == PU_SNAPSHOT)) continue;
+        if (!Type(p) || Model(p) != model || (Type(p) == PU_SNAPSHOT) != (type == PU_SNAPSHOT) ||
+            (exactType && Type(p) != type)) continue;
         int16_t* q = Pos(p);
         int d = std::max({std::abs(q[0] - pos[0]), std::abs(q[1] - pos[1]), std::abs(q[2] - pos[2])});
         if (d < bestDist) best = i, bestDist = d;
@@ -223,13 +237,14 @@ void __cdecl HookRemovePickUp(int handle) {
 }
 
 // ---------------------------------------------------------------- the other game's player took one
-void Take(int i, uint8_t type) {
+void Take(int i, uint8_t type, uint32_t elapsed = 0) {
     uintptr_t p = Pickup(i);
     if (type == PU_ON_STREET || type == PU_ON_STREET_SLOW) {
         // as if taken here: back after the same time (CPickup::Update)
         if (Ref<uint8_t>(p + 0x1D) & 1) return;
         uint32_t wait = type == PU_ON_STREET ? 30000 : Model(p) == ModelIndexVar(0x8CD5D0) ? 300000 : 360000;  // bribe
-        Ref<uint32_t>(p + 0x0C) = TimeMs() + wait;
+        if (elapsed >= wait) return;
+        Ref<uint32_t>(p + 0x0C) = TimeMs() + wait - elapsed;
         CallMethod<0x454CF0>((void*)p);  // CPickup::GetRidOfObjects
         Ref<uint8_t>(p + 0x1D) |= 1;
         return;
@@ -393,7 +408,16 @@ void HandleEvent(uint8_t from, Reader& r) {
     int16_t pos[3];
     for (auto& c : pos) c = r.I16();
     uint8_t type = r.U8();
-    if (!r.Ok() || !core::IsPlayerReady() || !flow::InSharedWorld()) return;
+    if (!r.Ok()) return;
+    if (!core::IsPlayerReady() || !flow::InSharedWorld()) {
+        // Persistent pickups and street spawns can be replayed after a short load. Leave mission items and loot
+        // tied to the world in which their scripts generated them.
+        if (what == EV_TAKEN && (type == PU_ONCE || type == PU_ON_STREET || type == PU_ON_STREET_SLOW) && Shared(type, model)) {
+            if (g_deferred.size() == (size_t)kNumPickups) g_deferred.erase(g_deferred.begin());
+            g_deferred.push_back({from, type, (uint16_t)model, {pos[0], pos[1], pos[2]}, NowMs()});
+        }
+        return;
+    }
     int i = Find(model, pos, type);
     if (i < 0) return;
     uintptr_t p = Pickup(i);
@@ -455,29 +479,43 @@ public:
     }
     void OnSessionEnd() override {
         g_announced.clear();
+        g_deferred.clear();
         g_partnerTags.clear();
     }
     void OnGameStarted() override { g_announced.clear(); }
     void OnPreProcess() override {  // the host's mission ended: a wipe of its next run (a retry) wipes them all again
         if (!g_partnerTags.empty() && !HostStoryRuns()) g_partnerTags.clear();
+        if (!core::IsPlayerReady() || !flow::InSharedWorld()) return;
+        uint64_t now = NowMs();
+        for (const DeferredPickup& pickup : g_deferred) {
+            uint64_t elapsed = now - pickup.receivedAt;
+            if (elapsed >= kPickupReplayMs || !Net().Peers().count(pickup.from)) continue;
+            int i = Find(pickup.model, pickup.position, pickup.type, true);
+            if (i < 0) continue;
+            g_applying = true;
+            Take(i, pickup.type, (uint32_t)elapsed);
+            g_applying = false;
+        }
+        g_deferred.clear();
+        if (now - m_lastPrune >= 5000) {
+            m_lastPrune = now;
+            std::erase_if(g_announced, [](int handle) { return !CurrentPickupHandle(handle); });
+        }
     }
     void OnPeerResync(uint8_t) override {
         if (Net().IsHost() && flow::InSharedWorld()) SendState();
         // a restarted game lost what was announced to it: what is still here goes again
-        std::vector<int> alive;
-        for (int h : g_announced) {
-            int i = h & 0xFFFF;
-            if (i >= kNumPickups || Ref<uint16_t>(Pickup(i) + 0x1A) != (uint16_t)(h >> 16) || !Type(Pickup(i))) continue;
-            SendCreate(Pickup(i));
-            alive.push_back(h);
-        }
-        g_announced = std::move(alive);
+        std::erase_if(g_announced, [](int handle) { return !CurrentPickupHandle(handle); });
+        for (int h : g_announced) SendCreate(Pickup(h & 0xFFFF));
     }
 
     static Pickups& Instance() {
         static Pickups m;
         return m;
     }
+
+private:
+    uint64_t m_lastPrune = 0;
 };
 
 struct Reg {

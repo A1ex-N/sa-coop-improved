@@ -38,6 +38,7 @@ std::string g_password, g_hostAddr;
 bool g_isHosting = false;
 uint64_t g_phaseTime = 0;
 int g_connectAttempts = 0;
+uint64_t g_lastConnectAttempt = 0;
 
 HANDLE g_serverProcess = nullptr;
 HANDLE g_serverJob = nullptr;
@@ -52,6 +53,8 @@ uint64_t g_gameStartedAt = 0, g_snapshotTriedAt = 0;
 bool g_follower = false;            // partner: in a new game of its own next to the host, until its first save
 bool g_progressUpload = false;      // host: the next snapshot goes to the partners in the game as well
 std::vector<uint8_t> g_pendingWorld;  // partner: the host's world after its progress, loaded at a safe moment
+std::vector<uint8_t> g_worldUpload;
+size_t g_worldUploadOffset = 0;
 uint64_t g_pendingSince = 0, g_pendingToldMs = 0;  // partner: when it came, when the log last said what holds it
 uint64_t g_reloadFadeMs = 0;                       // partner: when the screen began to go black for that load
 SavedSpot g_spot;
@@ -62,13 +65,18 @@ void SetPhase(Phase p) {
     g_phaseTime = NowMs();
 }
 
+void StopServerProcess();
+
 void Fail(const std::string& why) {
     g_error = why;
     g_hasSpot = false;  // a reload that failed: its spot is no use to the next world
     g_pendingWorld.clear();
+    g_worldUpload.clear();
     LOGW("Flow error: %s", why.c_str());
     ui::TheChat().AddError(why);
     Net().Disconnect();
+    if (g_isHosting) StopServerProcess();
+    g_isHosting = false;
     SetPhase(Phase::Idle);
 }
 
@@ -143,6 +151,22 @@ std::string StartError(DWORD err) {
     return Format(TR("Не удалось запустить сервер (ошибка %lu: %s).", "Could not start the server (error %lu: %s)."), err, why.c_str());
 }
 
+std::wstring QuoteServerArg(const std::wstring& value) {
+    std::wstring quoted = L"\"";
+    size_t slashes = 0;
+    for (wchar_t ch : value) {
+        if (ch == L'\\') {
+            ++slashes;
+            continue;
+        }
+        quoted.append(ch == L'"' ? 2 * slashes + 1 : slashes, L'\\');
+        quoted += ch;
+        slashes = 0;
+    }
+    quoted.append(2 * slashes, L'\\');
+    return quoted + L'"';
+}
+
 bool StartServerProcess(const std::wstring& worldPath, bool newGame) {
     auto& cfg = Cfg();
     std::wstring exe = cfg.coopDir + L"coop-server.exe";
@@ -155,11 +179,11 @@ bool StartServerProcess(const std::wstring& worldPath, bool newGame) {
     }
     StopLeftoverServers(exe);
     LetServerThroughFirewall(exe);
-    std::wstring cmd = L"\"" + exe + L"\" --port " + std::to_wstring(g_port) + L" --data \"" + cfg.coopDir +
-                       Utf8ToWide(cfg.serverData) + L"\" --name \"" + Utf8ToWide(cfg.nickname) + L"\" --host \"" +
-                       Utf8ToWide(cfg.nickname) + L"\"";
-    if (!g_password.empty()) cmd += L" --password \"" + Utf8ToWide(g_password) + L"\"";
-    if (!worldPath.empty()) cmd += L" --world \"" + worldPath + L"\"";
+    const std::wstring nick = QuoteServerArg(Utf8ToWide(cfg.nickname));
+    std::wstring cmd = QuoteServerArg(exe) + L" --port " + std::to_wstring(g_port) + L" --data " +
+                       QuoteServerArg(cfg.coopDir + Utf8ToWide(cfg.serverData)) + L" --name " + nick + L" --host " + nick;
+    if (!g_password.empty()) cmd += L" --password " + QuoteServerArg(Utf8ToWide(g_password));
+    if (!worldPath.empty()) cmd += L" --world " + QuoteServerArg(worldPath);
     if (newGame) cmd += L" --new-game";
     cmd += cfg.friendlyFire ? L" --friendly-fire 1" : L" --friendly-fire 0";  // the checkbox wins over server.ini
     cmd += cfg.partnerTeleport ? L" --partner-teleport 1" : L" --partner-teleport 0";
@@ -178,7 +202,7 @@ bool StartServerProcess(const std::wstring& worldPath, bool newGame) {
     buf.push_back(0);
     // Started running, not suspended to be put in the job first: a process made suspended and resumed is how malware
     // hollows one out, and antiviruses watch for it. The server starts no process of its own before the job takes it.
-    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, cfg.coopDir.c_str(), &si, &pi)) {
+    if (!CreateProcessW(exe.c_str(), buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, cfg.coopDir.c_str(), &si, &pi)) {
         Fail(StartError(GetLastError()));
         return false;
     }
@@ -202,22 +226,32 @@ bool ServerProcessAlive() {
     return g_serverProcess && WaitForSingleObject(g_serverProcess, 0) == WAIT_TIMEOUT;
 }
 
-void UploadWorld(const std::vector<uint8_t>& data, const std::string& label) {
+void BeginWorldUpload(std::vector<uint8_t> data, const std::string& label) {
     Writer b(C_WORLD_BEGIN);
     b.U32((uint32_t)data.size());
     b.U32(Crc32(data.data(), data.size()));
     b.Str(label, 128);
     Net().Send(CH_BULK, b);
-    for (size_t off = 0; off < data.size(); off += kWorldChunk) {
-        size_t n = std::min(kWorldChunk, data.size() - off);
+    g_worldUpload = std::move(data);
+    g_worldUploadOffset = 0;
+}
+
+void PumpWorldUpload() {
+    if (g_worldUpload.empty()) return;
+    // Queue at most four chunks (64 KiB) this frame so a save does not crowd out live updates.
+    for (int chunk = 0; chunk < 4 && g_worldUploadOffset < g_worldUpload.size(); ++chunk) {
+        size_t n = std::min(kWorldChunk, g_worldUpload.size() - g_worldUploadOffset);
         Writer c(C_WORLD_CHUNK);
-        c.U32((uint32_t)off);
-        c.Bytes(data.data() + off, n);
+        c.U32((uint32_t)g_worldUploadOffset);
+        c.Bytes(g_worldUpload.data() + g_worldUploadOffset, n);
         Net().Send(CH_BULK, c);
+        g_worldUploadOffset += n;
     }
+    if (g_worldUploadOffset < g_worldUpload.size()) return;
     Writer e(C_WORLD_END);
     Net().Send(CH_BULK, e);
-    LOGI("World snapshot uploaded (%u bytes)", (unsigned)data.size());
+    LOGI("World snapshot queued for upload (%u bytes)", (unsigned)g_worldUpload.size());
+    g_worldUpload.clear();
 }
 
 bool SameMainScm(const std::vector<uint8_t>& save);  // below
@@ -295,6 +329,9 @@ void SaveConnectSettings() {
     ini.SetInt("voice", "enabled", cfg.voiceEnabled);
     ini.SetInt("voice", "always_on", cfg.voiceAlwaysOn);
     ini.SetInt("voice", "toggle", cfg.voiceToggle);
+    ini.SetInt("chat", "background_opacity", cfg.chatBackgroundOpacity);
+    ini.SetInt("chat", "font_size", cfg.chatFontSize);
+    ini.SetInt("chat", "message_seconds", cfg.chatMessageSeconds);
     // the radar's route switch for those whose coop.ini was made before it had one (a player looked for it, 07.11); only
     // when missing: the file's value is read at the start, an edit made since would be undone
     if (ini.Get("game", "gps").empty()) ini.SetInt("game", "gps", cfg.gps);
@@ -489,6 +526,7 @@ void Leave() {
     StopServerProcess();
     g_isHosting = g_follower = g_prologueWait = g_worldNone = g_progressUpload = g_hasSpot = false;
     g_pendingWorld.clear();
+    g_worldUpload.clear();
     SetPhase(Phase::Idle);
     ui::TheChat().AddSystem(TR("Вы вышли из совместной игры.", "You left the co-op game."));
 }
@@ -581,8 +619,13 @@ void Update() {
     if (!net.Online()) lastStatus = -1;
     static bool wasOnline = false;
     bool online = net.Online();
-    if (online && !wasOnline) OnOnline();
+    if (online && !wasOnline) {
+        OnOnline();
+        online = net.Online();
+    }
     if (!online && wasOnline && g_phase != Phase::Idle) {
+        if (g_isHosting) StopServerProcess();
+        g_isHosting = false;
         SetPhase(Phase::Idle);
         g_error = net.FailReason();
     }
@@ -608,12 +651,15 @@ void Update() {
                 net.Connect("127.0.0.1", g_port, Cfg().nickname, g_password, true);
                 SetPhase(Phase::Connecting);
                 g_connectAttempts = 1;
+                g_lastConnectAttempt = NowMs();
             }
             break;
         case Phase::Connecting:
             if (net.GetState() == Session::State::Failed) {
                 if (g_isHosting && g_connectAttempts < 5 && ServerProcessAlive()) {
+                    if (NowMs() - g_lastConnectAttempt < 500) break;
                     ++g_connectAttempts;
+                    g_lastConnectAttempt = NowMs();
                     net.Connect("127.0.0.1", g_port, Cfg().nickname, g_password, true);
                 } else {
                     Fail(net.FailReason());
@@ -666,21 +712,24 @@ void Update() {
     // host: deliver a fresh snapshot of the world when someone needs it. A new game's prologue is a mission and cannot
     // be saved: the host plays it alone, partners wait. Once it is over (CJ gets on the bike, still unsaveable) they
     // join in a new game of their own, and the first save goes to them.
+    if (!net.IsHost()) g_worldUpload.clear();
     if (online && net.IsHost() && core::IsPlayerReady()) {
         bool prologue = core::InPrologue();
         if (prologue != g_prologue) {
             g_prologue = prologue;
+            if (prologue) g_worldUpload.clear();
             Writer w(prologue ? C_WORLD_NEWGAME : C_WORLD_FOLLOW);  // NEWGAME: the server's world is an older game's
             net.Send(CH_BULK, w);
             if (!prologue) g_worldUploadPending = g_afterPrologue = true;
             LOGI(prologue ? "New game: its prologue runs, partners wait for its end" : "The prologue is over: partners join");
         }
         // a new game launches its prologue in the first frames: no snapshot before it does
-        if (g_worldUploadPending && !prologue && NowMs() - g_gameStartedAt > 5000 && NowMs() - g_snapshotTriedAt > 1000) {
+        if (g_worldUploadPending && g_worldUpload.empty() && !prologue &&
+            NowMs() - g_gameStartedAt > 5000 && NowMs() - g_snapshotTriedAt > 1000) {
             g_snapshotTriedAt = NowMs();
             std::vector<uint8_t> snap;
             if (core::SaveWorldSnapshot(snap)) {
-                UploadWorld(snap, g_progressUpload ? "progress" : "host snapshot");  // the server passes "progress" on
+                BeginWorldUpload(std::move(snap), g_progressUpload ? "progress" : "host snapshot");
                 g_progressUpload = false;
                 g_worldUploadPending = g_keepSent = g_afterPrologue = false;
             } else if (g_afterPrologue && !g_keepSent) {  // the prologue's bike: who asks now joins in a new game
@@ -694,6 +743,7 @@ void Update() {
                 g_keepSent = true;
             }
         }
+        PumpWorldUpload();
     }
 }
 
@@ -862,6 +912,7 @@ void OnGameStarted() {
 }
 
 void OnGameShutdown() {
+    g_worldUpload.clear();
     if (g_phase == Phase::Playing) SetPhase(Phase::LoadingWorld);
 }
 

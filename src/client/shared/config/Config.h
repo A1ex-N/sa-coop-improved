@@ -46,6 +46,11 @@ struct ClientConfig {
     int downSeconds = 60;             // how long a downed player can be brought up (10..600)
     int reviveSeconds = 5;            // how long a partner holds the key to bring one up (1..30)
 
+    // [chat]
+    int chatBackgroundOpacity = 80;  // percentage
+    int chatFontSize = 100;           // percentage of the default size
+    int chatMessageSeconds = 30;
+
     // [voice]
     bool voiceEnabled = true;
     int voiceKey = 0x42;              // VK_B, push to talk

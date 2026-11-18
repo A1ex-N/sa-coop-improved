@@ -55,6 +55,7 @@ struct NetVehicle {
     uint64_t recvMs = 0;
     uint32_t lastTime = 0;
     uint64_t lastSendMs = 0;
+    uint64_t lastAnnounceMs = 0;  // owned: refresh mission vehicle spawns for peers that lost their copy
     uint64_t lastChangeMs = 0;  // owned: last time it moved or was used
     float sentHealth = -1;      // owned: the health last sent (a car on its roof or on fire loses it standing still)
     VehicleLook look;            // owned: last sent; mirror: wanted
@@ -116,7 +117,7 @@ public:
 
 private:
     VehicleSpawn SpawnOf(const NetVehicle& nv) const;
-    void Announce(const NetVehicle& nv);
+    void Announce(NetVehicle& nv);
     bool CreateMirror(const VehicleSpawn& sp);
     void ScanTraffic();
     void HandleCreate(uint8_t from, Reader& r);

@@ -270,6 +270,10 @@ void HandleChatSubmit(const std::string& text) {
         for (size_t i = 1; i < parts.size(); ++i)
             if (!parts[i].empty()) args.push_back(parts[i]);
         std::string cmd = parts.empty() ? "" : ToLower(parts[0]);
+        if ((cmd == "help" || cmd == "?") && !ui::Gfx().Failed() && !Cfg().cleanScreen) {
+            ui::TheChat().OpenHelp();
+            return;
+        }
         if (cmd == "disconnect" || cmd == "quitcoop") {
             flow::Leave();
             return;
@@ -422,6 +426,14 @@ void WriteDefaultConfig(const std::wstring& path) {
         "; Сколько секунд упавшего можно поднять (10-600) и сколько секунд напарник удерживает клавишу (1-30).\r\n"
         "down_seconds = 60\r\n"
         "revive_seconds = 5\r\n"
+        "\r\n"
+        "[chat]\r\n"
+        "; Непрозрачность фона чата в процентах (0–100).\r\n"
+        "background_opacity = 80\r\n"
+        "; Размер текста чата в процентах (80–150).\r\n"
+        "font_size = 100\r\n"
+        "; Сколько секунд сообщения видны в игре (5–120).\r\n"
+        "message_seconds = 30\r\n"
         "\r\n"
         "[voice]\r\n"
         "enabled = 1\r\n"
@@ -739,7 +751,10 @@ bool SavingSnapshot() { return g_snapshot; }
 
 bool SaveWorldSnapshot(std::vector<uint8_t>& out) {
     // the game never saves with the player in a vehicle: loading such a save leaves no player
-    if (!IsPlayerReady() || IsOnMission() || game::FindPlayerPed(0)->InVehicle()) return false;
+    if (!IsPlayerReady() || IsOnMission() || game::Ref<uint8_t>(0xB5F851) || game::PlayerInfos()[0].playerState != 0)
+        return false;
+    game::CPlayerPed* player = game::FindPlayerPed(0);
+    if (player->Health() <= 0.0f || player->InVehicle()) return false;
     std::wstring tmp = Cfg().coopDir + L"world\\host_snapshot.b";
     EnsureDirectory(Cfg().coopDir + L"world");
     std::string ansi = ToAnsiPath(tmp);

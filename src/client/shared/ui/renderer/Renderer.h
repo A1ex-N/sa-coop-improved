@@ -14,7 +14,7 @@ namespace coop::ui {
 
 // NORMAL/SMALL: Arial Bold (SA subtitles / SA-MP chat look); BIG/MENU/MENU_SMALL: wide capitals with tracking,
 // close to the game's menu font.
-enum FontId { FONT_NORMAL = 0, FONT_SMALL = 1, FONT_BIG = 2, FONT_MENU = 3, FONT_MENU_SMALL = 4, FONT_COUNT };
+enum FontId { FONT_NORMAL = 0, FONT_SMALL = 1, FONT_BIG = 2, FONT_MENU = 3, FONT_MENU_SMALL = 4, FONT_CHAT, FONT_CHAT_NAME, FONT_COUNT };
 
 // The game's own fonts (CFont styles).
 enum GameFont { GAME_FONT_GOTHIC = 0, GAME_FONT_SUBTITLES = 1, GAME_FONT_MENU = 2, GAME_FONT_PRICEDOWN = 3 };
@@ -24,6 +24,7 @@ enum TextFlags : uint32_t {
     TEXT_OUTLINE = 2,
     TEXT_CENTER = 4,   // x is the centre
     TEXT_RIGHT = 8,    // x is the right edge
+    TEXT_LIGHT_OUTLINE = 16,
 };
 
 // ARGB helpers
@@ -131,6 +132,7 @@ private:
     std::vector<Vertex> m_verts;
     float m_width = 1920, m_height = 1080;
     int m_fontHeightFor = 0;  // screen height the atlases were built for
+    int m_chatFontSizeFor = 0;
     int m_failedFor = 0;      // screen height they could not be built for
     bool m_ready = false;
     bool m_inFrame = false;

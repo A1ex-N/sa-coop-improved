@@ -145,7 +145,12 @@ Edit `coop/coop.ini` for these options.
 | `[game]` | `gps = 0` | Disable road routes to waypoints and mission destinations |
 | `[game]` | `windowed = 1`, `borderless = 1` | Use a borderless window |
 | `[game]` | `window_title = ...` | Give the window a custom title for recording |
+| `[chat]` | `background_opacity = 80` | Set chat background opacity from 0 to 100 |
+| `[chat]` | `font_size = 100` | Set chat text size from 80 to 150 percent |
+| `[chat]` | `message_seconds = 30` | Show messages for 5 to 120 seconds before fading |
 | `[debug]` | `clean_screen = 1` | Hide the mod's chat, windows and overlays |
+
+The chat settings are also available in-game under F9 → Keybindings → Chat settings.
 
 ## Compatibility and limitations
 

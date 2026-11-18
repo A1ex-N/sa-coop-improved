@@ -618,7 +618,8 @@ void Peds::ScanOwned() {
     CVector chasedAt;
     if (me && OurWantedLevel() == 0)
         for (auto& [id, rp] : Players::Instance().All())
-            if (rp.hasState && rp.state.wanted > 1 && !(rp.state.flags & OnFootState::F_DEAD) && rp.state.area == me->AreaCode())
+            if (rp.HasRecentState(now) && rp.state.wanted > 1 && !(rp.state.flags & OnFootState::F_DEAD) &&
+                rp.state.area == me->AreaCode())
                 chased = true, chasedBy = id, chasedAt = rp.state.pos;
 
     for (int i = 0; i < pool->size; ++i) {
@@ -649,10 +650,13 @@ void Peds::ScanOwned() {
                 !ped->InVehicle() && (!it->second || (AreaOf(ped) != 0 && !GymOpponent(ped, me))))
                 continue;
             if (CVehicle* v = ped->VehicleIfIn(); v && !IsSyncableVehicle(v)) continue;
-            uint16_t id;
-            do {
+            uint16_t id = 0;
+            for (int slot = 0; slot < 4096; ++slot) {
                 id = (uint16_t)(((myId + 1) << 12) | (m_nextId++ & 0x0FFF));
-            } while (m_byId.count(id));
+                if (!m_byId.count(id)) break;
+                id = 0;
+            }
+            if (!id) break;
             NetPed& n = m_byId[id];
             n.netId = id;
             n.ped = ped;
@@ -763,8 +767,9 @@ bool Peds::TakeHanded(NetPed& np) {
 }
 
 CPed* Peds::SpawnMirror(NetPed& np) {
-    if (np.handedUntil) return nullptr;  // handed on: its new owner's announcement brings it, under another number
-    if (TakeHanded(np)) return np.ped;
+    bool takingOver = np.handedUntil && np.handedTo == Net().MyId();
+    if (np.handedUntil && !takingOver) return nullptr;  // its new owner's announcement brings it under another number
+    if (!takingOver && TakeHanded(np)) return np.ped;
     if (OwnGirl(np.model)) return nullptr;  // the other game's girlfriend, on a date here as well
     const PedSyncState& st = np.state;
     int model = np.model;
@@ -781,7 +786,7 @@ CPed* Peds::SpawnMirror(NetPed& np) {
     }
     bool missionPed = np.pedType >= 24 /* PED_TYPE_MISSION1.. */ || (np.model >= kSpecialFirst && np.model <= kSpecialLast);
     // on foot near a third player only: its copy waits (ApplyMirror asks again). One in a car comes with the car.
-    if (!missionPed && !(st.flags & PedSyncState::F_IN_VEHICLE) && FarFromUs(st.pos, st.area, kFootIn)) return nullptr;
+    if (!takingOver && !missionPed && !(st.flags & PedSyncState::F_IN_VEHICLE) && FarFromUs(st.pos, st.area, kFootIn)) return nullptr;
     if (!IsModelLoaded(model)) {
         // streamed in the background, the spawn is retried (a blocking load per ped stalls the frame). A request with no
         // flag lasts one CStreaming::Update (its PurgeRequestList): the model of a mission's person this game has nowhere
@@ -837,7 +842,16 @@ void Peds::HandleCreate(uint8_t from, Reader& r) {
     std::string special = r.Str(16);
     PedSyncState st;
     ReadState(r, st);
-    if (!r.Ok() || from == Net().MyId() || !core::IsPlayerReady() || m_byId.count(id)) return;
+    if (!r.Ok() || from == Net().MyId()) return;
+    if (auto it = m_byId.find(id); it != m_byId.end()) {
+        NetPed& existing = it->second;
+        if (existing.owner == from && existing.model == model && existing.special == special &&
+            (int32_t)(st.time - existing.state.time) >= 0) {
+            existing.state = st;
+            existing.recvMs = NowMs();
+        }
+        return;
+    }
     NetPed& np = m_byId[id];
     np.netId = id;
     np.owner = from;
@@ -847,7 +861,7 @@ void Peds::HandleCreate(uint8_t from, Reader& r) {
     np.state = st;
     np.hasState = true;
     np.recvMs = NowMs();
-    SpawnMirror(np);  // may fail for now: retried from ApplyMirror
+    if (core::IsPlayerReady()) SpawnMirror(np);  // retried from ApplyMirror once the game is ready
 }
 
 void Peds::HandleRemove(uint8_t from, Reader& r) {
@@ -895,7 +909,8 @@ static int OurWantedLevel() {
 bool Peds::CanGiveAwayType(const NetPed& np, uint8_t to) {
     if (np.pedType != PED_TYPE_COP) return CanGiveAwayType(np);
     const RemotePlayer* rp = Players::Instance().Get(to);
-    return rp && rp->hasState && rp->state.wanted > 1 && !(rp->state.flags & OnFootState::F_DEAD) && OurWantedLevel() == 0;
+    return rp && rp->HasRecentState(NowMs()) && rp->state.wanted > 1 && !(rp->state.flags & OnFootState::F_DEAD) &&
+           OurWantedLevel() == 0;
 }
 
 // A passer-by of this game: alive, on foot, not a script's (a mission's ped stays with its script), not the player's
@@ -943,6 +958,10 @@ void Peds::AskForTheirs() {
 }
 
 void Peds::GiveAway(uint16_t netId, uint8_t to) {
+    auto it = m_byId.find(netId);
+    if (it == m_byId.end() || !IsAlive(it->second)) return;
+    // A fresh create on the same reliable channel supplies the model and position before the transfer.
+    Announce(it->second);
     Writer w(proto::G_PED_OWNER);
     w.U16(netId);
     w.U8(to);
@@ -970,7 +989,7 @@ void Peds::HandleOwner(uint8_t from, Reader& r) {
         return;
     }
     if (np.owner != from) return;
-    if (to != Net().MyId() || !IsAlive(np) || IsPedDead(np.ped)) {
+    if (to != Net().MyId()) {
         // to a third player: that game announces it as its own in a moment, and ours waits for it (TakeHanded)
         if (to != Net().MyId() && IsAlive(np) && !IsPedDead(np.ped) && Net().Peers().count(to)) {
             np.handedUntil = NowMs() + 1500, np.handedTo = to;
@@ -978,6 +997,19 @@ void Peds::HandleOwner(uint8_t from, Reader& r) {
         }
         return Forget(id, true);
     }
+    if (!core::IsPlayerReady() || !IsAlive(np)) {
+        // The sender removed its copy. Give this one time to stream its model or vehicle.
+        np.handedUntil = NowMs() + 10000;
+        np.handedTo = to;
+        return;
+    }
+    if (IsPedDead(np.ped)) return Forget(id, true);
+    CompleteHandover(np);
+}
+
+void Peds::CompleteHandover(NetPed& np) {
+    uint16_t id = np.netId;
+    uint8_t from = np.owner;
     bool asked = NowMs() - np.askedMs < 4000;
     uint8_t type = np.pedType;
     Adopt(np);
@@ -1473,7 +1505,7 @@ void Peds::OnPreProcess() {
     if (!ready) return;
     // handed to another player whose announcement never came (it had no copy of it), or taken over by it (TakeHanded: its
     // old record holds no ped then)
-    std::vector<uint16_t> late;
+    std::vector<uint16_t> late, readyToTake;
     for (auto& [id, np] : m_byId)
         if (np.handedUntil && NowMs() > np.handedUntil) late.push_back(id);
     for (uint16_t id : late) Forget(id, true);
@@ -1481,12 +1513,20 @@ void Peds::OnPreProcess() {
         if (np.owner == Net().MyId()) continue;
         ApplyMirror(np);
         CPed* ped = np.ped;
+        if (np.handedUntil && np.handedTo == Net().MyId() && IsAlive(np) && !IsPedDead(ped)) {
+            readyToTake.push_back(id);
+            continue;
+        }
         if (!IsAlive(np) || !ped->RwObject() || ped->InVehicle() || IsPedDead(ped) || HasLastingBodyAnim(ped)) continue;
         // its stance comes back, as the game would give it (see HasLastingBodyAnim)
         Call<0x4D4610, void*>(ped->RwObject(), Field<int32_t>(ped, 0x4D4), 3 /* ANIM_ID_IDLE */, 4.0f);  // CAnimManager::BlendAnimation
         np.baseBlock = kNoAnim;
         np.animFull = false;
         LOGD("Mirror %04X had no lasting animation: its stance is back", np.netId);
+    }
+    for (uint16_t id : readyToTake) {
+        auto it = m_byId.find(id);
+        if (it != m_byId.end() && IsAlive(it->second)) CompleteHandover(it->second);
     }
 }
 
@@ -1615,8 +1655,11 @@ void Peds::MarkLocal(CPed* ped, bool sideJob, bool inCarToo) {
     LOGD("Ped %d (model %d) made by %.8s stays this game's", GetPedRef(ped), (int)ped->ModelIndex(), s ? (const char*)s + 0x08 : "a house");
 }
 
+void Peds::OnSessionStart() { m_nextId = (uint16_t)NowMs(); }
+
 void Peds::OnGameStarted() {
-    m_byId.clear();
+    // Preserve spawn announcements received between shutdown and the next playable world.
+    std::erase_if(m_byId, [](const auto& entry) { return entry.second.ped != nullptr; });
     m_byPtr.clear();
     m_giveAway.clear();
     m_local.clear();
@@ -1625,6 +1668,9 @@ void Peds::OnGameStarted() {
     m_wasReady = false;  // ask the partner for its peds again once the player is ready
 }
 
-void Peds::OnGameShutdown() { OnGameStarted(); }
+void Peds::OnGameShutdown() {
+    m_byId.clear();
+    OnGameStarted();
+}
 
 }  // namespace coop
