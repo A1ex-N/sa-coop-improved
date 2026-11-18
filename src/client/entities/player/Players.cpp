@@ -14,6 +14,7 @@
 #include "entities/ped/Peds.h"
 #include "entities/session/Flow.h"
 #include "entities/vehicle/Vehicles.h"
+#include "features/downed/Downed.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "shared/game/Anim.h"
@@ -1753,6 +1754,21 @@ void HoldSeat(CPed* ped, uint8_t pose) {
     }
 }
 
+static void SyncDownedBody(RemotePlayer& rp) {
+    if (!rp.ped || !IsPedValid(rp.ped) || !rp.HasRecentState(NowMs()) ||
+        !(rp.state.flags & OnFootState::F_DEAD) || !(rp.state.flags2 & OnFootState::F2_DOWNED) ||
+        Ref<uint8_t>(0xB5F851)) return;
+    CPlayerPed* ped = rp.ped;
+    if (ped->InVehicle()) {
+        const auto& p = rp.state.pos;
+        Cmd(0x0362).I(rp.pedHandle).F(p.x).F(p.y).F(p.z - 1.0f).Run();  // WARP_CHAR_FROM_CAR_TO_COORD
+    }
+    if (ped->AttachedTo()) Cmd(0x0465).I(rp.pedHandle).Run();  // DETACH_CHAR_FROM_CAR
+    ped->AreaCode() = rp.state.area;
+    SetEntityPosition(ped, rp.state.pos);
+    ped->MoveSpeed() = {};
+}
+
 void Players::ApplyState(RemotePlayer& rp) {
     CPlayerPed* ped = rp.ped;
     const OnFootState& st = rp.state;
@@ -1795,6 +1811,7 @@ void Players::ApplyState(RemotePlayer& rp) {
     // death is decided by the owner's game (the local ped has all proofs): play it once; after the
     // respawn a fresh ped replaces the dead one, which cannot be revived
     if (st.flags & OnFootState::F_DEAD) {
+        SyncDownedBody(rp);
         if (!rp.deadShown) {
             // its game's fall comes in a message of its own, a moment after the state or before it: waited for briefly
             if (!rp.deadSinceMs) rp.deadSinceMs = NowMs();
@@ -2562,7 +2579,7 @@ void Players::SendLocalState() {
     if (!me) return;
     OnFootState st;
     st.time = (uint32_t)NowMs();
-    st.pos = me->GetPosition();
+    st.pos = downed::Position(me);
     st.vel = me->MoveSpeed() * 50.0f;
     st.rotation = me->CurrentRotation();
     st.aimRotation = me->AimingRotation();
@@ -2617,6 +2634,8 @@ void Players::SendLocalState() {
 
 void Players::OnPostProcess() {
     if (!Net().Online() || !core::IsPlayerReady()) return;
+    // Physics and the death animation can move a body after ApplyState. Restore the shared position before drawing.
+    for (auto& [id, rp] : m_remote) SyncDownedBody(rp);
     if (NowMs() - m_markSentMs > 15000) {  // again now and then: a player who came later or loaded a world has it too
         m_markSentMs = NowMs();
         Writer w(proto::G_MARK_COLOUR);

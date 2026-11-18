@@ -60,6 +60,8 @@ struct Down {
     uint64_t lastMs = 0;
     uint64_t progressMs = 0;    // how long a partner has been bringing us up
     uint64_t noHelperMs = 0;    // since when no partner could come
+    bool floating = false;
+    CVector waterPosition{};
 } g_down;
 
 std::map<uint8_t, uint64_t> g_ticks;  // partner -> when its last G_REVIVE came
@@ -87,14 +89,19 @@ std::string KeyLabel(int vk) {
     return Format("#%d", vk);
 }
 
-// the nearest partner who could bring us up: alive, with a copy here, in our place (area), within reach in the time
+bool CanHelp(const RemotePlayer& rp, CPlayerPed* me, uint64_t now) {
+    return rp.HasRecentState(now) && !(rp.state.flags & OnFootState::F_DEAD) && rp.state.area == me->AreaCode();
+}
+
+// The nearest partner in the same area who could reach the body before the timer runs out.
 const RemotePlayer* HelperFor(CPlayerPed* me) {
     const RemotePlayer* best = nullptr;
     float bestD = kHelpRange;
+    const CVector body = Position(me);
+    const uint64_t now = NowMs();
     for (auto& [id, rp] : Players::Instance().All()) {
-        if (!rp.ped || !rp.hasState || (rp.state.flags & OnFootState::F_DEAD)) continue;
-        if (rp.state.area != me->AreaCode()) continue;
-        float d = (rp.ped->GetPosition() - me->GetPosition()).Length();
+        if (!CanHelp(rp, me, now)) continue;
+        float d = (rp.state.pos - body).Length();
         if (d < bestD) bestD = d, best = &rp;
     }
     return best;
@@ -105,11 +112,32 @@ bool CanGoDown(CPlayerPed* me) {
            !me->InVehicle() && HelperFor(me) != nullptr;
 }
 
-void Begin() {
+void KeepBodyAtWaterSurface(CPlayerPed* me) {
+    if (!g_down.floating && me->AreaCode() == 0) {
+        const CVector p = me->GetPosition();
+        float water, bigWaves, smallWaves;
+        // CWaterLevel::GetWaterLevelNoWaves gives a stable height for the shared body position.
+        if (Call<0x6E8580, bool>(p, &water, &bigWaves, &smallWaves) && p.z <= water + 0.5f) {
+            bool foundGround = false;
+            float ground = Call<0x5696C0, float>(p.x, p.y, p.z + 1.0f, &foundGround, (CEntity**)nullptr);
+            if (!foundGround || ground < water - 0.35f) {
+                g_down.floating = true;
+                g_down.waterPosition = {p.x, p.y, water + 0.15f};
+            }
+        }
+    }
+    if (g_down.floating) {
+        SetEntityPosition(me, g_down.waterPosition);
+        me->MoveSpeed() = {};
+    }
+}
+
+void Begin(CPlayerPed* me) {
     g_down = {};
     g_down.on = true;
     g_down.sinceMs = g_down.lastMs = NowMs();
     g_ticks.clear();
+    KeepBodyAtWaterSurface(me);
     ui::TheChat().AddSystem(TR("Вы упали. Напарник может вас поднять.", "You are down. A partner can bring you up."));
     LOGI("Down: a partner can bring us up for %u s", (unsigned)(BleedMs() / 1000));
 }
@@ -150,6 +178,11 @@ bool StillDown(CPlayerPed* me) {
 // alive again where we fell, as the game's respawn makes CJ (Missions.cpp Revive: SetInitialState and the rest) with what
 // he had: his guns, his stars, the clock. The ground under the body: the lying one's origin is not the standing one's.
 void ReviveInPlace(CPlayerPed* me) {
+    const CVector p = Position(me);
+    if (!g_down.floating && (me->PhysicalFlags() & CPhysical::PF_SUBMERGED_IN_WATER)) {
+        Expire("no safe water surface");
+        return;
+    }
     float full = (float)PlayerInfos()[0].maxHealth;
     if (full < 1.0f) full = 100.0f;
     me->Health() = std::max(1.0f, full * kReviveHealth);
@@ -161,10 +194,16 @@ void ReviveInPlace(CPlayerPed* me) {
     }
     CallMethod<0x60CD20>(me, false);  // CPlayerPed::SetInitialState: the death's tasks and state gone, on foot
     CallMethod<0x5DED50>(me);         // CPed::RestartNonPartialAnims
-    CVector p = me->GetPosition();
-    bool found = false;
-    float z = Call<0x5696C0, float>(p.x, p.y, p.z + 1.0f, &found, (CEntity**)nullptr);  // CWorld::FindGroundZFor3DCoord
-    Cmd(0x00A1).I(GetPedRef(me)).F(p.x).F(p.y).F(found ? z : p.z - 1.0f).Run();       // SET_CHAR_COORDINATES: feet
+    if (g_down.floating) {
+        // CPed::Teleport uses the exact body position. Buoyancy can take over at the surface.
+        CallMethod<0x5E4110>(me, p, false);
+        me->PedFlags() &= ~1u;  // bIsStanding
+        me->MoveSpeed() = {};
+    } else {
+        bool found = false;
+        float ground = Call<0x5696C0, float>(p.x, p.y, p.z + 1.0f, &found, (CEntity**)nullptr);
+        Cmd(0x00A1).I(GetPedRef(me)).F(p.x).F(p.y).F(found ? ground : p.z - 1.0f).Run();
+    }
     Cmd(0x02EB).Run();  // RESTORE_CAMERA_JUMPCUT
     Cmd(0x0373).Run();  // SET_CAMERA_BEHIND_PLAYER
     Call<0x589070>();   // CHud::ResetWastedText
@@ -186,14 +225,16 @@ void ReviverTick(CPlayerPed* me, uint64_t now) {
     uint64_t dt = g_rev.lastMs ? std::min<uint64_t>(now - g_rev.lastMs, 100) : 0;
     g_rev.lastMs = now;
     const RemotePlayer* target = nullptr;
+    float bestDistance = kReviveRange;
     if (me->Health() > 0.0f && !me->InVehicle() && flow::InSharedWorld()) {
         for (auto& [id, rp] : Players::Instance().All()) {
-            if (!rp.ped || !rp.hasState || !(rp.state.flags & OnFootState::F_DEAD) ||
+            if (!rp.HasRecentState(now) || !(rp.state.flags & OnFootState::F_DEAD) ||
                 !(rp.state.flags2 & OnFootState::F2_DOWNED) || rp.state.area != me->AreaCode())
                 continue;
-            if ((rp.ped->GetPosition() - me->GetPosition()).Length() <= kReviveRange) {
+            float distance = (rp.state.pos - me->GetPosition()).Length();
+            if (distance <= bestDistance) {
                 target = &rp;
-                break;
+                bestDistance = distance;
             }
         }
     }
@@ -240,6 +281,7 @@ void Tick() {
     AnnounceDowned();
     if (g_down.on) {
         if (!StillDown(me)) return;
+        KeepBodyAtWaterSurface(me);
         HoldGameLogic();
         uint64_t dt = std::min<uint64_t>(now - g_down.lastMs, 100);
         g_down.lastMs = now;
@@ -250,7 +292,9 @@ void Tick() {
                 continue;
             }
             const RemotePlayer* rp = Players::Instance().Get(it->first);
-            if (rp && rp->ped && (rp->ped->GetPosition() - me->GetPosition()).Length() <= kReviveRangeSeen) helped = true;
+            if (rp && CanHelp(*rp, me, now) && rp->mode == RemotePlayer::Mode::OnFoot &&
+                (rp->state.pos - Position(me)).Length() <= kReviveRangeSeen)
+                helped = true;
             ++it;
         }
         if (helped) g_down.progressMs += dt;
@@ -338,10 +382,14 @@ bool OnKillPlayer() {
     if (!me) return false;
     if (g_down.on) return StillDown(me);
     if (!CanGoDown(me)) return false;
-    Begin();
+    Begin(me);
     return true;
 }
 
 bool IsDown() { return g_down.on; }
+
+game::CVector Position(game::CPlayerPed* player) {
+    return g_down.on && g_down.floating ? g_down.waterPosition : player->GetPosition();
+}
 
 }  // namespace coop::downed

@@ -1,5 +1,10 @@
 #pragma once
 
+namespace game {
+struct CVector;
+struct CPlayerPed;
+}
+
 namespace coop::downed {
 
 // CPlayerInfo::KillPlayer (hooked in Missions.cpp) asks first: true means "we lie down, a partner can still bring us
@@ -9,5 +14,6 @@ bool OnKillPlayer();
 
 // our player lies down now (sent to the others in OnFootState::F2_DOWNED)
 bool IsDown();
+game::CVector Position(game::CPlayerPed* player);
 
 }  // namespace coop::downed
