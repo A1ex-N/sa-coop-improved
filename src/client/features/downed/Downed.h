@@ -14,6 +14,7 @@ bool OnKillPlayer();
 
 // our player lies down now (sent to the others in OnFootState::F2_DOWNED)
 bool IsDown();
+bool IsFloating();
 game::CVector Position(game::CPlayerPed* player);
 
 }  // namespace coop::downed

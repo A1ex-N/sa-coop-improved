@@ -25,8 +25,10 @@
 #include "common/lib/util/Util.h"
 #include "entities/player/Players.h"
 #include "entities/session/Flow.h"
+#include "features/anims/Emotes.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
+#include "shared/game/Anim.h"
 #include "shared/game/Game.h"
 #include "shared/game/Script.h"
 #include "shared/lib/core/Core.h"
@@ -48,6 +50,7 @@ constexpr float kReviveHealth = 0.3f;      // of the full health
 constexpr uint64_t kTickEveryMs = 200;     // the reviver's G_REVIVE
 constexpr uint64_t kTickFreshMs = 700;     // a tick counts this long
 constexpr uint64_t kNoHelperMs = 3000;     // no partner who could come, for this long: the death goes on
+constexpr char kCprBlock[] = "MEDIC", kCprAnimation[] = "CPR";
 enum : uint8_t { OP_TICK = 1 };
 
 uint64_t BleedMs() { return (uint64_t)std::clamp(Cfg().downSeconds, 10, 600) * 1000; }
@@ -74,7 +77,35 @@ struct Reviving {
     uint64_t lastMs = 0;
 } g_rev;
 
+struct Cpr {
+    int handle = -1;
+    int weapon = 0;
+} g_cpr;
+
+bool PlayingCpr(CPlayerPed* me) {
+    void* intelligence = me->Intelligence();
+    void* task = intelligence ? CallMethod<0x681740, void*>((uint8_t*)intelligence + 4, 401) : nullptr;
+    return task && !_stricmp((const char*)task + 0x10, kCprAnimation);  // CTaskSimpleRunNamedAnim::m_animName
+}
+
+void StopCpr() {
+    if (g_cpr.handle < 0) return;
+    CPlayerPed* me = core::IsPlayerReady() ? FindPlayerPed(0) : nullptr;
+    if (me && GetPedRef(me) == g_cpr.handle && me->Health() > 0.0f) {
+        if (PlayingCpr(me)) Cmd(0x0687).I(g_cpr.handle).Run();  // CLEAR_CHAR_TASKS
+        if (g_cpr.weapon && me->ActiveWeapon().type == 0) {
+            for (int i = 0; i < NUM_WEAPON_SLOTS; ++i) {
+                if (me->Weapons()[i].type != g_cpr.weapon) continue;
+                Cmd(0x01B9).I(g_cpr.handle).I(g_cpr.weapon).Run();  // SET_CURRENT_CHAR_WEAPON
+                break;
+            }
+        }
+    }
+    g_cpr = {};
+}
+
 void Reset() {
+    StopCpr();
     g_down = {};
     g_rev = {};
     g_ticks.clear();
@@ -220,7 +251,39 @@ bool KeyHeld() {
     return GetPad(0)->NewState.ButtonTriangle != 0;
 }
 
-// the partner lies by us: kneel (stand by) and hold the key; its game counts the ticks
+void ReviveAnimation(CPlayerPed* me, const RemotePlayer& target) {
+    bool inWater = (target.state.flags2 & OnFootState::F2_DOWNED_IN_WATER) ||
+                   (me->PhysicalFlags() & (CPhysical::PF_TOUCHING_WATER | CPhysical::PF_SUBMERGED_IN_WATER));
+    if (inWater || me->AttachedTo() || Ref<uint8_t>(0xB5F851)) return StopCpr();
+    if (g_cpr.handle >= 0 || !(me->PedFlags() & 1u) || GetPad(0)->DisablePlayerControls || PlayingCpr(me)) return;
+
+    const CVector body = target.state.pos;
+    const CVector from = me->GetPosition();
+    CVector toward{body.x - from.x, body.y - from.y, 0.0f};
+    if (toward.Length2D() < 0.1f) toward = {-std::sin(me->GetHeading()), std::cos(me->GetHeading()), 0.0f};
+    toward = toward.Normalized();
+    const CVector beside = body - toward * 0.85f;
+    bool bodyGroundFound = false, spotGroundFound = false;
+    float bodyGround = Call<0x5696C0, float>(body.x, body.y, body.z + 0.5f, &bodyGroundFound, (CEntity**)nullptr);
+    float spotGround = Call<0x5696C0, float>(beside.x, beside.y, from.z, &spotGroundFound, (CEntity**)nullptr);
+    if (!bodyGroundFound || !spotGroundFound || std::abs(body.z - bodyGround) > 1.4f ||
+        std::abs(bodyGround - spotGround) > 0.45f || std::abs(from.z - 1.0f - spotGround) > 0.45f ||
+        !Call<0x56A490, bool>(&from, &body, true, true, false, true, false, false, false)) return;
+
+    int block = Call<0x4D3990, int>(kCprBlock);  // CAnimManager::GetAnimationBlockIndex
+    if (!anims::NeedBlock(block) || !anim::Find(block, Call<0x53CF30, uint32_t>(kCprAnimation))) return;
+    g_cpr = {GetPedRef(me), (int)me->ActiveWeapon().type};
+    if (g_cpr.weapon) Cmd(0x01B9).I(g_cpr.handle).I(0).Run();  // SET_CURRENT_CHAR_WEAPON
+    SetEntityPosition(me, {beside.x, beside.y, spotGround + 1.0f});
+    me->MoveSpeed() = {};
+    float heading = std::atan2(-toward.x, toward.y);
+    Cmd(0x0173).I(g_cpr.handle).F(heading * 57.29578f).Run();  // SET_CHAR_HEADING
+    // The existing animation replicator sends the named animation to the other games.
+    Cmd(0x0605).I(g_cpr.handle).S(kCprAnimation).S(kCprBlock).F(4.0f)
+        .I(1).I(0).I(0).I(0).I((int)ReviveMs() + 2000).Run();  // TASK_PLAY_ANIM
+}
+
+// Hold the key near the body. The downed player's game counts the ticks.
 void ReviverTick(CPlayerPed* me, uint64_t now) {
     uint64_t dt = g_rev.lastMs ? std::min<uint64_t>(now - g_rev.lastMs, 100) : 0;
     g_rev.lastMs = now;
@@ -239,12 +302,17 @@ void ReviverTick(CPlayerPed* me, uint64_t now) {
         }
     }
     if (!target) {
+        StopCpr();
         g_rev.target = 0xFF;
         g_rev.heldMs = 0;
         return;
     }
-    if (g_rev.target != target->id) g_rev = {target->id, 0, 0, now};
+    if (g_rev.target != target->id) {
+        StopCpr();
+        g_rev = {target->id, 0, 0, now};
+    }
     if (KeyHeld()) {
+        ReviveAnimation(me, *target);
         g_rev.heldMs += dt;
         if (now - g_rev.sentMs >= kTickEveryMs) {
             g_rev.sentMs = now;
@@ -254,6 +322,7 @@ void ReviverTick(CPlayerPed* me, uint64_t now) {
             Net().Send(proto::CH_RELIABLE, w);
         }
     } else {
+        StopCpr();
         g_rev.heldMs -= std::min(g_rev.heldMs, dt * 2);
     }
 }
@@ -280,6 +349,7 @@ void Tick() {
     uint64_t now = NowMs();
     AnnounceDowned();
     if (g_down.on) {
+        StopCpr();
         if (!StillDown(me)) return;
         KeepBodyAtWaterSurface(me);
         HoldGameLogic();
@@ -358,7 +428,10 @@ public:
     void OnPeerLeave(uint8_t id) override {
         g_ticks.erase(id);
         g_announced.erase(id);
-        if (g_rev.target == id) g_rev = {};
+        if (g_rev.target == id) {
+            StopCpr();
+            g_rev = {};
+        }
     }
     void OnPreProcess() override {
         if (g_down.on) HoldGameLogic();
@@ -387,6 +460,7 @@ bool OnKillPlayer() {
 }
 
 bool IsDown() { return g_down.on; }
+bool IsFloating() { return g_down.on && g_down.floating; }
 
 game::CVector Position(game::CPlayerPed* player) {
     return g_down.on && g_down.floating ? g_down.waterPosition : player->GetPosition();

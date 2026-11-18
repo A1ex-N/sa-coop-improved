@@ -2595,7 +2595,8 @@ void Players::SendLocalState() {
                (Field<int32_t>(me, 0x740) == kCellphone ? OnFootState::F_PHONE : 0) |  // CPed::m_nWeaponModelId
                (TaskWalks(me) ? OnFootState::F_TASK_WALK : 0);
     st.flags2 = (Ref<int32_t>(0x96A7CC) != 0 ? OnFootState::F2_DOOR : 0) |  // CEntryExitManager::ms_exitEnterState
-                (core::LocalPlayerDowned() ? OnFootState::F2_DOWNED : 0);
+                (core::LocalPlayerDowned() ? OnFootState::F2_DOWNED : 0) |
+                (downed::IsFloating() ? OnFootState::F2_DOWNED_IN_WATER : 0);
     st.area = me->AreaCode();
     st.moveState = (uint8_t)me->MoveState();
     st.wanted = WantedLevel(me);

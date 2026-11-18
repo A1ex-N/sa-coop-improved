@@ -85,7 +85,7 @@ struct OnFootState {
     };
     // F2_DOOR: going through a door of an entrance (CEntryExitManager::ms_exitEnterState)
     // F2_DOWNED: F_DEAD, but a partner can still bring the owner up (Downed.cpp): its copy lies, the owner is not dead
-    enum : uint8_t { F2_DOOR = 1, F2_DOWNED = 2 };
+    enum : uint8_t { F2_DOOR = 1, F2_DOWNED = 2, F2_DOWNED_IN_WATER = 4 };
 
     void Write(Writer& w) const;
     bool Read(Reader& r);
