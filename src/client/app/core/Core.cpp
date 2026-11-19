@@ -32,6 +32,7 @@
 #include "shared/ui/chat/Chat.h"
 #include "shared/ui/input/Input.h"
 #include "shared/ui/renderer/Renderer.h"
+#include "shared/ui/theme/Theme.h"
 #include "widgets/overlay/Overlay.h"
 
 namespace coop::core {
@@ -427,6 +428,9 @@ void WriteDefaultConfig(const std::wstring& path) {
         "down_seconds = 60\r\n"
         "revive_seconds = 5\r\n"
         "\r\n"
+        "[ui]\r\n"
+        "theme = classic\r\n"
+        "\r\n"
         "[chat]\r\n"
         "; Непрозрачность фона чата в процентах (0–100).\r\n"
         "background_opacity = 80\r\n"
@@ -788,6 +792,7 @@ void Init(void* hModule) {
     EnsureDirectory(coopDir);
     if (!FileExists(coopDir + L"coop.ini")) WriteDefaultConfig(coopDir + L"coop.ini");
     cfg.Load(coopDir);  // reads -coopcfg; does not log
+    ui::LoadThemes();
     std::wstring logPath = cfg.iniPath.substr(0, cfg.iniPath.size() - 4) + L".log";
     log::Open(logPath);
     LOGI("%s %s (protocol %u) loaded, coop dir: %s, config: %s", COOP_NAME, COOP_VERSION_STR, kProtocolVersion,

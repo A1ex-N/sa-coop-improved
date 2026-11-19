@@ -22,8 +22,6 @@
 namespace coop::ui {
 
 namespace {
-using w::kSaBlue, w::kSaMuted, w::kSaRed, w::kSaLine;
-constexpr uint32_t kText = 0xFFE6E9EF;
 
 bool g_visible = false;
 bool g_captured = false;
@@ -221,9 +219,8 @@ void RenderSkinsMenu() {
     g_selected = count ? std::clamp(g_selected, 0, count - 1) : 0;
 
     w::BeginFrame();
-    g.Rect(x, y, W, H, 0xF0000000);
-    g.RectOutline(x, y, W, H, kSaLine, std::max(1.0f, s));
-    g.Text(FONT_MENU, cx, cy, TR("Скины", "Skins"), kSaBlue, TEXT_SHADOW);
+    w::MenuSurface(x, y, W, H, Theme().dialog);
+    w::MenuTitle(cx, cy, TR("Скины", "Skins"));
     cy += mh + 18 * s;
 
     bool moved = false, apply = false, close = false;
@@ -265,11 +262,11 @@ void RenderSkinsMenu() {
     for (int i = (int)g_view; i < std::min(count, (int)g_view + shown + 1); ++i) {
         float ry = cy + ((float)i - g_view) * rowH;
         bool hover = Hovered(cx, ry, listW, rowH) && Hovered(cx, cy, listW, listH);
-        g.Rect(cx, ry, listW, rowH - 3 * s, i == g_selected ? 0xFF16202A : hover ? 0xFF10161D : 0xFF090C10);
+        w::MenuRow(cx, ry, listW, rowH - 3 * s, i == g_selected, hover);
         int model = models[i];
         std::string label = Format("%s  (ID %d)", SkinName(model), model);
         g.Text(FONT_NORMAL, cx + 16 * s, ry + (rowH - lh) * 0.5f, label,
-               i == g_selected ? kSaBlue : kText, TEXT_SHADOW);
+               i == g_selected ? Theme().selectedText : Theme().text, TEXT_SHADOW);
         if (hover && st.lmbPressed) {
             if (g_selected == i && g_clickModel == model && NowMs() - g_clickMs < 450) apply = true;
             g_selected = i;
@@ -280,19 +277,19 @@ void RenderSkinsMenu() {
     g.ClipEnd();
     if (count > shown) {
         float bh = listH * (float)shown / (float)count, by = cy + listH * g_view / (float)count;
-        g.Rect(cx + listW - 4 * s, by, 3 * s, bh, kSaMuted);
+        g.Rect(cx + listW - 4 * s, by, 3 * s, bh, Theme().muted);
     }
 
     float px = cx + listW + 24 * s, py = cy;
-    g.Rect(px, py, previewW, previewW, 0xFF0C1117);
-    g.RectOutline(px, py, previewW, previewW, kSaLine, std::max(1.0f, s));
+    g.Rect(px, py, previewW, previewW, Theme().preview);
+    g.RectOutline(px, py, previewW, previewW, Theme().border, std::max(1.0f, s));
     int selectedModel = count ? models[g_selected] : 0;
     anims::SkinPreviewShow(selectedModel, previewW);
     if (void* texture = anims::PreviewTexture()) g.Image(texture, px, py, previewW, previewW);
     else {
         const char* loading = TR("Загрузка модели…", "Loading model…");
         float loadingW = g.TextWidth(FONT_SMALL, loading);
-        g.Text(FONT_SMALL, px + (previewW - loadingW) * 0.5f, py + previewW * 0.5f, loading, kSaMuted, TEXT_SHADOW);
+        g.Text(FONT_SMALL, px + (previewW - loadingW) * 0.5f, py + previewW * 0.5f, loading, Theme().muted, TEXT_SHADOW);
     }
     const game::CControllerState& controllerState = game::GetPad(0)->NewState;
     if (std::abs(controllerState.RightStickX) > 40)
@@ -304,17 +301,17 @@ void RenderSkinsMenu() {
         g_dragX = -1.0f;
     }
     std::string current = Format(TR("Текущий скин: %d", "Current skin: %d"), skin::Current());
-    g.Text(FONT_SMALL, px, py + previewW + 14 * s, Fit(FONT_SMALL, current, previewW), kSaMuted, TEXT_SHADOW);
+    g.Text(FONT_SMALL, px, py + previewW + 14 * s, Fit(FONT_SMALL, current, previewW), Theme().muted, TEXT_SHADOW);
     g.Text(FONT_SMALL, px, py + previewW + 14 * s + sh + 5 * s,
-           Fit(FONT_SMALL, TR("D-pad / левый стик: курсор", "D-pad / left stick: move cursor"), previewW), kSaMuted, TEXT_SHADOW);
+           Fit(FONT_SMALL, TR("D-pad / левый стик: курсор", "D-pad / left stick: move cursor"), previewW), Theme().muted, TEXT_SHADOW);
     g.Text(FONT_SMALL, px, py + previewW + 14 * s + sh * 2 + 10 * s,
            Fit(FONT_SMALL, TR("Cross: выбрать  Circle: назад  L2/R2: прокрутка",
-                              "Cross: select  Circle: back  L2/R2: scroll"), previewW), kSaMuted, TEXT_SHADOW);
+                              "Cross: select  Circle: back  L2/R2: scroll"), previewW), Theme().muted, TEXT_SHADOW);
 
     float noteY = footY - sh - 12 * s;
-    if (NowMs() < g_noteUntil) g.Text(FONT_SMALL, cx, noteY, Fit(FONT_SMALL, g_note, cw), g_noteError ? kSaRed : kSaBlue, TEXT_SHADOW);
+    if (NowMs() < g_noteUntil) g.Text(FONT_SMALL, cx, noteY, Fit(FONT_SMALL, g_note, cw), g_noteError ? Theme().error : Theme().accent, TEXT_SHADOW);
     else g.Text(FONT_SMALL, cx, noteY, TR("Выберите модель персонажа. CJ возвращает стандартный вид.",
-                                          "Choose a character model. CJ restores the default appearance."), kSaMuted, TEXT_SHADOW);
+                                          "Choose a character model. CJ restores the default appearance."), Theme().muted, TEXT_SHADOW);
 
     bool skinAnimations = skin::UseSkinAnimations();
     if (w::Checkbox("skin-native-animations", cx, footY - rowH - 12 * s,

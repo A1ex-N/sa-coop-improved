@@ -76,6 +76,7 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
     downSeconds = ini.GetInt("game", "down_seconds", downSeconds);
     reviveSeconds = ini.GetInt("game", "revive_seconds", reviveSeconds);
 
+    uiTheme = ToLower(Trim(ini.Get("ui", "theme", uiTheme)));
     chatBackgroundOpacity = std::clamp(ini.GetInt("chat", "background_opacity", chatBackgroundOpacity), 0, 100);
     chatFontSize = std::clamp(ini.GetInt("chat", "font_size", chatFontSize), 80, 150);
     chatMessageSeconds = std::clamp(ini.GetInt("chat", "message_seconds", chatMessageSeconds), 5, 120);

@@ -14,7 +14,8 @@ namespace coop::ui {
 
 // NORMAL/SMALL: Arial Bold (SA subtitles / SA-MP chat look); BIG/MENU/MENU_SMALL: wide capitals with tracking,
 // close to the game's menu font.
-enum FontId { FONT_NORMAL = 0, FONT_SMALL = 1, FONT_BIG = 2, FONT_MENU = 3, FONT_MENU_SMALL = 4, FONT_CHAT, FONT_CHAT_NAME, FONT_COUNT };
+enum FontId { FONT_NORMAL = 0, FONT_SMALL = 1, FONT_BIG = 2, FONT_MENU = 3, FONT_MENU_SMALL = 4, FONT_CHAT, FONT_CHAT_NAME,
+              FONT_TERMINAL, FONT_COUNT };
 
 // The game's own fonts (CFont styles).
 enum GameFont { GAME_FONT_GOTHIC = 0, GAME_FONT_SUBTITLES = 1, GAME_FONT_MENU = 2, GAME_FONT_PRICEDOWN = 3 };

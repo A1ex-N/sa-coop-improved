@@ -147,12 +147,25 @@ Edit `coop/coop.ini` for these options.
 | `[game]` | `gps = 0` | Disable road routes to waypoints and mission destinations |
 | `[game]` | `windowed = 1`, `borderless = 1` | Use a borderless window |
 | `[game]` | `window_title = ...` | Give the window a custom title for recording |
+| `[ui]` | `theme = classic` | Use `classic`, `retro-pc`, or the filename of a custom theme without `.ini` |
 | `[chat]` | `background_opacity = 80` | Set chat background opacity from 0 to 100 |
 | `[chat]` | `font_size = 100` | Set chat text size from 80 to 150 percent |
 | `[chat]` | `message_seconds = 30` | Show messages for 5 to 120 seconds before fading |
 | `[debug]` | `clean_screen = 1` | Hide the mod's chat, windows and overlays |
 
-The chat settings are also available in-game under F9 → Keybindings → Chat settings.
+Theme and chat settings are also available in-game under F9 → Keybindings → Interface.
+
+### Custom themes
+
+Drop a UTF-8 `.ini` file into `coop/themes/` and reopen **F9 → Keybindings → Interface**. The theme appears in
+the selector immediately. Copy [Harbour](package/coop/themes/harbour.ini) for a complete example. Give your copy a
+unique filename using letters, digits, hyphens, or underscores. The names `classic.ini` and `retro-pc.ini` are reserved.
+The package includes Night Glass, Street Atlas, San Andreas, and Amber Terminal in the same folder.
+
+Set `base` to `classic` or `retro-pc` and override only the colours you want to change. Colours use `RRGGBB` or
+`AARRGGBB` hex. Missing or invalid colours inherit the base preset.
+Set `style` under `[theme]` to `classic`, `beveled`, `glass`, `atlas`, `arcade`, or `terminal` to change how
+panels, buttons, and selected rows are drawn. Existing files that use `beveled = true` still work.
 
 ## Compatibility and limitations
 

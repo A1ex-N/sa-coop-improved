@@ -222,6 +222,7 @@ bool Renderer::BuildFonts() {
     bool ok = BuildFont(m_fonts[FONT_NORMAL], L"Arial", normal, FW_BOLD) &&
               BuildFont(m_fonts[FONT_CHAT], L"Arial", chatSize, FW_NORMAL) &&
               BuildFont(m_fonts[FONT_CHAT_NAME], L"Arial", chatSize, FW_BOLD) &&
+              BuildFont(m_fonts[FONT_TERMINAL], L"Consolas", normal, FW_BOLD) &&
               BuildFont(m_fonts[FONT_SMALL], L"Arial", small, FW_BOLD) &&
               BuildFont(m_fonts[FONT_BIG], L"Bahnschrift", big, FW_BOLD, 1.35f, big * 0.12f, true) &&
               BuildFont(m_fonts[FONT_MENU], L"Bahnschrift", menu, FW_BOLD, 1.3f, menu * 0.12f, true) &&

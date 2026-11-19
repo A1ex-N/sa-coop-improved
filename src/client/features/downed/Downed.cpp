@@ -384,17 +384,18 @@ void Handle(uint8_t from, Reader& r) {
 
 void Render() {
     auto& g = ui::Gfx();
+    const auto& theme = ui::Theme();
     float s = g.Scale();
     float cx = g.Width() * 0.5f;
     auto bar = [&](float y, float frac, uint32_t colour) {
         float bw = 320 * s, bh = 8 * s, bx = cx - bw * 0.5f;
-        g.Rect(bx, y, bw, bh, 0xC8000000);
+        g.Rect(bx, y, bw, bh, (theme.style != ui::UiStyle::Classic) ? theme.field : 0xC8000000);
         g.Rect(bx, y, bw * std::clamp(frac, 0.0f, 1.0f), bh, colour);
-        g.RectOutline(bx, y, bw, bh, ui::w::kSaLine, std::max(1.0f, s));
+        g.RectOutline(bx, y, bw, bh, theme.border, std::max(1.0f, s));
     };
     if (g_down.on) {
         float y = g.Height() * 0.58f;
-        g.Text(ui::FONT_BIG, cx, y, TR("ВЫ УПАЛИ", "YOU ARE DOWN"), ui::w::kSaRed, ui::TEXT_CENTER | ui::TEXT_OUTLINE);
+        g.Text(ui::FONT_BIG, cx, y, TR("ВЫ УПАЛИ", "YOU ARE DOWN"), 0xFFC8282D, ui::TEXT_CENTER | ui::TEXT_OUTLINE);
         y += g.LineHeight(ui::FONT_BIG) + 6 * s;
         uint64_t left = BleedMs() - std::min(BleedMs(), NowMs() - g_down.sinceMs);
         g.Text(ui::FONT_NORMAL, cx, y,
@@ -402,10 +403,10 @@ void Render() {
                       (unsigned)((left + 999) / 1000)),
                0xFFFFFFFF, ui::TEXT_CENTER | ui::TEXT_SHADOW);
         y += g.LineHeight(ui::FONT_NORMAL) + 8 * s;
-        bar(y, (float)left / (float)BleedMs(), ui::w::kSaRed);
+        bar(y, (float)left / (float)BleedMs(), theme.error);
         if (g_down.progressMs) {
             y += 18 * s;
-            bar(y, (float)g_down.progressMs / (float)ReviveMs(), ui::w::kSaGreen);
+            bar(y, (float)g_down.progressMs / (float)ReviveMs(), theme.success);
         }
     } else if (g_rev.target != 0xFF) {
         float y = g.Height() * 0.68f;
@@ -415,7 +416,7 @@ void Render() {
                       KeyLabel(Cfg().reviveKey).c_str(), Net().PeerName(g_rev.target).c_str()),
                0xFFFFFFFF, ui::TEXT_CENTER | ui::TEXT_OUTLINE);
         y += g.LineHeight(ui::FONT_NORMAL) + 8 * s;
-        bar(y, (float)g_rev.heldMs / (float)ReviveMs(), ui::w::kSaGreen);
+        bar(y, (float)g_rev.heldMs / (float)ReviveMs(), theme.success);
     }
 }
 

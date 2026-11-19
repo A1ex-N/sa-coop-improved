@@ -49,7 +49,7 @@ void RenderOverlay() {
                               : b.verdict == -1 ? TR("ПОРАЖЕНИЕ", "YOU LOSE")
                               : b.verdict == 2  ? TR("НИЧЬЯ", "A DRAW")
                                                 : nullptr;
-        uint32_t verdictColor = b.verdict == 1 ? w::kSaGreen : b.verdict == -1 ? w::kSaRed : w::kSaBlue;
+        uint32_t verdictColor = b.verdict == 1 ? Theme().success : b.verdict == -1 ? Theme().error : Theme().accent;
         // centred on top, up to 40% of the screen wide: its long texts wrap there. Moved right of the chat's column for
         // them, it stood off the middle, and kept clear of that column it looked squeezed (29.10). Drawn after the chat
         // (Core), it hides the ends of the chat's longest lines while it is there.
@@ -72,19 +72,19 @@ void RenderOverlay() {
         float bh = 2 * pad + (verdict ? g.LineHeight(FONT_BIG) + gap : 0.0f) + title.size() * g.LineHeight(FONT_MENU_SMALL) + gap + 2 * rowH +
                    (wait.empty() ? 0.0f : wait.size() * small + gap) + how.size() * small;
         float bx = (g.Width() - bw) * 0.5f, by = 10 * s, cx = g.Width() * 0.5f, cy = by + pad;
-        g.Rect(bx, by, bw, bh, 0xC8000000);
-        g.RectOutline(bx, by, bw, bh, w::kSaLine, std::max(1.0f, s));
+        g.Rect(bx, by, bw, bh, (Theme().style != UiStyle::Classic) ? Theme().dialog : 0xC8000000);
+        g.RectOutline(bx, by, bw, bh, Theme().border, std::max(1.0f, s));
         if (verdict) {
             g.Text(FONT_BIG, cx, cy, verdict, verdictColor, TEXT_CENTER | TEXT_SHADOW);
             cy += g.LineHeight(FONT_BIG) + gap;
         }
         for (auto& l : title) {
-            g.TextW(FONT_MENU_SMALL, cx, cy, l, w::kSaBlue, TEXT_CENTER);
+            g.TextW(FONT_MENU_SMALL, cx, cy, l, Theme().accent, TEXT_CENTER);
             cy += g.LineHeight(FONT_MENU_SMALL);
         }
         cy += gap;
         auto row = [&](const contest::BoardRow& r, bool me) {
-            uint32_t color = r.leads ? w::kSaGreen : me ? 0xFFFFFFFF : 0xFFD0D0D0;
+            uint32_t color = r.leads ? Theme().success : me ? Theme().strongText : Theme().text;
             g.Text(FONT_NORMAL, bx + pad, cy, r.name, color, TEXT_SHADOW);
             g.Text(FONT_NORMAL, bx + bw - pad, cy, r.value, color, TEXT_RIGHT | TEXT_SHADOW);
             cy += rowH;
@@ -92,12 +92,12 @@ void RenderOverlay() {
         row(b.me, true);
         row(b.them, false);
         for (auto& l : wait) {
-            g.TextW(FONT_SMALL, cx, cy, l, w::kSaBlue, TEXT_CENTER | TEXT_SHADOW);
+            g.TextW(FONT_SMALL, cx, cy, l, Theme().accent, TEXT_CENTER | TEXT_SHADOW);
             cy += small;
         }
         if (!wait.empty()) cy += gap;
         for (auto& l : how) {
-            g.TextW(FONT_SMALL, cx, cy, l, w::kSaMuted, TEXT_CENTER | TEXT_SHADOW);
+            g.TextW(FONT_SMALL, cx, cy, l, Theme().muted, TEXT_CENTER | TEXT_SHADOW);
             cy += small;
         }
         boardBottom = by + bh;
@@ -115,10 +115,10 @@ void RenderOverlay() {
         float w = std::max(g.TextWidth(FONT_MENU, st), hint.empty() ? 0.0f : g.TextWidth(FONT_SMALL, hint)) + 48 * s;
         float h = g.LineHeight(FONT_MENU) + 24 * s + (hint.empty() ? 0.0f : g.LineHeight(FONT_SMALL) + 6 * s);
         float x = (g.Width() - w) * 0.5f, y = std::max(g.Height() * 0.18f, boardBottom + 10 * s);
-        g.Rect(x, y, w, h, 0xD0000000);
-        g.Text(FONT_MENU, g.Width() * 0.5f, y + 12 * s, st, w::kSaBlue, TEXT_CENTER | TEXT_SHADOW);
+        g.Rect(x, y, w, h, (Theme().style != UiStyle::Classic) ? Theme().dialog : 0xD0000000);
+        g.Text(FONT_MENU, g.Width() * 0.5f, y + 12 * s, st, Theme().accent, TEXT_CENTER | TEXT_SHADOW);
         if (!hint.empty())
-            g.Text(FONT_SMALL, g.Width() * 0.5f, y + 18 * s + g.LineHeight(FONT_MENU), hint, w::kSaMuted, TEXT_CENTER | TEXT_SHADOW);
+            g.Text(FONT_SMALL, g.Width() * 0.5f, y + 18 * s + g.LineHeight(FONT_MENU), hint, Theme().muted, TEXT_CENTER | TEXT_SHADOW);
     }
 
     if (Cfg().debugOverlay) {

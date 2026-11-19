@@ -329,6 +329,7 @@ void SaveConnectSettings() {
     ini.SetInt("voice", "enabled", cfg.voiceEnabled);
     ini.SetInt("voice", "always_on", cfg.voiceAlwaysOn);
     ini.SetInt("voice", "toggle", cfg.voiceToggle);
+    ini.Set("ui", "theme", cfg.uiTheme);
     ini.SetInt("chat", "background_opacity", cfg.chatBackgroundOpacity);
     ini.SetInt("chat", "font_size", cfg.chatFontSize);
     ini.SetInt("chat", "message_seconds", cfg.chatMessageSeconds);

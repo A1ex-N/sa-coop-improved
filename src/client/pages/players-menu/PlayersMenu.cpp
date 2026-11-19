@@ -23,8 +23,6 @@
 namespace coop::ui {
 
 namespace {
-using w::kSaBlue, w::kSaMuted, w::kSaGreen, w::kSaRed, w::kSaLine;
-constexpr uint32_t kText = 0xFFE6E9EF;
 
 bool g_visible = false;
 uint8_t g_giveTo = 0xFF;  // the player whose gift is being typed
@@ -56,11 +54,11 @@ bool Hovered(float x, float y, float w, float h) {
 bool MoneyButton(float x, float y, float size, bool enabled) {
     auto& g = Gfx();
     bool hover = enabled && Hovered(x, y, size, size);
-    g.Rect(x, y, size, size, hover ? 0xFF16202A : 0xFF0C1117);
-    g.RectOutline(x, y, size, size, hover ? kSaBlue : kSaLine, std::max(1.0f, g.Scale()));
+    g.Rect(x, y, size, size, hover ? Theme().hover : Theme().preview);
+    g.RectOutline(x, y, size, size, hover ? Theme().accent : Theme().border, std::max(1.0f, g.Scale()));
     float th = size * 0.68f;
     g.GameText(GAME_FONT_PRICEDOWN, x + size * 0.5f, y + (size - th) * 0.5f, "$", th,
-               !enabled ? 0xFF2E4A28 : hover ? 0xFF8CD47A : kSaGreen, TEXT_CENTER);
+               !enabled ? Theme().disabled : Theme().success, TEXT_CENTER);
     return hover && In().State().lmbPressed;
 }
 
@@ -68,9 +66,9 @@ bool MoneyButton(float x, float y, float size, bool enabled) {
 bool GunButton(float x, float y, float size, bool enabled) {
     auto& g = Gfx();
     bool hover = enabled && Hovered(x, y, size, size);
-    g.Rect(x, y, size, size, hover ? 0xFF16202A : 0xFF0C1117);
-    g.RectOutline(x, y, size, size, hover ? kSaBlue : kSaLine, std::max(1.0f, g.Scale()));
-    uint32_t c = !enabled ? 0xFF3A4450 : hover ? 0xFFFFFFFF : 0xFFC8D0DA;
+    g.Rect(x, y, size, size, hover ? Theme().hover : Theme().preview);
+    g.RectOutline(x, y, size, size, hover ? Theme().accent : Theme().border, std::max(1.0f, g.Scale()));
+    uint32_t c = !enabled ? Theme().disabled : hover ? Theme().strongText : Theme().text;
     float u = size / 16.0f;
     g.Rect(x + 3 * u, y + 5 * u, 10 * u, 3 * u, c);      // the barrel
     g.Rect(x + 3.5f * u, y + 8 * u, 3 * u, 4.5f * u, c);  // the grip
@@ -82,9 +80,9 @@ bool GunButton(float x, float y, float size, bool enabled) {
 bool GoButton(float x, float y, float size, bool enabled, bool left) {
     auto& g = Gfx();
     bool hover = enabled && Hovered(x, y, size, size);
-    g.Rect(x, y, size, size, hover ? 0xFF16202A : 0xFF0C1117);
-    g.RectOutline(x, y, size, size, hover ? kSaBlue : kSaLine, std::max(1.0f, g.Scale()));
-    uint32_t c = !enabled ? 0xFF3A4450 : hover ? 0xFFFFFFFF : 0xFFC8D0DA;
+    g.Rect(x, y, size, size, hover ? Theme().hover : Theme().preview);
+    g.RectOutline(x, y, size, size, hover ? Theme().accent : Theme().border, std::max(1.0f, g.Scale()));
+    uint32_t c = !enabled ? Theme().disabled : hover ? Theme().strongText : Theme().text;
     float u = size / 16.0f;
     auto bar = [&](float bx, float by, float bw, float bh) { g.Rect(x + (left ? 16 - bx - bw : bx) * u, y + by * u, bw * u, bh * u, c); };
     bar(3, 7, 7, 2);        // the shaft
@@ -172,31 +170,30 @@ void RenderPlayersMenu() {
     float x = (g.Width() - W) * 0.5f, y = std::max(16 * s, (g.Height() - H) * 0.45f);  // under the contest's board on top
     float cx = x + pad, cy = y + 24 * s;
     w::BeginFrame();
-    g.Rect(x, y, W, H, 0xF0000000);
-    g.RectOutline(x, y, W, H, kSaLine, std::max(1.0f, s));
-    g.Text(FONT_MENU, cx, cy, TR("Игроки", "Players"), kSaBlue, TEXT_SHADOW);
-    g.Text(FONT_SMALL, cx + cw, cy + (mh - sh) * 0.5f, net.ServerName(), kSaMuted, TEXT_RIGHT | TEXT_SHADOW);
+    w::MenuSurface(x, y, W, H, Theme().dialog);
+    w::MenuTitle(cx, cy, TR("Игроки", "Players"));
+    g.Text(FONT_SMALL, cx + cw, cy + (mh - sh) * 0.5f, net.ServerName(), Theme().muted, TEXT_RIGHT | TEXT_SHADOW);
     cy += mh + 18 * s;
 
     float colAct = cx + cw - actW, colPing = colAct - colGap, colMoney = colPing - pingW - colGap,
           colRole = colMoney - moneyW - colGap - roleW;  // right edges of the ping and the money, left of the others
-    g.Text(FONT_MENU_SMALL, cx + 14 * s, cy, TR("Ник", "Nickname"), kSaMuted);
-    g.Text(FONT_MENU_SMALL, colRole, cy, TR("Роль", "Role"), kSaMuted);
-    g.Text(FONT_MENU_SMALL, colMoney, cy, TR("Деньги", "Money"), kSaMuted, TEXT_RIGHT);
-    g.Text(FONT_MENU_SMALL, colPing, cy, TR("Пинг", "Ping"), kSaMuted, TEXT_RIGHT);
+    g.Text(FONT_MENU_SMALL, cx + 14 * s, cy, TR("Ник", "Nickname"), Theme().muted);
+    g.Text(FONT_MENU_SMALL, colRole, cy, TR("Роль", "Role"), Theme().muted);
+    g.Text(FONT_MENU_SMALL, colMoney, cy, TR("Деньги", "Money"), Theme().muted, TEXT_RIGHT);
+    g.Text(FONT_MENU_SMALL, colPing, cy, TR("Пинг", "Ping"), Theme().muted, TEXT_RIGHT);
     cy += ch + 8 * s;
     auto row = [&](uint8_t id, const std::string& name, bool isHost, uint32_t ping, bool me) {
-        g.Rect(cx, cy, cw, rowH, 0xFF090C10);
+        g.Rect(cx, cy, cw, rowH, Theme().field);
         float ty = cy + (rowH - lh) * 0.5f;
         bool talking = me ? VoiceIsTransmitting() : VoiceIsSpeaking(id);
         std::string shown = (talking ? TalkingMark() : std::string()) + label(id, name) + (me ? TR(" (вы)", " (you)") : "");
-        g.Text(FONT_NORMAL, cx + 14 * s, ty, shown, me ? 0xFFFFFFFF : kText, TEXT_SHADOW);
+        g.Text(FONT_NORMAL, cx + 14 * s, ty, shown, me ? Theme().strongText : Theme().text, TEXT_SHADOW);
         g.Text(FONT_MENU_SMALL, colRole, cy + (rowH - ch) * 0.5f, isHost ? TR("хост", "host") : TR("напарник", "partner"),
-               isHost ? kSaBlue : kSaGreen);
+               isHost ? Theme().accent : Theme().success);
         int32_t m = 0;
         if (me ? (m = game::PlayerInfos()[0].money, true) : money::Of(id, m))
-            g.Text(FONT_NORMAL, colMoney, ty, MoneyText(m), kSaGreen, TEXT_RIGHT | TEXT_SHADOW);
-        g.Text(FONT_SMALL, colPing, cy + (rowH - sh) * 0.5f, Format(TR("%u мс", "%u ms"), ping), kSaMuted, TEXT_RIGHT);
+            g.Text(FONT_NORMAL, colMoney, ty, MoneyText(m), Theme().success, TEXT_RIGHT | TEXT_SHADOW);
+        g.Text(FONT_SMALL, colPing, cy + (rowH - sh) * 0.5f, Format(TR("%u мс", "%u ms"), ping), Theme().muted, TEXT_RIGHT);
         if (!me) {
             const RemotePlayer* rp = Players::Instance().Get(id);
             bool inGame = rp && rp->hasState;
@@ -225,14 +222,14 @@ void RenderPlayersMenu() {
         float kx = cx + cw - g.TextWidth(FONT_MENU, cancel), gx = cx + room;
         bool enter = false;
         if (guns.empty()) {
-            g.Text(FONT_SMALL, cx, cy, TR("У вас нет оружия, которое можно передать.", "You have no weapon to give."), kSaMuted,
+            g.Text(FONT_SMALL, cx, cy, TR("У вас нет оружия, которое можно передать.", "You have no weapon to give."), Theme().muted,
                    TEXT_SHADOW);
             cy += sh + 8 * s;
         } else {
             size_t i = 0;
             while (i < guns.size() && guns[i].type != g_gun) ++i;
             if (i == guns.size()) i = 0, g_gun = guns[0].type, g_amount = Rounds(guns[0].ammo);  // gone meanwhile
-            g.Text(FONT_SMALL, cx, cy, Format(TR("Что передать игроку %s", "What to give %s"), net.PeerName(g_giveTo).c_str()), kSaMuted,
+            g.Text(FONT_SMALL, cx, cy, Format(TR("Что передать игроку %s", "What to give %s"), net.PeerName(g_giveTo).c_str()), Theme().muted,
                    TEXT_SHADOW);
             cy += sh + 8 * s;
             std::string label = guns[i].whole ? std::string(weapon_gift::Name(guns[i].type))
@@ -258,7 +255,7 @@ void RenderPlayersMenu() {
         g.Text(FONT_SMALL, cx, cy,
                Format(TR("Сколько передать игроку %s (у вас %s)", "How much to give %s (you have %s)"), net.PeerName(g_giveTo).c_str(),
                       MoneyText(game::PlayerInfos()[0].money).c_str()),
-               kSaMuted, TEXT_SHADOW);
+               Theme().muted, TEXT_SHADOW);
         cy += sh + 8 * s;
         float boxW = 300 * s;
         bool enter = w::TextBox("amount", cx, cy, boxW, rowH, g_amount, 9, false, true, TR("сумма", "amount"));
@@ -270,7 +267,7 @@ void RenderPlayersMenu() {
         cy += rowH;
     }
     cy += 14 * s;
-    if (NowMs() < g_noteUntil) g.Text(FONT_SMALL, cx, cy, g_note, g_noteError ? kSaRed : kSaBlue, TEXT_SHADOW);
+    if (NowMs() < g_noteUntil) g.Text(FONT_SMALL, cx, cy, g_note, g_noteError ? Theme().error : Theme().accent, TEXT_SHADOW);
     cy += sh + 14 * s;
     const char* close = TR("Закрыть", "Close");
     float closeX = cx + cw - g.TextWidth(FONT_MENU, close);

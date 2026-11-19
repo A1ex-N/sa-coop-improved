@@ -23,8 +23,6 @@ namespace coop::ui {
 
 namespace {
 using anims::Emote;
-using w::kSaBlue, w::kSaMuted, w::kSaRed, w::kSaLine;
-constexpr uint32_t kText = 0xFFE6E9EF;
 
 bool g_visible = false;
 bool g_captured = false;  // the keys and the mouse taken (from the first frame drawn, see SetAnimsMenuVisible)
@@ -133,9 +131,8 @@ void RenderAnimsMenu() {
     float x = (g.Width() - W) * 0.5f, y = std::max(16 * s, (g.Height() - H) * 0.45f);
     float cx = x + pad, cy = y + 22 * s, cw = W - 2 * pad;
     w::BeginFrame();
-    g.Rect(x, y, W, H, 0xF0000000);
-    g.RectOutline(x, y, W, H, kSaLine, std::max(1.0f, s));
-    g.Text(FONT_MENU, cx, cy, TR("Анимации", "Animations"), kSaBlue, TEXT_SHADOW);
+    w::MenuSurface(x, y, W, H, Theme().dialog);
+    w::MenuTitle(cx, cy, TR("Анимации", "Animations"));
     cy += mh + 14 * s;
 
     // the keys: up and down the list, left and right between the tabs, Enter plays (U and Esc close it, Core), Page Up and
@@ -215,15 +212,16 @@ void RenderAnimsMenu() {
         float ry = cy + ((float)r - g_view) * rowH;
         if (rows[r] < 0) {
             g.Text(FONT_SMALL, cx + 10 * s, ry + (rowH - sh) * 0.5f, Fit(FONT_SMALL, items[-1 - rows[r]]->pack, listW - 20 * s),
-                   kSaMuted, TEXT_SHADOW);
+                   Theme().muted, TEXT_SHADOW);
             continue;
         }
         int i = rows[r];
         bool hover = Hovered(cx, ry, listW, rowH) && Hovered(cx, cy, listW, listH);
-        g.Rect(cx, ry, listW, rowH - 3 * s, i == sel ? 0xFF16202A : hover ? 0xFF10161D : 0xFF090C10);
-        g.Text(FONT_SMALL, cx + 58 * s, ry + (rowH - sh) * 0.5f, std::to_string(items[i]->id), kSaMuted, TEXT_RIGHT);
+        w::MenuRow(cx, ry, listW, rowH - 3 * s, i == sel, hover);
+        g.Text(FONT_SMALL, cx + 58 * s, ry + (rowH - sh) * 0.5f, std::to_string(items[i]->id),
+               i == sel && (Theme().style != UiStyle::Classic) ? Theme().selectedText : Theme().muted, TEXT_RIGHT);
         g.Text(FONT_NORMAL, cx + 74 * s, ry + (rowH - lh) * 0.5f, Fit(FONT_NORMAL, items[i]->name, listW - 90 * s),
-               i == sel ? kSaBlue : kText, TEXT_SHADOW);
+               i == sel ? Theme().selectedText : Theme().text, TEXT_SHADOW);
         if (hover && st.lmbPressed) {
             if (i == sel && g_clickId == items[i]->id && NowMs() - g_clickMs < 450) play = true;
             sel = i, chosen = items[i], g_clickId = items[i]->id, g_clickMs = NowMs();
@@ -232,27 +230,27 @@ void RenderAnimsMenu() {
     g.ClipEnd();
     if (nr > shown) {  // where the list is scrolled to
         float bh = listH * (float)shown / (float)nr, by = cy + listH * g_view / (float)nr;
-        g.Rect(cx + listW - 4 * s, by, 3 * s, bh, kSaMuted);
+        g.Rect(cx + listW - 4 * s, by, 3 * s, bh, Theme().muted);
     }
     if (!n && g_kind == anims::PACKS)
         for (auto& line : g.Wrap(FONT_SMALL,
                                  Widen(Format(TR("В папке %s нет паков анимаций.", "There are no animation packs in the %s folder."),
                                               anims::PacksFolder().c_str())),
                                  listW))
-            g.TextW(FONT_SMALL, cx, cy, line, kSaMuted, TEXT_SHADOW), cy += sh;
+            g.TextW(FONT_SMALL, cx, cy, line, Theme().muted, TEXT_SHADOW), cy += sh;
     if (!n && g_kind == anims::CUSTOM)
         for (auto& line : g.Wrap(FONT_SMALL,
                                  Widen(Format(TR("Свои анимации берутся из файлов .ifp в папке %s. Игра читает их при запуске.",
                                                  "Own animations come from .ifp files in the %s folder. The game reads them when it starts."),
                                               anims::CustomFolder().c_str())),
                                  listW))
-            g.TextW(FONT_SMALL, cx, cy, line, kSaMuted, TEXT_SHADOW), cy += sh;
+            g.TextW(FONT_SMALL, cx, cy, line, Theme().muted, TEXT_SHADOW), cy += sh;
 
     // the preview: a copy of CJ playing the chosen one, turned by dragging it
     float px = cx + listW + 24 * s, py = y + mh + ch + 62 * s;
-    g.Rect(px, py, pv, pv, 0xFF0C1117);
+    g.Rect(px, py, pv, pv, Theme().preview);
     if (void* tex = anims::PreviewTexture()) g.Image(tex, px, py, pv, pv);
-    g.RectOutline(px, py, pv, pv, kSaLine, std::max(1.0f, s));
+    g.RectOutline(px, py, pv, pv, Theme().border, std::max(1.0f, s));
     if (st.lmb && (g_dragX >= 0.0f || (st.lmbPressed && Hovered(px, py, pv, pv)))) {
         if (g_dragX >= 0.0f) anims::PreviewTurn((st.mouseX - g_dragX) * 0.01f);
         g_dragX = st.mouseX;
@@ -263,8 +261,8 @@ void RenderAnimsMenu() {
 
     // under it: what plays it from the chat, or what the last try said
     float ny = footY - sh - 12 * s;
-    if (NowMs() < g_noteUntil) g.Text(FONT_SMALL, cx, ny, Fit(FONT_SMALL, g_note, cw), g_noteError ? kSaRed : kSaBlue, TEXT_SHADOW);
-    else if (chosen) g.Text(FONT_SMALL, cx, ny, Format(TR("В чате: /anims %u", "In the chat: /anims %u"), chosen->id), kSaMuted, TEXT_SHADOW);
+    if (NowMs() < g_noteUntil) g.Text(FONT_SMALL, cx, ny, Fit(FONT_SMALL, g_note, cw), g_noteError ? Theme().error : Theme().accent, TEXT_SHADOW);
+    else if (chosen) g.Text(FONT_SMALL, cx, ny, Format(TR("В чате: /anims %u", "In the chat: /anims %u"), chosen->id), Theme().muted, TEXT_SHADOW);
     const char* playText = TR("Включить", "Play");
     const char* close = TR("Закрыть", "Close");
     float closeX = cx + cw - g.TextWidth(FONT_MENU, close), playX = closeX - room - 40 * s - g.TextWidth(FONT_MENU, playText);

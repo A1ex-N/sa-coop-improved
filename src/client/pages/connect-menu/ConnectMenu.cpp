@@ -21,15 +21,13 @@
 namespace coop::ui {
 
 namespace {
-using w::kSaBlue, w::kSaSlate, w::kSaMuted, w::kSaRed, w::kSaLine, w::kSaGreen;
-constexpr uint32_t kText = 0xFFE6E9EF;
 constexpr uint32_t kGold = 0xFFE2C063;  // the game's mission-title cream
 
 bool g_visible = false;
 bool g_autoShown = false;
 int g_tab = 0;  // 0 "connect", 1 "create"
 bool g_keysPage = false;  // the mod's keys and the microphone instead of the rest
-bool g_chatPage = false;  // opened from the keybindings page
+bool g_interfacePage = false;  // opened from the keybindings page
 int g_capture = -1;       // the key of that action is being chosen (the next key pressed)
 std::wstring g_nick, g_addr, g_port, g_password;
 std::string g_formError;
@@ -113,9 +111,9 @@ bool KeyField(float x, float y, float w, float h, const std::string& text, bool 
     auto& g = Gfx();
     auto& st = In().State();
     bool hover = st.mouseX >= x && st.mouseX < x + w && st.mouseY >= y && st.mouseY < y + h;
-    g.Rect(x, y, w, h, waiting ? 0xFF16202A : 0xFF0C1117);
-    g.RectOutline(x, y, w, h, waiting || hover ? kSaBlue : kSaLine, std::max(1.0f, g.Scale()));
-    g.Text(FONT_NORMAL, x + w * 0.5f, y + (h - g.LineHeight(FONT_NORMAL)) * 0.5f, text, waiting ? kSaBlue : 0xFFFFFFFF,
+    g.Rect(x, y, w, h, waiting ? Theme().selection : Theme().preview);
+    g.RectOutline(x, y, w, h, waiting || hover ? Theme().accent : Theme().border, std::max(1.0f, g.Scale()));
+    g.Text(FONT_NORMAL, x + w * 0.5f, y + (h - g.LineHeight(FONT_NORMAL)) * 0.5f, text, waiting ? Theme().selectedText : Theme().strongText,
            TEXT_CENTER | TEXT_SHADOW);
     return hover && st.lmbPressed;
 }
@@ -139,7 +137,7 @@ void SetConnectMenuVisible(bool visible) {
     if (visible == g_visible) return;
     g_visible = visible;
     g_keysPage = false;
-    g_chatPage = false;
+    g_interfacePage = false;
     g_capture = -1;
     if (visible) {
         LoadFields();
@@ -184,12 +182,13 @@ void RenderConnectMenu() {
 
     float by = y + H - 20 * s - rowH;     // footer items
     float bodyBottom = by - 12 * s;
+    int themeDirection = 0;
 
     g.Rect(0, 0, g.Width(), g.Height(), 0x99000000);
     w::BeginFrame();
     float cy = w::Panel(x, y, W, H, COOP_NAME) + 8 * s;
     float vx = x + W - 52 * s;
-    g.Text(FONT_MENU_SMALL, vx, y + 36 * s, "v" COOP_VERSION_STR, kSaSlate, TEXT_RIGHT);
+    g.Text(FONT_MENU_SMALL, vx, y + 36 * s, "v" COOP_VERSION_STR, Theme().idle, TEXT_RIGHT);
     // the language switch left of the version, the active one lit; the choice is saved at once
     float lx = vx - g.TextWidth(FONT_MENU_SMALL, "v" COOP_VERSION_STR) - 34 * s;
     for (int en = 1; en >= 0; --en) {
@@ -204,7 +203,7 @@ void RenderConnectMenu() {
         lx -= 52 * s;  // the space before EN
     }
 
-    auto caption = [&](float px, const std::string& text) { g.Text(FONT_MENU_SMALL, px, cy, text, kSaMuted); };
+    auto caption = [&](float px, const std::string& text) { g.Text(FONT_MENU_SMALL, px, cy, text, Theme().muted); };
     // wrapped paragraph, advances cy
     auto para = [&](const std::string& text, uint32_t color, FontId f = FONT_SMALL, bool centre = false) {
         for (const std::wstring& line : g.Wrap(f, Widen(text), cw)) {
@@ -217,9 +216,13 @@ void RenderConnectMenu() {
         return w::Button(id, px - room, py, g.TextWidth(FONT_MENU, label) + 2 * room, rowH, label, enabled, lit);
     };
 
-    if (g_chatPage) {
-        g.Text(FONT_BIG, cx, cy, TR("Настройки чата", "Chat settings"), kSaBlue, TEXT_SHADOW);
+    if (g_interfacePage) {
+        g.Text(FONT_BIG, cx, cy, TR("Интерфейс", "Interface"), Theme().accent, TEXT_SHADOW);
         cy += bh + 22 * s;
+        caption(cx, TR("Тема интерфейса", "UI theme"));
+        cy += ch + 6 * s;
+        themeDirection = w::Selector("uiTheme", cx, cy, 340 * s, rowH, ThemeName());
+        cy += rowH + 18 * s;
         auto setting = [&](const char* id, const char* label, int& value, int min, int max, int step, const char* units) {
             caption(cx, label);
             cy += ch + 6 * s;
@@ -236,7 +239,7 @@ void RenderConnectMenu() {
         setting("chatDuration", TR("Время показа сообщений", "Message visibility"), cfg.chatMessageSeconds, 5, 120, 5, TR(" с", " s"));
     } else if (g_keysPage) {
         // ---- the mod's keys and the microphone, saved in coop.ini at once
-        g.Text(FONT_BIG, cx, cy, TR("Клавиши", "Keybindings"), kSaBlue, TEXT_SHADOW);
+        g.Text(FONT_BIG, cx, cy, TR("Клавиши", "Keybindings"), Theme().accent, TEXT_SHADOW);
         cy += bh + 22 * s;
         const char* labels[kBoundKeys] = {TR("Чат", "Chat"), TR("Сесть пассажиром", "Enter as a passenger"),
                                           TR("Список игроков", "Player list"), TR("Микрофон", "Microphone"),
@@ -250,14 +253,15 @@ void RenderConnectMenu() {
         for (int i = 0; i < kBoundKeys; ++i) {
             const float px = cx + (i / rows) * (width + spacing);
             const float py = cy + (i % rows) * step;
-            g.Text(FONT_MENU_SMALL, px, py, labels[i], kText, TEXT_SHADOW);
+            g.Text(FONT_MENU_SMALL, px, py, labels[i], Theme().text, TEXT_SHADOW);
             const bool waiting = g_capture == i;
             const auto label = waiting ? TR("Нажмите клавишу (Esc — отмена)", "Press a key (Esc to cancel)") : KeyName(*BoundKeys()[i]);
             if (KeyField(px, py + ch + 3 * s, width, rowH, label, waiting)) g_capture = waiting ? -1 : i;
         }
         cy += rows * step + 14 * s;
-        const char* chatSettings = TR("Настройки чата", "Chat settings");
-        const float chatSettingsX = cx + cw - g.TextWidth(FONT_MENU, chatSettings);
+        const char* interfaceLabel = TR("Интерфейс", "Interface");
+        const float interfaceW = g.TextWidth(FONT_MENU, interfaceLabel) + 44 * s;
+        const float interfaceX = cx + cw - interfaceW;
         caption(cx, TR("Голосовая связь", "Voice chat"));
         cy += ch + 6 * s;
         auto& cfg = Cfg();
@@ -265,25 +269,26 @@ void RenderConnectMenu() {
         const char* modes[] = {TR("пока клавиша зажата", "while the key is held"),
                                TR("нажатие включает и выключает", "a press turns it on and off"), TR("всегда включена", "always on"),
                                TR("выключена", "off")};
-        if (int d = w::Selector("voice", cx, cy, chatSettingsX - cx - spacing, rowH, modes[mode])) {
+        if (int d = w::Selector("voice", cx, cy, interfaceX - cx - spacing, rowH, modes[mode])) {
             mode = (mode + d + 4) % 4;
             cfg.voiceEnabled = mode != 3;
             cfg.voiceAlwaysOn = mode == 2;
             cfg.voiceToggle = mode == 1;
             flow::SaveConnectSettings();
         }
-        if (item("chatSettings", chatSettingsX, cy, chatSettings)) {
+        if (w::Button("interface", interfaceX, cy, interfaceW, rowH, interfaceLabel)) {
             g_capture = -1;
-            g_chatPage = true;
+            LoadThemes();
+            g_interfacePage = true;
         }
         cy += rowH;
     } else if (online) {
         // ---- in a session: who we are, the code for the friend, the players
         bool host = net.IsHost();
-        g.Text(FONT_BIG, cx, cy, host ? TR("Сервер запущен", "Server running") : TR("Вы в игре", "Connected"), kSaBlue,
+        g.Text(FONT_BIG, cx, cy, host ? TR("Сервер запущен", "Server running") : TR("Вы в игре", "Connected"), Theme().accent,
                TEXT_SHADOW);
         cy += bh + 2 * s;
-        if (!host) para(Format(TR("Сервер «%s»", "Server \"%s\""), net.ServerName().c_str()), kSaMuted, FONT_NORMAL);
+        if (!host) para(Format(TR("Сервер «%s»", "Server \"%s\""), net.ServerName().c_str()), Theme().muted, FONT_NORMAL);
         cy += 22 * s;
         if (host) {
             caption(cx, TR("Код для друга", "Code for your friend"));
@@ -292,10 +297,10 @@ void RenderConnectMenu() {
             // (a Russian build drew 2QMY as "2qmy")
             const std::string& code = net.InviteCode();
             if (code.empty()) {
-                g.Text(FONT_NORMAL, cx, cy, TR("Узнаём внешний адрес...", "Finding out the external address..."), kSaMuted, TEXT_SHADOW);
+                g.Text(FONT_NORMAL, cx, cy, TR("Узнаём внешний адрес...", "Finding out the external address..."), Theme().muted, TEXT_SHADOW);
                 cy += bh;
             } else {
-                g.Text(FONT_BIG, cx, cy, code, kGold, TEXT_OUTLINE);
+                g.Text(FONT_BIG, cx, cy, code, (Theme().style != UiStyle::Classic) ? Theme().accent : kGold, (Theme().style != UiStyle::Classic) ? 0 : TEXT_OUTLINE);
                 cy += bh + 2 * s;
                 bool copied = NowMs() - g_copiedMs < 1500;
                 if (item("copy", cx, cy, copied ? TR("Скопировано", "Copied") : TR("Скопировать", "Copy"), true, copied))
@@ -309,17 +314,17 @@ void RenderConnectMenu() {
         cy += ch + 8 * s;
         auto row = [&](const std::string& name, bool isHost, uint32_t ping, bool me) {
             float rh = lh + 14 * s;
-            g.Rect(cx, cy, cw, rh, 0xFF090C10);
-            g.Text(FONT_NORMAL, cx + 14 * s, cy + 7 * s, me ? name + TR(" (вы)", " (you)") : name, me ? 0xFFFFFFFF : kText,
+            g.Rect(cx, cy, cw, rh, Theme().field);
+            g.Text(FONT_NORMAL, cx + 14 * s, cy + 7 * s, me ? name + TR(" (вы)", " (you)") : name, me ? Theme().strongText : Theme().text,
                    TEXT_SHADOW);
             g.Text(FONT_MENU_SMALL, cx + cw * 0.55f, cy + (rh - ch) * 0.5f, isHost ? TR("хост", "host") : TR("напарник", "partner"),
-                   isHost ? kSaBlue : kSaGreen);
-            g.Text(FONT_SMALL, cx + cw - 14 * s, cy + (rh - sh) * 0.5f, Format(TR("%u мс", "%u ms"), ping), kSaMuted, TEXT_RIGHT);
+                   isHost ? Theme().accent : Theme().success);
+            g.Text(FONT_SMALL, cx + cw - 14 * s, cy + (rh - sh) * 0.5f, Format(TR("%u мс", "%u ms"), ping), Theme().muted, TEXT_RIGHT);
             cy += rh + 4 * s;
         };
         row(Cfg().nickname, host, net.Rtt(), true);
         for (auto& [id, p] : net.Peers()) row(p.name, p.isHost, p.ping, false);
-        if (host && net.Peers().empty()) para(TR("Ждём друга...", "Waiting for your friend..."), kSaMuted);
+        if (host && net.Peers().empty()) para(TR("Ждём друга...", "Waiting for your friend..."), Theme().muted);
         // the colour of our own mark on the other players' radar (also /blip in the chat), saved and sent at once
         if (Cfg().partnerBlip) {
             static const char* const kColours[] = {"", "white", "red", "green", "yellow"};
@@ -338,26 +343,26 @@ void RenderConnectMenu() {
         // ---- connecting / starting / loading, in the middle of the body
         float barH = 6 * s;
         cy += std::max(0.0f, (bodyBottom - cy - (mh * 2 + 18 * s + barH + 16 * s + sh)) * 0.5f);
-        para(flow::StatusText(), kSaBlue, FONT_MENU, true);
+        para(flow::StatusText(), Theme().accent, FONT_MENU, true);
         cy += 18 * s;
-        g.Rect(cx, cy, cw, barH, 0xFF141A21);
+        g.Rect(cx, cy, cw, barH, Theme().field);
         float p = phase == flow::Phase::WaitingWorld ? net.WorldProgress() : -1.0f;
         if (p >= 0) {
-            g.Rect(cx, cy, cw * std::clamp(p, 0.0f, 1.0f), barH, kSaBlue);
+            g.Rect(cx, cy, cw * std::clamp(p, 0.0f, 1.0f), barH, Theme().accent);
         } else {  // nothing to measure: a block sliding back and forth
             float t = (float)(NowMs() % 1600) / 800.0f;
             float bw = cw * 0.25f;
-            g.Rect(cx + (cw - bw) * (t < 1 ? t : 2 - t), cy, bw, barH, kSaBlue);
+            g.Rect(cx + (cw - bw) * (t < 1 ? t : 2 - t), cy, bw, barH, Theme().accent);
         }
         cy += barH + 16 * s;
         nat::Endpoint ep;
         uint8_t key = 0;
         if (phase == flow::Phase::Connecting && nat::ParseInviteCode(Trim(Narrow(g_addr)), ep, key))
-            para(TR("Подключение по коду может занять до 20 секунд.", "Connecting by code can take up to 20 seconds."), kSaMuted,
+            para(TR("Подключение по коду может занять до 20 секунд.", "Connecting by code can take up to 20 seconds."), Theme().muted,
                  FONT_SMALL, true);
         if (phase == flow::Phase::WaitingWorld && p < 0)
             para(TR("Хост сохраняет мир. Скоро он загрузится у вас.", "The host is saving the world. It will load for you soon."),
-                 kSaMuted, FONT_SMALL, true);
+                 Theme().muted, FONT_SMALL, true);
     } else {
         // ---- the form: the tabs are menu items, the active one lit
         float tx = cx;
@@ -371,7 +376,7 @@ void RenderConnectMenu() {
             tx += tw + room * 2.2f;
         }
         cy += rowH + 4 * s;
-        g.Rect(cx, cy, cw, std::max(1.0f, s), kSaLine);
+        g.Rect(cx, cy, cw, std::max(1.0f, s), Theme().border);
         cy += 16 * s;
 
         caption(cx, TR("Ник", "Nickname"));
@@ -395,8 +400,8 @@ void RenderConnectMenu() {
             caption(cx, TR("Сохранение", "Save"));
             cy += ch + 6 * s;
             if (inGame) {
-                g.Rect(cx, cy, cw, rowH, 0xFF090C10);
-                g.Text(FONT_NORMAL, cx + 12 * s, cy + (rowH - lh) * 0.5f, TR("Текущая игра", "Current game"), kText, TEXT_SHADOW);
+                g.Rect(cx, cy, cw, rowH, Theme().field);
+                g.Text(FONT_NORMAL, cx + 12 * s, cy + (rowH - lh) * 0.5f, TR("Текущая игра", "Current game"), Theme().text, TEXT_SHADOW);
             } else {
                 int d = w::Selector("slot", cx, cy, cw, rowH, g_slots[g_slotIndex].title);
                 if (d) g_slotIndex = (g_slotIndex + d + (int)g_slots.size()) % (int)g_slots.size();
@@ -441,21 +446,21 @@ void RenderConnectMenu() {
         cy += bh + 10 * s + 14 * s;
 
         std::string error = !g_formError.empty() ? g_formError : flow::LastError();
-        if (!error.empty()) para(error, kSaRed, FONT_NORMAL, true);
+        if (!error.empty()) para(error, Theme().error, FONT_NORMAL, true);
         else if (g_tab == 0 && inGame)
             para(TR("Текущая игра закроется. Вместо неё загрузится мир друга.",
                     "Your current game will close, and your friend's world will load instead."),
-                 kSaMuted, FONT_SMALL, true);
+                 Theme().muted, FONT_SMALL, true);
         else if (g_tab == 1 && !inGame && !hostSlot)
-            para(TR("В этом слоте нет сохранения.", "This slot has no save."), kSaMuted, FONT_SMALL, true);
+            para(TR("В этом слоте нет сохранения.", "This slot has no save."), Theme().muted, FONT_SMALL, true);
         else if (g_tab == 1 && !inGame && hostSlot < 0)
             para(TR("Пролог вы пройдёте сами, а друг появится рядом, когда CJ сядет на велосипед.",
                     "You play the prologue alone, and your friend appears next to you when CJ gets on the bike."),
-                 kSaMuted, FONT_SMALL, true);
+                 Theme().muted, FONT_SMALL, true);
     }
 
     // ---- footer: like "Back" on the game's pages
-    g.Rect(cx, bodyBottom, cw, std::max(1.0f, s), kSaLine);
+    g.Rect(cx, bodyBottom, cw, std::max(1.0f, s), Theme().border);
     float fx = cx;
     if (online || busy) {
         const char* leave = online ? TR("Отключиться", "Disconnect") : TR("Отмена", "Cancel");
@@ -463,7 +468,7 @@ void RenderConnectMenu() {
         fx += g.TextWidth(FONT_MENU, leave) + room * 2.2f;
     }
     if (item("keys", fx, by, g_keysPage ? TR("Назад", "Back") : TR("Клавиши", "Keybindings"))) {
-        if (g_chatPage) g_chatPage = false;
+        if (g_interfacePage) g_interfacePage = false;
         else g_keysPage = !g_keysPage;
         g_capture = -1;
     }
@@ -471,6 +476,10 @@ void RenderConnectMenu() {
     if (item("close", cx + cw - g.TextWidth(FONT_MENU, close), by, close)) SetConnectMenuVisible(false);
     w::EndFrame();
     w::DrawCursor();
+    if (themeDirection) {
+        CycleTheme(themeDirection);
+        flow::SaveConnectSettings();
+    }
     // Esc closes even when a text box is focused (handled in OnKeyDown)
 }
 
