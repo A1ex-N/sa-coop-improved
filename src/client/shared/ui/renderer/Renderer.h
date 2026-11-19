@@ -47,6 +47,7 @@ public:
     void Clip(float x, float y, float w, float h);
     void ClipEnd();
     void Rect(float x, float y, float w, float h, uint32_t argb);
+    void Line(float x1, float y1, float x2, float y2, float width, uint32_t argb);
     void RectOutline(float x, float y, float w, float h, uint32_t argb, float t = 1.0f);
     // a picture of the game's (an IDirect3DTexture9*: a RenderWare raster's texture), stretched over the rectangle
     void Image(void* texture, float x, float y, float w, float h, uint32_t argb = 0xFFFFFFFF);

@@ -106,8 +106,10 @@ chat and enter `/unstuck` to clear the local control lock.
 
 ### Pings and revives
 
-Point the camera at an object or surface and press the ping shortcut. Nearby teammates in the same area see a
-pulsing beacon for **6.5 seconds**, matching your chosen radar blip colour.
+Point the camera at an object or surface and press the ping shortcut. Teammates in the same area see a tall beacon
+in your radar blip colour with a white core and a distance label. An edge arrow points toward the latest off-screen
+ping. Pings last **6.5 seconds**. You can also try a ping in single player. When the camera ray misses a surface,
+the beacon appears a short distance ahead.
 
 With shared lives off, fatal damage on foot can leave you downed when a teammate is nearby in the shared world.
 A teammate can approach and hold the revive button for **5 seconds**. The default rescue window is **60 seconds**.

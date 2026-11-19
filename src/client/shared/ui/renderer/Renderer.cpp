@@ -375,6 +375,21 @@ void Renderer::Rect(float x, float y, float w, float h, uint32_t argb) {
     Quad(x, y, w, h, f.whiteU, f.whiteV, f.whiteU, f.whiteV, argb);
 }
 
+void Renderer::Line(float x1, float y1, float x2, float y2, float width, uint32_t argb) {
+    if (!m_inFrame || m_hidden || !(argb >> 24)) return;
+    float dx = x2 - x1, dy = y2 - y1;
+    float length = std::hypot(dx, dy);
+    if (!std::isfinite(length) || length < 0.01f) return;
+    float ox = -dy * width / (2 * length), oy = dx * width / (2 * length);
+    Font& f = m_fonts[FONT_NORMAL];
+    SetTexture(f.tex);
+    Vertex a{x1 + ox - 0.5f, y1 + oy - 0.5f, 0, 1, argb, f.whiteU, f.whiteV};
+    Vertex b{x2 + ox - 0.5f, y2 + oy - 0.5f, 0, 1, argb, f.whiteU, f.whiteV};
+    Vertex c{x1 - ox - 0.5f, y1 - oy - 0.5f, 0, 1, argb, f.whiteU, f.whiteV};
+    Vertex d{x2 - ox - 0.5f, y2 - oy - 0.5f, 0, 1, argb, f.whiteU, f.whiteV};
+    m_verts.insert(m_verts.end(), {a, b, c, b, d, c});
+}
+
 void Renderer::Image(void* texture, float x, float y, float w, float h, uint32_t argb) {
     if (!m_inFrame || !texture) return;
     SetTexture((IDirect3DTexture9*)texture);
