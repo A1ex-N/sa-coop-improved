@@ -12,9 +12,23 @@ This fork builds on [Karimov-Akbar/sa-coop](https://github.com/Karimov-Akbar/sa-
 - A named skin picker with previews, persistent choices, and the selected skin's movement animations.
 - Controller shortcuts and navigation for the co-op menus.
 - A downed state and teammate revives when shared lives are disabled.
-- Camera-targeted ping beacons that use the sender's radar blip colour.
+- Ping beacons that follow the camera or weapon aim and use the sender's radar blip colour.
 - Editable keyboard shortcuts in the co-op menu. Tap and release **Select** to cycle the camera on a controller.
 - Pause-menu input isolation and a local `/unstuck` command for stuck control locks.
+
+### Changes since 0.3.4
+
+- **Chat.** Player names use their radar blip colours without white outlines. The chat panel has adjustable background
+  opacity, text size and message lifetime. `/help` opens a tabbed command reference with mouse and keyboard navigation.
+- **Interface themes.** Switch between Classic and Retro PC in the co-op menu or choose one of five bundled themes.
+  Custom `.ini` themes can change colours and the look of panels, buttons and selected rows.
+- **Pings.** Beacons follow weapon aim when aiming and use the camera otherwise. A brighter beam, target crosshair,
+  distance label and off-screen arrow make pings easier to locate.
+- **Revives.** Downed positions stay synchronized. In water, the downed player is brought to the surface so a teammate
+  can reach them. Land revives play a CPR animation.
+- **Co-op synchronization.** More reliable remote button inputs, vehicle entry and seat selection, vehicle and pedestrian
+  handoffs, melee hit reactions, and shared pickups across short loads. The host sends saves in batches to keep live
+  updates moving, and session cleanup also stops the local server.
 
 ### Updates in 0.3.4
 
@@ -83,7 +97,7 @@ Open the co-op menu (F9 by default), choose **Keybindings**, click a binding, an
 | Action | Keyboard / mouse | Controller |
 |---|---|---|
 | Co-op window | F9 | Select + D-pad Up |
-| Ping the camera's target | F5 | Select + Circle |
+| Ping the camera or weapon aim target | F5 | Select + Circle |
 | Skin picker | F6 | Select + Cross |
 | Animation menu / challenge | U | Select + Square |
 | Players, gifts and teleport requests | F2 | Select + Triangle |
@@ -106,22 +120,30 @@ chat and enter `/unstuck` to clear the local control lock.
 
 ### Pings and revives
 
-Point the camera at an object or surface and press the ping shortcut. Teammates in the same area see a tall beacon
-in your radar blip colour with a white core and a distance label. An edge arrow points toward the latest off-screen
-ping. Pings last **6.5 seconds**. You can also try a ping in single player. When the camera ray misses a surface,
-the beacon appears a short distance ahead.
+Point the camera or aim your weapon at an object or surface and press the ping shortcut. Teammates in the same area
+see a tall beacon in your radar blip colour with a white core, a crosshair at the target and a distance label. An edge
+arrow points toward the latest off-screen ping. Pings last **6.5 seconds** and also work in single player. If the ray
+misses a surface, the beacon appears a short distance ahead.
 
 With shared lives off, fatal damage on foot can leave you downed when a teammate is nearby in the shared world.
 A teammate can approach and hold the revive button for **5 seconds**. The default rescue window is **60 seconds**.
+Land revives play CPR. In water, teammates can revive you at the surface.
 With shared life enabled, any player's death fails the host's story mission.
 
 ### Commands and appearance
 
 | Command | Action |
 |---|---|
-| `/help`, `/players` | Help and player numbers |
+| `/help`, `/?` | Open tabbed command help. Use Tab, Left or Right to switch tabs, and Esc to close |
+| `/players`, `/status` | List players, their numbers and status |
+| `/pm <ID> <message>` | Send a private message |
+| `/me <action>` | Show an action in chat |
+| `/blip [colour]` | Set the radar blip and chat name colour using a colour name, `RRGGBB`, or `default` |
 | `/tp [player]`, `/tphere [player]` | Request teleport to / summon a teammate, answered with Y or N |
-| `/kick <nickname> [reason]` | Host removes a player |
+| `/kick <ID or nickname> [reason]` | Host removes a player |
+| `/say <message>` | Host broadcasts a server announcement |
+| `/disconnect`, `/quitcoop` | Leave the session |
+| `/debug` | Toggle the debug overlay |
 | `/coop` | Open the co-op menu |
 | `/unstuck` | Clear the local control lock |
 | `/anims [number]` | Open the animation menu or play an animation |
