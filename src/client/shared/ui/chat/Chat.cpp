@@ -352,9 +352,8 @@ static void DrawChatBackdrop(Renderer& g, float x, float y, float width, float h
 
 static uint32_t NameOutline(uint32_t color) {
     int red = (color >> 16) & 0xFF, green = (color >> 8) & 0xFF, blue = color & 0xFF;
-    // Choose a contrasting edge while keeping the blip colour in the glyph itself.
     int brightness = (red * 299 + green * 587 + blue * 114) / 1000;
-    return brightness < 120 ? TEXT_LIGHT_OUTLINE : TEXT_OUTLINE;
+    return brightness < 120 ? 0 : TEXT_OUTLINE;
 }
 
 void Chat::Render() {
